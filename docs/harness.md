@@ -1,7 +1,7 @@
 # Running and testing from the command line
 
 `kh2recomp.exe` is the native runner. Without options it opens a window and
-plays. With `--headless` it opens no window and works as a test harness: it
+plays (see [playing.md](playing.md) for controls, renderer and patches). With `--headless` it opens no window and works as a test harness: it
 runs a fixed number of guest frames, saves screenshots, feeds scripted
 controller input and reports what happened through its exit code. That lets
 builds be checked automatically, including by the agent runner.
@@ -24,14 +24,15 @@ extra arguments.
 |---|---|
 | `--iso=PATH` | Disc image, needed for sector reads of `KH2.IMG` and `OVL.IMG` |
 | `--cd-root=DIR` | Directory for loose `cdrom0:` files (default: the ELF's directory) |
-| `--headless` | No window; enables the options below |
+| `--headless` | No window. The test options below also work in a window with the GPU renderer |
+| `--renderer=gpu\|soft` | GS renderer: `gpu` = paraLLEl-GS on Vulkan (default when windowed), `soft` = the runtime's software rasteriser (default headless). Screenshots come from whichever is active |
 | `--frames=N` | Stop after N guest frames (vsyncs) and exit 0 |
 | `--timeout=SEC` | Give up after SEC wall-clock seconds, exit 3 |
 | `--screenshot-every=N` | Save `shots/frame_XXXXXX.png` every N guest frames |
 | `--screenshot-at=A,B,...` | Save screenshots at specific guest frames |
 | `--shots=DIR` | Screenshot directory (default `shots`) |
 | `--input=SCRIPT` | Scripted controller input (file path or inline text, below) |
-| `--status-every=SEC` | Status line interval, 0 to disable (default 2) |
+| `--status-every=SEC` | Status line interval, 0 to disable (default 2 headless, off windowed) |
 | `--sound=native\|off` | Run the disc's sound driver (`LIBSD`, `LIBSSL`) on the emulated IOP, or stub it |
 | `--mute` | Keep the sound driver running but play nothing |
 | `--trace=ADDR[:N][,ADDR...]` | Log the first 8 calls to each guest function (args, return address), hex-dumping N bytes at `a0` with `:N`, and add per-function call counts to the status line |
@@ -41,6 +42,10 @@ extra arguments.
 | `--profile[=MS]` | Sample every host thread's instruction pointer every MS ms (default 1) and print the hottest functions at exit, overall and for the four busiest threads (Windows; uses the build's PDB) |
 | `--dma-log=FRAME,COUNT` | From guest frame FRAME, decode the next COUNT GIF-channel `sceDmaSend` chains: every DMAtag, GIFtag and A+D register write |
 | `--missing=stop\|continue` | On a call into untranslated code: stop (default) or keep going |
+| `--patch=NAME[,...]`, `--list-patches` | Enable switchable game patches ([playing.md](playing.md)) |
+
+Environment: `PS2X_GS_PIXSTATS=1` makes the software rasteriser print, every
+16M pixels, how many failed the alpha, destination-alpha and depth tests.
 
 Guest frames are counted in vsyncs, so a script replays identically however fast
 the host runs.

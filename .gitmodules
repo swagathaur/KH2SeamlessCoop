@@ -4,3 +4,6 @@
 [submodule "third_party/kh2-decomp"]
 	path = third_party/kh2-decomp
 	url = https://github.com/GovanifY/kh2.git
+[submodule "third_party/parallel-gs"]
+	path = third_party/parallel-gs
+	url = https://github.com/Arntzen-Software/parallel-gs.git

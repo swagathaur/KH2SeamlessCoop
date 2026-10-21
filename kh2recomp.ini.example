@@ -1,0 +1,22 @@
+# kh2recomp settings. Copy to kh2recomp.ini next to kh2recomp.exe (or in the
+# directory you start it from). Keys are the command-line options without "--";
+# command-line arguments override this file. See docs/playing.md.
+
+# Game files (paths relative to the working directory, or absolute)
+elf = game/SLPM_666.75
+# iso = Src/Kingdom Hearts II - Final Mix+ (Japan).iso
+cd-root = game
+
+# Display
+ssaa = 4              # super-sampling: 1, 2, 4, 8 or 16
+widescreen = 1        # 16:9 patch
+# fullscreen = 1      # Alt+Enter or F11 toggles at any time
+# window = 1920x1440
+# vsync = 1
+# no-fsr = 1
+
+# Optional game patches (comma-separated): no-letterbox, no-subtitles, no-blur
+# patch = no-letterbox
+
+# Controls
+# swap-confirm = 1    # Japanese layout: right face button confirms

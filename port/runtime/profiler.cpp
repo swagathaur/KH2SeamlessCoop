@@ -69,14 +69,17 @@ void sampler(DWORD self)
                 continue;
             CONTEXT ctx{};
             ctx.ContextFlags = CONTEXT_CONTROL;
-            if (GetThreadContext(h, &ctx))
+            const bool got = GetThreadContext(h, &ctx) != 0;
+            // Resume before recording: the map insert can allocate, and the
+            // suspended thread may hold the heap lock (that deadlocked runs).
+            ResumeThread(h);
+            if (got)
             {
                 // Threads blocked in waits are sampled too; they show up as ntdll
                 // wait functions, and the per-thread tables tell them apart.
                 ++g_samples[tid][ctx.Rip];
                 ++g_total;
             }
-            ResumeThread(h);
         }
         Sleep(g_intervalMs);
     }

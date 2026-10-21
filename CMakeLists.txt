@@ -109,6 +109,15 @@ if(kh2_keep LESS kh2_wanted_count)
 endif()
 
 # --- PS2Recomp runtime -----------------------------------------------------
+# VU1 microprograms compiled to native code (the runtime's
+# tools/compile_vu_programs.py) from recordings of a local run with
+# PS2_VU_PROGRAM_PROFILE=build/vu-profile (tools/win/vu-record.ps1). Recordings
+# are game code and stay local; without them VU1 is interpreted.
+set(KH2_VU_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-profile")
+if(EXISTS "${KH2_VU_PROFILE_DIR}/entries.txt")
+    set(PS2X_VU_PROGRAM_PROFILES "${KH2_VU_PROFILE_DIR}" CACHE STRING "" FORCE)
+    message(STATUS "kh2: compiling VU1 programs recorded in ${KH2_VU_PROFILE_DIR}")
+endif()
 set(PS2X_BUILD_RECOMP OFF CACHE BOOL "" FORCE)
 set(PS2X_BUILD_ANALYZER OFF CACHE BOOL "" FORCE)
 set(PS2X_BUILD_TEST OFF CACHE BOOL "" FORCE)
@@ -174,7 +183,26 @@ foreach(ovl IN LISTS KH2_OVERLAYS)
     list(APPEND KH2_OVERLAY_LIBS kh2_ovl_${ovl})
 endforeach()
 
+# --- Switchable game patches (tools/game_patches.py) -----------------------
+# Recompiled copies of patched functions; optional (empty table if not built).
+if(EXISTS "${KH2_GENERATED_DIR}/patches/game_patch_table.cpp")
+    kh2_generated_library(kh2_patches "${KH2_GENERATED_DIR}/patches")
+    target_include_directories(kh2_patches PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/port/runtime")
+    set(KH2_PATCH_SOURCES)
+    set(KH2_PATCH_LIBS kh2_patches)
+else()
+    set(KH2_PATCH_SOURCES port/runtime/game_patch_table_empty.cpp)
+    set(KH2_PATCH_LIBS)
+endif()
+
 # --- Runner ---------------------------------------------------------------
+# --- GPU renderer: paraLLEl-GS (LGPL-3.0+), Vulkan compute GS emulation -------
+# Built as a library only (no Granite renderer/platform). Its CMake defaults the
+# MSVC runtime to the static CRT; keep the DLL CRT everything else uses.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(PARALLEL_GS_STANDALONE ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/parallel-gs EXCLUDE_FROM_ALL)
+
 add_executable(kh2recomp
     port/runtime/main.cpp
     port/runtime/overlay_manager.cpp
@@ -187,9 +215,14 @@ add_executable(kh2recomp
     port/runtime/gs_image.cpp
     port/runtime/gs_env.cpp
     port/runtime/profiler.cpp
+    port/runtime/pgs_renderer.cpp
+    port/runtime/host_input.cpp
+    port/runtime/game_patches.cpp
+    port/runtime/watchdog.cpp
+    ${KH2_PATCH_SOURCES}
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
-target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ps2_runtime)
+target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs)
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)
     # A PDB for --profile and debuggers: full debug info for the runner and the

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -36,6 +37,10 @@
 #include "cd_callback.h"
 #include "movie_eof.h"
 #include "profiler.h"
+#include "pgs_renderer.h"
+#include "host_input.h"
+#include "game_patches.h"
+#include "watchdog.h"
 
 namespace ps2_stubs
 {
@@ -86,7 +91,7 @@ struct Options
     std::set<uint64_t> screenshotAt;   // ...and/or at these guest frames
     std::string shotDir = "shots";
     std::string input;                 // pad script (file or inline), see --help
-    double statusEvery = 2.0;          // seconds between status lines
+    double statusEvery = -1.0;         // seconds between status lines (default 2 headless, off windowed)
     std::string missing = "stop";      // missing-function policy
     std::string sound = "native";      // native: run the disc's sound IRX on the emulated IOP
     bool mute = false;
@@ -96,6 +101,18 @@ struct Options
     unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
+    std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
+    unsigned ssaa = 1;                 // GPU renderer super-sampling: 1, 2, 4, 8, 16
+    bool fullscreen = false;
+    unsigned windowW = 1280, windowH = 960;
+    bool vsync = false;
+    bool fsr = true;
+    bool swapConfirm = false;          // controller: confirm on the right button instead of the bottom
+    std::string patches;               // game patches to enable, comma-separated
+    uint32_t mashMask = 0;             // --mash: press these buttons every mashEvery frames
+    uint64_t mashEvery = 0;
+    unsigned watchdog = 0;             // seconds without a host-loop iteration before dumping stacks
+    bool listPatches = false;
 };
 
 void usage()
@@ -104,7 +121,7 @@ void usage()
         "usage: kh2recomp <SLPM_666.75> [options]\n"
         "  --iso=PATH              disc image (needed for KH2.IMG/OVL.IMG sector reads)\n"
         "  --cd-root=DIR           directory for loose cdrom0: files (default: the ELF's)\n"
-        "  --headless              no window; enables the test-harness options below\n"
+        "  --headless              no window (the options below also work windowed with --renderer=gpu)\n"
         "  --frames=N              stop after N guest frames (vsyncs), exit 0\n"
         "  --timeout=SEC           give up after SEC wall-clock seconds, exit 3\n"
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
@@ -124,8 +141,34 @@ void usage()
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
         "  --gs-dump=A,B,..        at these guest frames write GS registers and all of GS memory\n"
         "                          (as a 1024x1024 32-bit image) into the screenshot directory\n"
+        "  --renderer=gpu|soft     GS renderer: gpu = paraLLEl-GS on Vulkan (default when windowed),\n"
+        "                          soft = the runtime's software rasteriser (default headless)\n"
+        "  --ssaa=N                GPU renderer super-sampling, N = 1, 2, 4, 8 or 16 (default 1)\n"
+        "  --fullscreen            start fullscreen (Alt+Enter or F11 toggles)\n"
+        "  --window=WxH            window size (default 1280x960)\n"
+        "  --vsync                 present in sync with the display's refresh\n"
+        "  --no-fsr                bilinear upscale to the window instead of FSR 1 + sharpening\n"
+        "  --swap-confirm          controller: right face button confirms (default: bottom button)\n"
+        "  --patch=NAME[,NAME..]   enable game patches (see --list-patches); --widescreen = --patch=widescreen\n"
+        "  --list-patches          list the available game patches and exit\n"
+        "  --watchdog=SEC          print every thread's stack if the host loop stalls this long\n"
+        "                          (default 20 with --headless, off otherwise)\n"
+        "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
+        "                          dialogue whatever the load times)\n"
         "exit codes: 0 frame target reached, 1 runtime stopped early, 2 usage,\n"
         "            3 timeout, 4 initialisation failed\n");
+}
+
+// Active-high pad masks as ps2_pad.cpp uses them.
+uint32_t buttonMask(const std::string &name)
+{
+    static const std::map<std::string, uint32_t> kButtons = {
+        {"SELECT", 0x0001}, {"L3", 0x0002}, {"R3", 0x0004}, {"START", 0x0008}, {"UP", 0x0010},
+        {"RIGHT", 0x0020}, {"DOWN", 0x0040}, {"LEFT", 0x0080}, {"L2", 0x0100}, {"R2", 0x0200},
+        {"L1", 0x0400}, {"R1", 0x0800}, {"TRIANGLE", 0x1000}, {"CIRCLE", 0x2000}, {"CROSS", 0x4000},
+        {"SQUARE", 0x8000}};
+    const auto it = kButtons.find(name);
+    return it == kButtons.end() ? 0u : it->second;
 }
 
 bool parse(int argc, char **argv, Options &o)
@@ -165,6 +208,38 @@ bool parse(int argc, char **argv, Options &o)
             for (std::string t; std::getline(ss, t, ',');)
                 if (!t.empty()) o.gsDumpAt.insert(std::stoull(t));
         }
+        else if (a.rfind("--renderer=", 0) == 0) o.renderer = value(a);
+        else if (a.rfind("--ssaa=", 0) == 0) o.ssaa = static_cast<unsigned>(std::stoul(value(a)));
+        else if (a == "--fullscreen") o.fullscreen = true;
+        else if (a.rfind("--window=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t x = v.find_first_of("xX");
+            if (x == std::string::npos) return false;
+            o.windowW = static_cast<unsigned>(std::stoul(v.substr(0, x)));
+            o.windowH = static_cast<unsigned>(std::stoul(v.substr(x + 1)));
+        }
+        else if (a == "--vsync") o.vsync = true;
+        else if (a == "--no-fsr") o.fsr = false;
+        else if (a == "--swap-confirm") o.swapConfirm = true;
+        else if (a.rfind("--patch=", 0) == 0) o.patches += (o.patches.empty() ? "" : ",") + value(a);
+        else if (a == "--widescreen") o.patches += o.patches.empty() ? "widescreen" : ",widescreen";
+        else if (a.rfind("--mash=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos) return false;
+            o.mashEvery = std::stoull(v.substr(colon + 1));
+            std::stringstream ss(v.substr(0, colon));
+            for (std::string b; std::getline(ss, b, '+');)
+            {
+                const uint32_t m = buttonMask(b);
+                if (!m) { std::fprintf(stderr, "unknown button %s\n", b.c_str()); return false; }
+                o.mashMask |= m;
+            }
+        }
+        else if (a.rfind("--watchdog=", 0) == 0) o.watchdog = static_cast<unsigned>(std::stoul(value(a)));
+        else if (a == "--list-patches") { o.listPatches = true; o.elf = o.elf.empty() ? "-" : o.elf; }
         else if (!a.empty() && a[0] != '-' && o.elf.empty()) o.elf = a;
         else
         {
@@ -184,6 +259,7 @@ struct Harness
     std::chrono::steady_clock::time_point lastStatus;
     uint64_t lastShotFrame = UINT64_MAX;
     uint64_t lastDumpFrame = UINT64_MAX;
+    uint64_t lastGpuFrame = UINT64_MAX;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
@@ -198,7 +274,20 @@ void saveShot(Harness &h, uint64_t frame)
 {
     uint32_t w = 0, hgt = 0;
     h.pixels.clear();
-    if (!h.runtime->gs().copyLatchedHostPresentationFrame(h.pixels, w, hgt) || w == 0 || hgt == 0)
+    bool ok = false;
+    if (kh2pgs::active())
+    {
+        std::vector<uint32_t> rgba;
+        ok = kh2pgs::readback(rgba, w, hgt);
+        if (ok)
+        {
+            h.pixels.resize(rgba.size() * 4);
+            std::memcpy(h.pixels.data(), rgba.data(), h.pixels.size());
+        }
+    }
+    else
+        ok = h.runtime->gs().copyLatchedHostPresentationFrame(h.pixels, w, hgt);
+    if (!ok || w == 0 || hgt == 0)
     {
         std::printf("[harness] frame %llu: no displayable frame yet\n", (unsigned long long)frame);
         return;
@@ -363,18 +452,12 @@ void dumpGs(Harness &h, uint64_t frame)
                 (unsigned long long)frame, txt.c_str(), png.c_str(), (unsigned long long)nonzero);
 }
 
-// Called once per host loop iteration by the runtime when presenting externally.
-bool headlessPump(void *userData)
+// Screenshots, GS dumps, status lines and the frame/time limits; shared by the
+// headless harness and the windowed GPU presenter. False = stop.
+bool harnessTick(Harness &h, uint64_t frame)
 {
-    Harness &h = *static_cast<Harness *>(userData);
     const Options &o = *h.opt;
-    const uint64_t frame = ps2PadCurrentGuestFrame();
-    ++h.presented;
-    // No window, so the runtime's present loop never polls input; publishing an
-    // idle host state is what merges the --input script in (ps2_pad.cpp).
-    ps2PadPublishHostState(0u, 0u, 0x80808080u);
-    kh2movie::poll(*h.runtime); // TODO: also needs a per-frame hook in windowed mode
-
+    kh2watch::beat();
     if (frame != h.lastShotFrame &&
         ((o.screenshotEvery && frame % o.screenshotEvery == 0) || o.screenshotAt.count(frame)))
     {
@@ -417,16 +500,134 @@ bool headlessPump(void *userData)
     }
     return true;
 }
+
+// Called once per host loop iteration by the runtime when presenting externally.
+bool headlessPump(void *userData)
+{
+    Harness &h = *static_cast<Harness *>(userData);
+    const Options &o = *h.opt;
+    const uint64_t frame = ps2PadCurrentGuestFrame();
+    ++h.presented;
+    // No window, so the runtime's present loop never polls input; publishing an
+    // idle host state is what merges the --input script in (ps2_pad.cpp).
+    {
+        // --mash: held for 4 frames out of every N.
+        const uint32_t held = (o.mashEvery && frame % o.mashEvery < 4) ? o.mashMask : 0u;
+        const uint32_t pressed = (o.mashEvery && frame % o.mashEvery == 0) ? o.mashMask : 0u;
+        ps2PadPublishHostState(held, pressed, 0x80808080u);
+    }
+    kh2movie::poll(*h.runtime);
+    kh2patches::tick(h.runtime->memory().getRDRAM());
+    if (kh2pgs::active() && frame != h.lastGpuFrame)
+    {
+        h.lastGpuFrame = frame;
+        kh2pgs::frame(h.runtime->memory().gs(), frame);
+    }
+    return harnessTick(h, frame);
+}
+
+// Called once per host loop iteration when the GPU renderer owns the window.
+bool playPump(void *userData)
+{
+    Harness &h = *static_cast<Harness *>(userData);
+    const uint64_t frame = ps2PadCurrentGuestFrame();
+    kh2input::poll(kh2pgs::windowFocused());
+    kh2movie::poll(*h.runtime);
+    kh2patches::tick(h.runtime->memory().getRDRAM());
+    if (frame != h.lastGpuFrame)
+    {
+        h.lastGpuFrame = frame;
+        if (!kh2pgs::frame(h.runtime->memory().gs(), frame))
+            return false; // window closed
+    }
+    else if (!kh2pgs::pumpWindow())
+        return false;
+    return harnessTick(h, frame);
+}
 } // namespace
+
+// Settings file: kh2recomp.ini next to the executable (or in the working
+// directory). One "key = value" per line, keys as the command-line options
+// without "--" ("ssaa = 4", "fullscreen = 1", "patch = widescreen", "elf =
+// game/SLPM_666.75", "iso = ..."); '#' or ';' start comments. Command-line
+// arguments come after it, so they override it.
+std::vector<std::string> readSettings(const char *argv0)
+{
+    std::vector<std::string> out;
+    std::vector<std::filesystem::path> candidates;
+    std::error_code ec;
+    const auto exe = std::filesystem::absolute(argv0, ec);
+    if (!ec)
+        candidates.push_back(exe.parent_path() / "kh2recomp.ini");
+    candidates.push_back(std::filesystem::current_path(ec) / "kh2recomp.ini");
+    for (const auto &path : candidates)
+    {
+        FILE *f = std::fopen(path.string().c_str(), "r");
+        if (!f)
+            continue;
+        char line[1024];
+        while (std::fgets(line, sizeof(line), f))
+        {
+            std::string l(line);
+            const size_t hash = l.find_first_of("#;");
+            if (hash != std::string::npos)
+                l.erase(hash);
+            auto trim = [](std::string v) {
+                const size_t b = v.find_first_not_of(" \t\r\n");
+                const size_t e = v.find_last_not_of(" \t\r\n");
+                return b == std::string::npos ? std::string() : v.substr(b, e - b + 1);
+            };
+            const size_t eq = l.find('=');
+            const std::string key = trim(eq == std::string::npos ? l : l.substr(0, eq));
+            const std::string val = eq == std::string::npos ? std::string() : trim(l.substr(eq + 1));
+            if (key.empty())
+                continue;
+            if (key == "elf")
+                out.push_back(val);
+            else if (val.empty() || val == "1" || val == "true" || val == "yes" || val == "on")
+                out.push_back("--" + key);
+            else if (val == "0" || val == "false" || val == "no" || val == "off")
+                continue;
+            else
+                out.push_back("--" + key + "=" + val);
+        }
+        std::fclose(f);
+        std::printf("[kh2] settings from %s\n", path.string().c_str());
+        break;
+    }
+    return out;
+}
 
 int main(int argc, char **argv)
 {
     Options opt;
-    if (!parse(argc, argv, opt))
+    std::vector<std::string> merged = readSettings(argv[0]);
+    // An ELF given on the command line replaces one from the settings.
+    bool cliElf = false;
+    for (int i = 1; i < argc; ++i)
+        cliElf |= argv[i][0] != '-';
+    if (cliElf)
+        merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                    [](const std::string &a) { return !a.empty() && a[0] != '-'; }),
+                     merged.end());
+    for (int i = 1; i < argc; ++i)
+        merged.push_back(argv[i]);
+    std::vector<char *> mergedArgv{argv[0]};
+    for (std::string &a : merged)
+        mergedArgv.push_back(a.data());
+    if (!parse(static_cast<int>(mergedArgv.size()), mergedArgv.data(), opt))
     {
         usage();
         return kExitUsage;
     }
+    if (opt.listPatches)
+    {
+        std::printf("game patches (--patch=NAME[,NAME...]):\n");
+        kh2patches::list();
+        return 0;
+    }
+    if (opt.statusEvery < 0)
+        opt.statusEvery = opt.headless ? 2.0 : 0.0;
     if (!opt.input.empty())
     {
 #if defined(_WIN32)
@@ -444,8 +645,30 @@ int main(int argc, char **argv)
     Harness harness;
     harness.runtime = &runtime;
     harness.opt = &opt;
+    const bool wantGpu = opt.renderer == "gpu" || (opt.renderer == "auto" && !opt.headless);
+    bool gpu = false;
+    if (wantGpu)
+    {
+        kh2pgs::Options g;
+        g.superSampling = opt.ssaa;
+        g.windowed = !opt.headless;
+        g.windowWidth = opt.windowW;
+        g.windowHeight = opt.windowH;
+        g.fullscreen = opt.fullscreen;
+        g.vsync = opt.vsync;
+        g.fsr = opt.fsr;
+        gpu = kh2pgs::init(g);
+        if (!gpu && opt.renderer == "gpu" && opt.headless)
+            return kExitInitFailed;
+    }
+    kh2input::Options inputOpt;
+    inputOpt.confirmOnBottom = !opt.swapConfirm;
+    kh2input::init(inputOpt);
+    // Both must precede initialize().
     if (opt.headless)
-        runtime.setExternalPresenter(&headlessPump, &harness); // must precede initialize()
+        runtime.setExternalPresenter(&headlessPump, &harness);
+    else if (gpu)
+        runtime.setExternalPresenter(&playPump, &harness);
 
     if (!runtime.initialize("KH2FM Co-op Recomp"))
     {
@@ -498,6 +721,13 @@ int main(int argc, char **argv)
         kh2dma::install(runtime, opt.dmaLog);
     if (!opt.gsDumpAt.empty())
         runtime.gs().setDebugHistoryPaused(false); // the frontend records nothing while paused (default)
+    if (!opt.patches.empty())
+    {
+        if (!kh2patches::enable(runtime, opt.patches))
+            return kExitUsage;
+        if (kh2patches::aspect() > 0.0f)
+            kh2pgs::setAspect(kh2patches::aspect());
+    }
     if (!opt.trace.empty())
         kh2trace::install(runtime, opt.trace); // last, so it wraps the final implementations
 
@@ -512,10 +742,14 @@ int main(int argc, char **argv)
     }
     if (opt.profileMs)
         kh2prof::start(opt.profileMs);
+    if (opt.watchdog || opt.headless)
+        kh2watch::start(opt.watchdog ? opt.watchdog : 20);
     runtime.run();
+    kh2watch::stop();
     kh2prof::stopAndReport();
+    kh2pgs::shutdown();
 
-    if (!opt.headless)
+    if (!opt.headless && !(opt.frames || opt.timeoutSeconds > 0))
         return 0;
     std::printf("[harness] exit %d after %.1fs, guest frame %llu, overlay %s\n", harness.result,
                 elapsed(harness), (unsigned long long)ps2PadCurrentGuestFrame(), kh2ovl::activeName());

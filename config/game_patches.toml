@@ -1,0 +1,63 @@
+# Optional game patches, switchable at run time (--patch=NAME[,NAME...]).
+#
+# The values come from PCSX2's patch database (github.com/PCSX2/pcsx2_patches,
+# SLPM-66675_F266B00B.pnach), which matches this ELF; authors are credited per
+# patch. tools/game_patches.py turns them into code:
+#   code  instruction (or byte) changes: the functions containing them are
+#         recompiled a second time from a patched copy of the ELF, and the
+#         runtime swaps those versions in when the patch is enabled.
+#   data  memory writes the runtime repeats every frame, as PCSX2 does for
+#         "patch=1" lines.
+# Each entry is [address, value] for a 32-bit write, or [address, value, bits]
+# with bits = 8 or 16 for narrower ones.
+
+[widescreen]
+description = "Render in 16:9 (hor+ field of view), with the UI and subtitles adjusted"
+author = "ElHecht"
+aspect = 1.7777778
+code = [
+    [0x00106e10, 0x3c013f4c],
+    [0x00106e28, 0x3421cccc],
+    [0x00106e2c, 0x4481f800],
+    [0x00106e30, 0x461fa503],
+    [0x00106e54, 0x3c1b3f40],
+    [0x00106e58, 0x449bf000],
+    [0x00106e70, 0x461effc2],
+    [0x00106e74, 0xe61f004c],
+    # Depth of field off: its cutscene scaling breaks at 16:9.
+    [0x00166db6, 0xef, 8],
+    # Subtitles lower on the screen.
+    [0x001ac8d8, 0x240a0190],
+]
+data = [
+    # Cutscene zoom (hides sudden pop-in at the screen edges).
+    [0x0036a0bc, 0x43f90000],
+    # Font proportions.
+    [0x0036ce94, 0x3f400000],
+    [0x0036ce98, 0x3f400000],
+    [0x0036ce9c, 0x3f400000],
+]
+
+[no-letterbox]
+description = "Remove the black bars in cutscenes"
+author = "ElHecht"
+code = [
+    [0x0014ad80, 0x24050000],
+    [0x0014ada8, 0x24050000],
+    [0x0014add0, 0x24050000],
+    [0x0014ae00, 0x24050000],
+]
+
+[no-subtitles]
+description = "Turn off subtitles in cutscenes"
+author = "ElHecht"
+code = [
+    [0x0022d8d4, 0x11e00019],
+]
+
+[no-blur]
+description = "Remove the blur effect in some cutscenes"
+author = "PeterDelta"
+data = [
+    [0x004f4240, 0x00, 8],
+]

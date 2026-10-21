@@ -26,3 +26,9 @@
 0x002F4A78    sceDbcInit                pad2_hle.cpp
 0x002F6528    sceVibGetProfile          pad2_hle.cpp
 0x002F65A8    sceVibSetActParam         pad2_hle.cpp
+# Game patch variants (config/game_patches.toml, port/runtime/game_patches.cpp)
+0x00106DE8    projection set-up         game_patches.cpp (widescreen)
+0x00166DA8    depth of field            game_patches.cpp (widescreen)
+0x001AC8B0    subtitle placement        game_patches.cpp (widescreen)
+0x0014AD58    cutscene letterbox        game_patches.cpp (no-letterbox)
+0x0022D880    cutscene subtitles        game_patches.cpp (no-subtitles)

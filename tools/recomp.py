@@ -181,6 +181,9 @@ def main():
             failed |= recompile(recompiler, f"config/overlays/{name}.toml", f"generated/ovl_{name}", name)
         code, _ = run([sys.executable, "tools/gen_overlay_tables.py"])
         failed |= code
+    if a.only != "overlays" and not failed:
+        code, _ = run([sys.executable, "tools/game_patches.py", "--recompiler", recompiler])
+        failed |= code
     sys.exit(1 if failed else 0)
 
 

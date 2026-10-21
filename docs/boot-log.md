@@ -342,3 +342,34 @@ their hashes in `third_party/PS2Recomp/.kh2-applied-patches` (copies in
 `.kh2-applied/`), reverses from the first changed one and applies the rest,
 so only files those patches touch get new timestamps. Deleting the stamp
 resets the fork and applies everything again (full rebuild).
+
+## 17. GPU renderer (paraLLEl-GS)
+
+A profile of the first 3D scenes on the software rasteriser put ~70% of host
+time in `GSCpuBackend` (texture sampling, pixel writes, triangle set-up) and
+~13% in the VU1 interpreter; the scene ran at 2–3 fps.
+
+`port/runtime/pgs_renderer.cpp` drives
+[paraLLEl-GS](https://github.com/Arntzen-Software/parallel-gs) (Vulkan compute
+GS emulation, `third_party/parallel-gs`) from the same GIF stream:
+`patches/ps2recomp/0011` adds a tap that mirrors every packet the GS frontend
+receives, plus register writes HLE helpers make directly, and a switch that
+stops the CPU backend drawing. The software frontend still runs for register
+state, FINISH/SIGNAL and transfer bookkeeping. Each guest vsync the privileged
+registers are copied over and the frame scanned out, then presented through a
+Vulkan swapchain in our own Win32 window, or read back for screenshots.
+
+Notes:
+- The runtime's `SetGsCrt` leaves `SMODE1`/`SMODE2` zero; paraLLEl-GS needs
+  them to pick the video mode, so NTSC interlaced values are filled in.
+- Granite looks up a per-thread index for its command pools; the guest threads
+  that feed packets must register one (all calls are serialised by a mutex),
+  or every call logs an error, which stalled the first runs.
+
+**Result:** the dream scene and Roxas's room render identically to the software
+path. Unpaced, guest frame 5156 is reached in 60 s instead of ~2450, and the
+game holds full speed at `--speed=1`.
+
+Alongside: our own window means our own input (`host_input.cpp`: XInput with
+rumble through libvib, keyboard), and `--patch` game patches built by
+`tools/game_patches.py` (widescreen and others from PCSX2's patch database).

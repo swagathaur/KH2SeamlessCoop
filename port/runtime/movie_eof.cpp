@@ -50,6 +50,9 @@ void poll(PS2Runtime &runtime)
     uint64_t remaining;
     std::memcpy(&remaining, rdram + kRemainingBytes, sizeof(remaining));
     const bool busy = rdram[kReadBusy] != 0;
+    static unsigned s_polls = 0;
+    if (g_streaming && (++s_polls % 2000u) == 0u)
+        std::printf("[kh2-movie] streaming: remaining=%lld busy=%d\n", (long long)remaining, (int)busy);
     if (g_skip && g_streaming && !busy && remaining != 0)
     {
         // A read that was in flight when the count was zeroed subtracts from it

@@ -19,6 +19,7 @@
 
 #include "ps2_runtime.h"
 #include "runtime/ps2_pad.h"
+#include "host_input.h"
 
 namespace kh2pad2
 {
@@ -121,7 +122,62 @@ void getButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
     finish(ctx, 0);
 }
 
-void zero(uint8_t *, R5900Context *ctx, PS2Runtime *) { finish(ctx, 0); }
+
+// libvib (DualShock 2 vibration). sceVibGetProfile(socket, profile) reports the
+// actuators: bit 0 = small motor (on/off), bit 1 = large motor (0-255).
+void vibGetProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+{
+    const int socket = static_cast<int>(getRegU32(ctx, 4));
+    if (!socketConnected(socket))
+    {
+        finish(ctx, -1);
+        return;
+    }
+    guest(rdram, getRegU32(ctx, 5))[0] = 0x03;
+    finish(ctx, 1);
+}
+
+// sceVibSetActParam(socket, profileSize, profile, dataSize, data): the data
+// holds one field per actuator named in the profile, packed from bit 0 in
+// profile order: 1 bit for the small motor, then 8 bits for the large one.
+void vibSetActParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+{
+    const int socket = static_cast<int>(getRegU32(ctx, 4));
+    const int profileSize = static_cast<int>(getRegU32(ctx, 5));
+    const uint8_t *profile = guest(rdram, getRegU32(ctx, 6));
+    const int dataSize = static_cast<int>(getRegU32(ctx, 7));
+    const uint8_t *data = guest(rdram, getRegU32(ctx, 8));
+    static bool loggedArgs = false;
+    if (!loggedArgs)
+    {
+        loggedArgs = true;
+        std::printf("[pad2] first sceVibSetActParam(a0=%d a1=%d a2=0x%08X a3=%d t0=0x%08X)\n", socket, profileSize,
+                    getRegU32(ctx, 6), dataSize, getRegU32(ctx, 8));
+    }
+    if (!socketConnected(socket) || g_socketPort[socket] != 0 || profileSize < 1 || dataSize < 1)
+    {
+        finish(ctx, 1);
+        return;
+    }
+    uint32_t bits = data[0] | (dataSize > 1 ? uint32_t(data[1]) << 8 : 0u);
+    float small = 0.0f, large = 0.0f;
+    if (profile[0] & 0x01)
+    {
+        small = (bits & 1u) ? 1.0f : 0.0f;
+        bits >>= 1;
+    }
+    if (profile[0] & 0x02)
+        large = float(bits & 0xFFu) / 255.0f;
+    static int logged = 0;
+    if (logged < 8 && (small > 0 || large > 0))
+    {
+        ++logged;
+        std::printf("[pad2] vibration small=%.0f large=%.2f (profile %02x data %02x %02x)\n", small, large, profile[0],
+                    data[0], dataSize > 1 ? data[1] : 0);
+    }
+    kh2input::setRumble(small, large);
+    finish(ctx, 1);
+}
 } // namespace
 
 bool install(PS2Runtime &runtime)
@@ -138,8 +194,8 @@ bool install(PS2Runtime &runtime)
         {kGetButtonInfo, &getButtonInfo, "scePad2GetButtonInfo"},
         {kSetButtonOrder, &ok, "scePad2SetButtonOrder"},
         {kDbcInit, &ok, "sceDbcInit"},
-        {kVibGetProfile, &zero, "sceVibGetProfile"},
-        {kVibSetActParam, &ok, "sceVibSetActParam"},
+        {kVibGetProfile, &vibGetProfile, "sceVibGetProfile"},
+        {kVibSetActParam, &vibSetActParam, "sceVibSetActParam"},
     };
     bool all = true;
     for (const Binding &b : bindings)

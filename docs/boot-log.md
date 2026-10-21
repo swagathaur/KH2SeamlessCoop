@@ -281,3 +281,23 @@ Replacements now call originals through `kh2::callOriginal`
 (`port/runtime/hle_call.h`), which the forwarders honour.
 
 **Result:** the full opening movie plays with correct colour.
+
+## 15. Movie never ended
+
+**Symptom:** after the opening movie's last frame the screen stayed white;
+the picture thread was parked in `sceMpegGetPicture`.
+
+**Cause:** the runtime's libmpeg learns that a stream has run out from the
+`sceCdSt*` streaming API (as Dragon Quest VIII feeds it). KH2's movie player
+reads the PSS with plain `sceCdRead`, so nothing ever said "no more data".
+
+**Fix:** `port/runtime/movie_eof.cpp` watches ovl_movie's own state (bytes left
+to read, a u64 at `0x01F294E0`; read in flight, a byte at `0x01F294E8`) each
+frame and calls the runtime's `notifyMpegCdStreamStart`/`notifyMpegCdStreamEof`.
+The harness gained `--skip-movies` (end each movie as soon as it starts) and
+`--speed=0` (unpaced) for reaching gameplay quickly.
+
+**Result:** the opening (a 258 MB PSS) plays to the end and the game moves on
+to the first in-engine scene, Roxas's sepia dream. That scene renders its
+background but the 3D geometry only as scattered points, at ~3 fps: next is
+the VIF1/VU1 path, which KH2 uses for all 3D.

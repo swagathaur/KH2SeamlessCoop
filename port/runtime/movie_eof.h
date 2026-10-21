@@ -5,6 +5,8 @@ class PS2Runtime;
 
 namespace kh2movie
 {
+// --skip-movies: end each movie as soon as it starts streaming.
+void setSkip(bool skip);
 // Call once per presented frame.
 void poll(PS2Runtime &runtime);
 } // namespace kh2movie

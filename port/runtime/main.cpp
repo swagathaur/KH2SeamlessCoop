@@ -91,6 +91,7 @@ struct Options
     std::string sound = "native";      // native: run the disc's sound IRX on the emulated IOP
     bool mute = false;
     std::string trace;                 // comma-separated guest function addresses
+    bool skipMovies = false;           // --skip-movies
     double speed = 1.0;                // --speed: guest time vs wall time, 0 = as fast as possible
     unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
@@ -117,6 +118,7 @@ void usage()
         "  --sound=native|off      run LIBSD/LIBSSL on the emulated IOP, or stub them (default native)\n"
         "  --mute                  keep the sound driver running but play nothing\n"
         "  --trace=ADDR[,ADDR..]   log the first calls to these guest functions and count them\n"
+        "  --skip-movies           end each movie as soon as it starts (debugging)\n"
         "  --speed=X               run guest time X times real time (0 = unpaced, as fast as possible)\n"
         "  --profile[=MS]          sample host threads every MS ms (default 1) and print hot functions\n"
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
@@ -154,6 +156,7 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--trace=", 0) == 0) o.trace = value(a);
         else if (a.rfind("--dma-log=", 0) == 0) o.dmaLog = value(a);
         else if (a == "--profile") o.profileMs = 1;
+        else if (a == "--skip-movies") o.skipMovies = true;
         else if (a.rfind("--speed=", 0) == 0) o.speed = std::stod(value(a));
         else if (a.rfind("--profile=", 0) == 0) o.profileMs = std::max(1, std::stoi(value(a)));
         else if (a.rfind("--gs-dump=", 0) == 0)
@@ -468,6 +471,7 @@ int main(int argc, char **argv)
     harness.start = harness.lastStatus = std::chrono::steady_clock::now();
     std::printf("[kh2] starting at 0x%08X\n", runtime.cpu().pc);
     std::fflush(stdout);
+    kh2movie::setSkip(opt.skipMovies);
     if (opt.speed != 1.0)
     {
         runtime.eeScheduler().setHostSpeed(opt.speed);

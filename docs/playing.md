@@ -142,22 +142,25 @@ of the executable, and the patched versions are swapped in at start-up.
 ## English text
 
 The disc is Japanese, but the English text of the PC release (KINGDOM HEARTS
-HD 1.5+2.5 ReMIX, Steam or Epic) can be used in its place. Extract it once:
+HD 1.5+2.5 ReMIX, Steam or Epic) can be used in its place. Extract it once
+(the second command adds the menus, layouts and other pictures with words in
+them):
 
 ```
 python tools/egs_extract.py "<game folder>\Image\dt" game\files\english --english
+python tools/egs_extract.py "<game folder>\Image\dt" game\files\english --english-images
 ```
 
 then start with `--english` (or `english = 1` in `kh2recomp.ini`). Dialogue,
 menus, tutorials and item names are in English, with the international font;
 the PC's button prompts become the PS2 button icons, laid out for this game
-(circle confirms, cross jumps). Text drawn as pictures (the title menu, the
-PAUSE banner, some menu headings) stays Japanese for now, and so do the voices.
+(circle confirms, cross jumps). Still Japanese: the area name cards (they live
+inside the map files), the small captions on the title menu, and the voices.
 
 How it works: the files under `game\files\english` replace the game's own
-`msg\jp\*` files by name (any folder given with `--override-dir` works the same
-way, for mods), and the game's text code is told it is not running the
-Japanese version (`port/runtime/english_text.h`).
+`msg\jp\*`, `menu\jp\*` and so on by name (any folder given with
+`--override-dir` works the same way, for mods), and the game's text code is
+told it is not running the Japanese version (`port/runtime/english_text.h`).
 
 ## Co-op (preview)
 

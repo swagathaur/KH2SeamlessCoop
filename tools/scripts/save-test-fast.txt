@@ -1,0 +1,36 @@
+# save-test.txt on the --skip-cutscenes timeline (18000 frames earlier): with
+# --warp-test=2300:02:02 --teleport=2500:420,0,-200.
+2540  25  -  128 0      # walk forward (-x here) onto the save point
+2620  6   TRIANGLE
+2680  6   TRIANGLE
+2740  6   TRIANGLE
+2820  4   CIRCLE
+2860  4   CIRCLE
+2900  4   CIRCLE
+2940  4   CIRCLE
+2980  4   CIRCLE
+3020  4   CIRCLE
+3060  4   CIRCLE
+3100  4   CIRCLE
+3140  4   CIRCLE
+3180  4   CIRCLE
+3220  4   CIRCLE
+3260  4   CIRCLE
+3300  4   CIRCLE
+3340  4   CIRCLE
+3380  4   CIRCLE
+3420  4   CIRCLE
+3460  4   CIRCLE
+3500  4   CIRCLE
+3540  4   CIRCLE
+3580  4   CIRCLE
+3620  4   CIRCLE
+3660  4   CIRCLE
+3700  4   CIRCLE
+3740  4   CIRCLE
+3780  4   CIRCLE
+3820  4   CIRCLE
+3860  4   CIRCLE
+3900  4   CIRCLE
+3940  4   CIRCLE
+3980  4   CIRCLE

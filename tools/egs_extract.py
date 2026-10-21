@@ -5,8 +5,12 @@ Epic): the kh2_*.hed / kh2_*.pkg archives in its Image\\<language> folder.
 Usage:
   egs_extract.py IMAGE_DIR OUT_DIR NAME [NAME...]
   egs_extract.py IMAGE_DIR OUT_DIR --english     # the English text and fonts
+  egs_extract.py IMAGE_DIR OUT_DIR --english-images  # English menus, title cards, layouts
 IMAGE_DIR is e.g. "...\\KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\\Image\\dt" (a backup\\
 folder with original archives, as mod managers leave, is preferred).
+--english-images does the same for the language folders of menu/, field2d/,
+file/, event/layout/, msn/ and gumibattle/ (names in tools/data/kh2_lang_files.txt):
+pictures with text in them.
 --english writes msg/us/<file> as msg/jp/<file> (what this game asks for) under
 OUT_DIR, for the file overrides (docs/playing.md, "English text"). The PC
 release's button prompts (icon codes 0xDA and up, drawn by the PC version
@@ -177,6 +181,15 @@ def main():
         raise SystemExit(__doc__)
     image, out, names = a[0], a[1], a[2:]
     rename = {}
+    if names == ["--english-images"]:
+        names = []
+        listing = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "kh2_lang_files.txt")
+        for line in open(listing, encoding="utf-8"):
+            jp = line.strip()
+            if jp and not jp.startswith("#"):
+                src = jp.replace("/jp/", "/us/", 1)
+                names.append(src)
+                rename[src] = jp
     if names == ["--english"]:
         names = []
         for n in ENGLISH:
@@ -200,7 +213,7 @@ def main():
             if md5 in hed:
                 with open(base + ".pkg", "rb") as pkg:
                     data = read_asset(pkg, hed[md5][0])
-                if name in rename and name.endswith(".bar") and "font" not in name:
+                if name.startswith("msg/") and name.endswith(".bar") and "font" not in name:
                     data = fix_bar(data)
                 dst = os.path.join(out, rename.get(name, name))
                 os.makedirs(os.path.dirname(dst), exist_ok=True)

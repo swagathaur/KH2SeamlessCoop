@@ -550,6 +550,8 @@ struct Harness
     double stallFrameSince = 0;
     uint32_t stallCut = 0;
     double stallCutSince = 0;
+    uint64_t stallScene = 0;
+    double stallSceneSince = 0;
     bool stallReported = false;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
@@ -843,19 +845,31 @@ bool harnessTick(Harness &h, uint64_t frame)
             h.stallCut = gs.cutsceneTime;
             h.stallCutSince = t;
         }
+        // A scene whose cutscene data went bad (the timer reads garbage)
+        // never ends: one scene running five minutes is reported too.
+        const uint64_t scene = uint64_t(gs.now.world) << 32 | uint64_t(gs.now.room) << 16 | gs.now.event;
+        if (gs.control != 3 || scene != h.stallScene || kh2ui::paused())
+        {
+            h.stallScene = scene;
+            h.stallSceneSince = t;
+        }
         const bool framesStuck = t - h.stallFrameSince > 10.0;
         const bool cutStuck = t - h.stallCutSince > 20.0;
-        if ((framesStuck || cutStuck) && !h.stallReported)
+        const bool sceneStuck = t - h.stallSceneSince > 300.0;
+        if ((framesStuck || cutStuck || sceneStuck) && !h.stallReported)
         {
             h.stallReported = true;
             std::printf("[stall] %s at frame %llu (%s event %u control %u, cutscene %u/%u); stacks follow\n",
-                        framesStuck ? "the game stopped" : "the cutscene stopped", (unsigned long long)frame,
+                        framesStuck ? "the game stopped"
+                        : cutStuck  ? "the cutscene stopped"
+                                    : "one scene has run for five minutes",
+                        (unsigned long long)frame,
                         kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.cutsceneTime,
                         gs.cutsceneLength);
             std::fflush(stdout);
             kh2watch::dumpNow();
         }
-        else if (!framesStuck && !cutStuck)
+        else if (!framesStuck && !cutStuck && !sceneStuck)
             h.stallReported = false;
     }
     // Settings menu opened and closed again (crash hunting: pausing mid-scene).

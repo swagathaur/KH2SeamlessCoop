@@ -1,0 +1,23 @@
+# Game data: never commit anything from the disc
+Src/
+game/
+*.iso
+*.ISO
+*.elf
+SLPM_*
+*.IRX
+*.irx
+*.IMG
+*.IDX
+*.x
+*.cmp
+
+# Generated recompiler output (rebuilt from your own ELF)
+generated/
+
+# Build output
+build/
+out/
+.vs/
+*.user
+__pycache__/

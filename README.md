@@ -32,8 +32,9 @@ python tools\extract_game.py "Src\<your disc>.iso"   # verifies the ELF, unpacks
 # one-time: build ps2_recomp/ps2_analyzer (see .agent job 009 or docs/pipeline.md)
 tools\win\recomp.ps1      # translate the game to C++ in generated\
 tools\win\build.ps1       # build build\win\kh2recomp.exe
-tools\win\run.ps1         # play in a window
 ```
+
+Then double-click **`Play KH2.bat`** (controls, settings, co-op: [docs/playing.md](docs/playing.md)).
 
 Command-line testing (headless runs, screenshots, scripted input, exit codes):
 see [docs/harness.md](docs/harness.md).
@@ -60,10 +61,10 @@ see [docs/harness.md](docs/harness.md).
 |---|---|---|
 | 0 | Toolchain | Function maps, configs, full recompile and a linked native build ✅ |
 | 1 | Boot | Native build reaches the title screen with sound ✅ (New Game and the opening movie run too) |
-| 2 | Playable | Twilight Town playable end to end at full speed (in progress: the opening plays through to free control in Market Street with sound; GPU renderer, settings menu, widescreen, controller, rumble, mouse camera, fast-forward) |
-| 3 | Hook layer | ImGui overlay listing live actors; first function override working (in progress: game state and the player actor read live in the F3 panel) |
+| 2 | Playable | Twilight Town playable end to end at full speed (in progress: the opening plays through to free control and battles with sound at 60 fps; GPU renderer with super-sampling, widescreen, settings menu, controller and rumble, rebindable keyboard, mouse camera, fast-forward, movie and cutscene skip, crash reports; memory card saving untested) |
+| 3 | Hook layer | ImGui overlay listing live actors; first function override working ✅ (F3 panel with live actors; the object matrix builder is overridden, and game functions — map jump, object factory, add_hp, motion change — are called from the host as scheduler invocations) |
 | 4 | Ghost | Two instances on a LAN; one player's character shown as a puppet in the other's game ✅ (UDP session for 3 players with reliable events; puppets are game-run NPC copies of the player's character, following position and motion; room follow and warp-to-host) |
-| 5+ | Co-op | Enemy sync, combat events, room transitions, cutscenes |
+| 5+ | Co-op | Enemy sync, combat events, room transitions, cutscenes (in progress: room follow and warp-to-host; host-authoritative enemies — positions and HP from the host, clients' hits applied by the host, deaths shared; name tags) |
 
 Status and findings: [docs/findings.md](docs/findings.md); every boot blocker and
 its fix, in order: [docs/boot-log.md](docs/boot-log.md).

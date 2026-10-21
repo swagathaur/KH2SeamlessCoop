@@ -1,0 +1,6 @@
+# Open the pause menu in Market Street (skip-cutscenes timeline), look around it.
+2300  6   START
+2500  6   DOWN
+2600  6   CIRCLE
+2800  6   CROSS
+2900  6   CROSS

@@ -51,6 +51,8 @@
 #include "puppets.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
+#include "english_text.h"
+#include "file_override.h"
 #include "overlay_ui.h"
 
 namespace ps2_stubs
@@ -152,6 +154,9 @@ struct Options
     std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
     std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM[:BTL] (hex; world<<24|room<<16|btl)
     std::vector<std::pair<uint64_t, int32_t>> hurtEnemies; // --hurt-enemies=FRAME:AMOUNT
+    uint64_t skipCutscenesUntil = 0; // --skip-cutscenes-until=FRAME
+    std::vector<std::string> overrideDirs; // --override-dir=DIR (repeatable)
+    bool english = false;                  // --english: game/files/english
     struct Teleport { uint64_t frame; float pos[3]; };
     std::vector<Teleport> teleports; // --teleport=FRAME:X,Y,Z
 };
@@ -225,6 +230,9 @@ void usage()
         "  --menu-at=F,..:S        testing (windowed): open the settings menu at these frames for S seconds\n"
         "  --ff-at=A-B,..          testing (windowed): fast-forward from frame A to B\n"
         "  --skip-cutscenes        skip every in-engine cutscene (hold B to skip one)\n"
+        "  --english               English text (game/files/english: tools/egs_extract.py --english)\n"
+        "  --override-dir=DIR      use the game files in DIR (by the game's names) instead of the disc's\n"
+        "  --skip-cutscenes-until=F  testing: skip them until frame F\n"
         "  --hurt-enemies=F:N      testing: take N HP off every enemy at frame F (as if hit)\n"
         "  --no-settings           don't read kh2recomp.ini\n"
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
@@ -392,6 +400,13 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             o.hurtEnemies.emplace_back(std::stoull(v.substr(0, colon)), std::stoi(v.substr(colon + 1)));
         }
         else if (a == "--skip-cutscenes") kh2skip::setAutoSkip(true);
+        else if (a == "--english") o.english = true;
+        else if (a.rfind("--override-dir=", 0) == 0) o.overrideDirs.push_back(value(a));
+        else if (a.rfind("--skip-cutscenes-until=", 0) == 0)
+        {
+            kh2skip::setAutoSkip(true);
+            o.skipCutscenesUntil = std::stoull(value(a));
+        }
         else if (a.rfind("--menu-at=", 0) == 0)
         {
             std::string v = value(a);
@@ -526,6 +541,13 @@ struct Harness
     uint64_t lastActorsFrame = UINT64_MAX;
     std::chrono::steady_clock::time_point menuOpenedAt;
     bool menuByHarness = false;
+    uint64_t lastSceneKey = UINT64_MAX;
+    // Stall detection (the game stops while the host loop runs on).
+    uint64_t stallFrame = UINT64_MAX;
+    double stallFrameSince = 0;
+    uint32_t stallCut = 0;
+    double stallCutSince = 0;
+    bool stallReported = false;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
@@ -788,6 +810,51 @@ bool harnessTick(Harness &h, uint64_t frame)
         auto it = prev == UINT64_MAX ? at.begin() : at.upper_bound(prev);
         return it != at.end() && *it <= frame;
     };
+    // Where the game is, whenever that changes (room, event, control): the
+    // play log then shows where a hang or crash happened.
+    {
+        const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
+        const uint64_t key = uint64_t(gs.now.world) << 48 | uint64_t(gs.now.room) << 40 | uint64_t(gs.now.event) << 24 |
+                             uint64_t(gs.control & 0xFFFF);
+        if (key != h.lastSceneKey)
+        {
+            h.lastSceneKey = key;
+            std::printf("[game] %.1fs frame %llu: %s event %u control %u\n", elapsed(h), (unsigned long long)frame,
+                        kh2state::describe(gs.now).c_str(), gs.now.event, gs.control);
+        }
+    }
+    // The game itself stuck: guest frames stop (not paused), or a cutscene's
+    // timer stops while frames go on. Print every thread's stack once, so a
+    // player's log shows what it is waiting for.
+    {
+        const double t = elapsed(h);
+        const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
+        if (frame != h.stallFrame || kh2ui::paused())
+        {
+            h.stallFrame = frame;
+            h.stallFrameSince = t;
+        }
+        const bool cutRunning = gs.control == 3 && gs.cutsceneLength > 0 && gs.cutsceneLength < 0x100000u;
+        if (!cutRunning || gs.cutsceneTime != h.stallCut || kh2ui::paused())
+        {
+            h.stallCut = gs.cutsceneTime;
+            h.stallCutSince = t;
+        }
+        const bool framesStuck = t - h.stallFrameSince > 10.0;
+        const bool cutStuck = t - h.stallCutSince > 20.0;
+        if ((framesStuck || cutStuck) && !h.stallReported)
+        {
+            h.stallReported = true;
+            std::printf("[stall] %s at frame %llu (%s event %u control %u, cutscene %u/%u); stacks follow\n",
+                        framesStuck ? "the game stopped" : "the cutscene stopped", (unsigned long long)frame,
+                        kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.cutsceneTime,
+                        gs.cutsceneLength);
+            std::fflush(stdout);
+            kh2watch::dumpNow();
+        }
+        else if (!framesStuck && !cutStuck)
+            h.stallReported = false;
+    }
     // Settings menu opened and closed again (crash hunting: pausing mid-scene).
     if (!o.menuAt.empty())
     {
@@ -851,6 +918,8 @@ bool harnessTick(Harness &h, uint64_t frame)
         }
         std::fflush(stdout);
     }
+    if (o.skipCutscenesUntil && due(o.skipCutscenesUntil))
+        kh2skip::setAutoSkip(false);
     for (const auto &[at, amount] : o.hurtEnemies)
         if (due(at))
         {
@@ -966,9 +1035,10 @@ bool harnessTick(Harness &h, uint64_t frame)
         }
         const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
         char game[160];
-        std::snprintf(game, sizeof(game), " | %s ev=%u ctl=%u btl=%u react=%04X hp=%d/%d pos=%.0f,%.0f,%.0f",
+        std::snprintf(game, sizeof(game), " | %s ev=%u ctl=%u btl=%u react=%04X hp=%d/%d pos=%.0f,%.0f,%.0f cut=%u/%u",
                       kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.battle, gs.reaction,
-                      gs.party[0].hp, gs.party[0].maxHp, gs.player.pos[0], gs.player.pos[1], gs.player.pos[2]);
+                      gs.party[0].hp, gs.party[0].maxHp, gs.player.pos[0], gs.player.pos[1], gs.player.pos[2],
+                      gs.cutsceneTime, gs.cutsceneLength);
         std::string coop;
         if (kh2coop::active())
         {
@@ -1033,6 +1103,7 @@ bool headlessPump(void *userData)
     kh2movie::poll(*h.runtime);
     kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
+    kh2files::tick(h.runtime->memory().getRDRAM());
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (kh2pgs::active() && frame != h.lastGpuFrame)
     {
@@ -1056,6 +1127,7 @@ bool playPump(void *userData)
     kh2movie::poll(*h.runtime);
     kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
+    kh2files::tick(h.runtime->memory().getRDRAM());
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (frame != h.lastGpuFrame)
     {
@@ -1108,7 +1180,7 @@ std::vector<std::string> readSettings(const char *argv0)
             // On/off switches take 1/0 (true/false, yes/no, on/off); every other
             // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
             static const std::set<std::string> kSwitches = {
-                "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mouse-camera",
+                "english", "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mouse-camera",
                 "no-name-tags", "no-rumble", "no-shared-enemies", "pause-unfocused", "profile", "show-fps",
                 "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
             const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
@@ -1276,6 +1348,8 @@ int main(int argc, char **argv)
     kh2pad2::install(runtime);
     kh2gs::install(runtime);
     kh2gs::installEnv(runtime);
+    if (opt.english)
+        kh2english::install(runtime);
     // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by
     // default also pokes Dragon Quest VIII's libmpeg globals (patch 0004).
     ps2_stubs::setMpegLegacyGuestGlobals(false);
@@ -1323,8 +1397,25 @@ int main(int argc, char **argv)
     }
     if (opt.profileMs)
         kh2prof::start(opt.profileMs);
-    if (opt.watchdog || opt.headless)
-        kh2watch::start(opt.watchdog ? opt.watchdog : 20);
+    // Always: a hang (no host-loop progress for this long) leaves every
+    // thread's stack in the log and in crashes\hang-<time>.txt.
+    kh2watch::start(opt.watchdog ? opt.watchdog : 15);
+    {
+        // Replacement game files (English text, mods): by the game's names.
+        std::vector<std::filesystem::path> dirs;
+        if (opt.english)
+        {
+            const std::filesystem::path en = std::filesystem::path(opt.cdRoot.empty() ? "game" : opt.cdRoot) / "files" / "english";
+            if (std::filesystem::exists(en))
+                dirs.push_back(en);
+            else
+                std::fprintf(stderr, "[kh2] --english: %s is missing (tools/egs_extract.py --english)\n", en.string().c_str());
+        }
+        for (const std::string &d : opt.overrideDirs)
+            dirs.push_back(d);
+        if (!dirs.empty())
+            kh2files::install(dirs);
+    }
     runtime.run();
     kh2coop::shutdown();
     kh2watch::stop();

@@ -1,0 +1,47 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+index 56a978e..ccdd9c9 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+@@ -986,4 +986,29 @@ namespace ps2_stubs
+         }
+         setReturnS32(ctx, 1);
+     }
++
++    // Give a host file sectors of its own past the disc, readable with
++    // sceCdRead like the image (for game file overrides). Same file, same LBN.
++    bool mapHostFileToCd(const std::filesystem::path &hostPath, uint32_t &lbn, uint32_t &sectors)
++    {
++        std::error_code ec;
++        const uint64_t sizeBytes = std::filesystem::file_size(hostPath, ec);
++        if (ec)
++            return false;
++        const std::string key = "hostmap:" + hostPath.generic_string();
++        auto it = g_cdFilesByKey.find(key);
++        if (it == g_cdFilesByKey.end())
++        {
++            CdFileEntry entry;
++            entry.hostPath = hostPath;
++            entry.sizeBytes = static_cast<uint32_t>(std::min<uint64_t>(sizeBytes, 0xFFFFFFFFu));
++            entry.baseLbn = g_nextPseudoLbn;
++            entry.sectors = sectorsForBytes(sizeBytes);
++            g_nextPseudoLbn += entry.sectors + 1;
++            it = g_cdFilesByKey.emplace(key, entry).first;
++        }
++        lbn = it->second.baseLbn;
++        sectors = it->second.sectors;
++        return true;
++    }
+ }
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.h b/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
+index dd5bae9..7dc3473 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
+@@ -9,6 +9,8 @@
+ 
+ namespace ps2_stubs
+ {
++    // A host file readable through sceCdRead at its own LBNs (past the disc).
++    bool mapHostFileToCd(const std::filesystem::path &hostPath, uint32_t &lbn, uint32_t &sectors);
+ 
+     struct CdDebugFileEntry
+     {

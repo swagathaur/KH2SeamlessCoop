@@ -220,6 +220,16 @@ sheet index, flag)` (`FUN_00187520`: `FUN_001A1910` clamps the sum to the
 min/max, `YS::BTLOBJ::dead` at 0); `+0x81C` points at its spawn entry in the
 room data, whose serial (`+0x1E`) names it the same way on every machine.
 
+**Control.** The word at `0x01D48DB8` (GoA's "Cntrl") is a mask of
+object types whose control is off: `YS::OBJ::ControlOff(type)` /
+`ControlOn(type)` (`0x001B9C28` / `0x001B9C58`) set and clear bit `type`,
+and every object's "may act" check (vtable `+0x40`, `FUN_001B9C90`) fails
+when its objentry type's bit is set, when its `+0x10C` has `0x200000`, or
+while a map jump runs. So the usual value 3 in cutscenes means "player and
+party frozen" (types 0 and 1); bit 4 would stop every enemy. Co-op leaves
+clients' enemy AI on (each player is attacked by their own copies) and
+only moves them; `+0x10C |= 0x200000` would make one object a pure puppet.
+
 **Map jump.** `FUN_00104F58(const LOCATION*, int fade, int delay, u8, int
 callback)`: LOCATION is 10 bytes (world, room, door u16, map/battle/event u16;
 0xFFFF = the save's choice). Unless the byte at `0x003A7B00` is set (then it
@@ -230,3 +240,34 @@ copies the destination to `0x0032BAF0`. The task waits while a menu or
 message window is open, then tears the area down (`FUN_00104E18`).
 `YS::TEST_MAPJUMP::Exec` (`0x002468E8`, debug) calls it with fade 1 and
 callback 0xC.
+
+## Region and text
+
+`REGION::Get` (`0x00105C30`) returns the region picked at boot from
+SYSTEM.CNF's executable name (`FUN_00105B58`, table at `0x0033CB00`: 1 jp,
+2 us, 3 uk, 4 it, 5 sp, 6 gr, 7 fr, 8 fm); this disc is 8. The language
+string at `0x0033CAF4` (`jp` for 1 and 8, `us` for 3) names the `msg/<lang>/`
+folder. Text code asks "Japanese?" as `Get() == 1 || Get() == 8`:
+
+- `FUN_001AAA08` (font set-up; FONT table at `0x01C6CC60`, 0x20 bytes each:
+  +0x12/+0x13 cell width/height): the Japanese fonts use 18x18 (sys) and
+  24x24 (evt) cells, the international ones 18x24 and 24x32. The two images
+  hold different glyph sets in different cells, so the US `fontimage.bar`
+  only draws right with the international sizes.
+- `FUN_001AB820` (glyph width), `Tz::MenuUtil` padding (`0x0028DE08`,
+  `0x0028DEF0`), name and message formatting (`0x00247198`, `0x00247580`,
+  `0x002A8330`), command menu items (`0x002B5C30`), save slot world names
+  (`0x0015ABA8`).
+- `FUN_001678F0` (pad read) uses the same test for the Final Mix button
+  layout and right-stick camera, so it has to keep the real answer.
+
+`== 8` alone is Final Mix content (`YS::VOICE` at `0x001AFD18`,
+`0x00232348`, `worldmap::Libretto`); `FUN_00105870` builds the save
+product code from the region (`KH2J`).
+
+Message text: the international encoding has Latin letters as single bytes
+(`A`=0x2E, `a`=0x9A); the Japanese one has kana there and puts lower case in
+table 0x1C. Icons are command 0x09 + index into the `icon` font (0x14 SELECT,
+0x15 START, 0x16 d-pad, 0x1E-0x21 R1 R2 L1 L2, 0x22-0x25 triangle cross
+square circle). The PC release's messages use 0xDA and up for its own
+button prompts (`tools/egs_extract.py` maps them back).

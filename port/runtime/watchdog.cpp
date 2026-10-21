@@ -246,6 +246,20 @@ void run(DWORD self)
             if (!reported)
             {
                 dumpAll(self);
+                // And a file next to the crash reports, for players.
+                CreateDirectoryA(g_crashDir.c_str(), nullptr);
+                SYSTEMTIME t;
+                GetLocalTime(&t);
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s\\hang-%04u%02u%02u-%02u%02u%02u.txt", g_crashDir.c_str(), t.wYear,
+                              t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+                if (FILE *f = std::fopen(path, "w"))
+                {
+                    std::fprintf(f, "kh2recomp stopped responding (no progress for %u s)\n", g_seconds);
+                    dumpAll(self, f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[kh2] not responding; report: %s\n", path);
+                }
                 reported = true;
             }
         }

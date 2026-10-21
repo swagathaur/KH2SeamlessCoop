@@ -1,0 +1,6 @@
+# Talk to the townsperson N_EX500 in Market Street (after --teleport next to her).
+2340  6   TRIANGLE
+2420  6   TRIANGLE
+2520  6   CIRCLE
+2620  6   CIRCLE
+2720  6   CIRCLE

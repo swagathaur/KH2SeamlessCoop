@@ -114,10 +114,16 @@ add_executable(kh2recomp
     port/runtime/dma_log.cpp
     port/runtime/gs_image.cpp
     port/runtime/gs_env.cpp
+    port/runtime/profiler.cpp
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ps2_runtime)
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)
+    # A PDB for --profile and debuggers: full debug info for the runner and the
+    # runtime, public symbols only for the generated code (keeps its build fast).
+    target_compile_options(kh2recomp PRIVATE /Zi /FS)
+    target_compile_options(ps2_runtime PRIVATE /Zi /FS)
+    target_link_options(kh2recomp PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
 ps2x_stage_ffmpeg_runtime_dlls(kh2recomp)

@@ -7,6 +7,7 @@
 // Structure follows DQ8Recomp's src/runtime/main.cpp (GPL-3.0).
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +32,7 @@
 #include "dma_log.h"
 #include "gs_image.h"
 #include "gs_env.h"
+#include "profiler.h"
 
 namespace
 {
@@ -72,6 +74,7 @@ struct Options
     std::string sound = "native";      // native: run the disc's sound IRX on the emulated IOP
     bool mute = false;
     std::string trace;                 // comma-separated guest function addresses
+    unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
 };
@@ -96,6 +99,7 @@ void usage()
         "  --sound=native|off      run LIBSD/LIBSSL on the emulated IOP, or stub them (default native)\n"
         "  --mute                  keep the sound driver running but play nothing\n"
         "  --trace=ADDR[,ADDR..]   log the first calls to these guest functions and count them\n"
+        "  --profile[=MS]          sample host threads every MS ms (default 1) and print hot functions\n"
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
         "  --gs-dump=A,B,..        at these guest frames write GS registers and all of GS memory\n"
         "                          (as a 1024x1024 32-bit image) into the screenshot directory\n"
@@ -130,6 +134,8 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--mute") o.mute = true;
         else if (a.rfind("--trace=", 0) == 0) o.trace = value(a);
         else if (a.rfind("--dma-log=", 0) == 0) o.dmaLog = value(a);
+        else if (a == "--profile") o.profileMs = 1;
+        else if (a.rfind("--profile=", 0) == 0) o.profileMs = std::max(1, std::stoi(value(a)));
         else if (a.rfind("--gs-dump=", 0) == 0)
         {
             std::stringstream ss(value(a));
@@ -428,7 +434,10 @@ int main(int argc, char **argv)
     harness.start = harness.lastStatus = std::chrono::steady_clock::now();
     std::printf("[kh2] starting at 0x%08X\n", runtime.cpu().pc);
     std::fflush(stdout);
+    if (opt.profileMs)
+        kh2prof::start(opt.profileMs);
     runtime.run();
+    kh2prof::stopAndReport();
 
     if (!opt.headless)
         return 0;

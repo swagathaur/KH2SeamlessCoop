@@ -170,3 +170,18 @@ that libgraph reads (interlace, NTSC, field mode).
 newlib's `_malloc_r`, `_free_r`, `_calloc_r`, `malloc_extend_top` and
 `__malloc_lock`, although `gen_stubs.py` meant the guest to own the C heap.
 Boot works with the runtime's allocator; revisit if allocations fail later.
+
+## Performance note: parallel rasterization
+
+At the title screen the run managed ~9 guest fps. `--profile` showed one host
+thread saturated in the GS software rasterizer (texture sampling, VRAM
+swizzle reads, per-pixel writes) while the EE thread mostly waited for it.
+
+`patches/ps2recomp/0003-gs-parallel-raster.patch` splits each large
+primitive (≥ 8192 pixels) into 8-row chunks shared by a small worker pool
+(up to 12 threads; `PS2X_GS_THREADS=N` overrides, 0 disables). Each pixel is
+computed exactly as before, so frames match the serial path (checked at the
+copyright and title screens; a logo fade differed by one step, from timing).
+900 guest frames now take 23 s instead of ~100 s (~39 fps). The remaining cost
+is the per-pixel path itself (`std::function` VRAM accessors, float
+interpolation, `lroundf`), the obvious next step if needed.

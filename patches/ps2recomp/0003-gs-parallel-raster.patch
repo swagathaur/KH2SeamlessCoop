@@ -1,0 +1,208 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 15ef50b..8b77209 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -8,11 +8,18 @@
+ #include "ps2_log.h"
+ #include <atomic>
+ #include <algorithm>
++#include <cfenv>
+ #include <cmath>
++#include <condition_variable>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <fstream>
++#include <functional>
+ #include <iostream>
++#include <mutex>
++#include <thread>
++#include <vector>
+ 
+ using namespace GSInternal;
+ 
+@@ -1057,6 +1064,137 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
+            (static_cast<uint32_t>(a) << 24);
+ }
+ 
++namespace
++{
++    // Row-band parallel rasterization. A primitive's pixels are independent:
++    // each is written once, from VRAM state that the primitive itself does not
++    // change except at that pixel. So the rows of one large primitive can be
++    // split between threads and the result is identical to a serial loop.
++    // Primitives still run one after another, so ordering between them holds.
++    class RasterPool
++    {
++    public:
++        static RasterPool &instance()
++        {
++            static RasterPool pool;
++            return pool;
++        }
++
++        // Runs body(yBegin, yEnd) over [y0, y1] in row chunks; returns when done.
++        void run(int y0, int y1, const std::function<void(int, int)> &body)
++        {
++            const int rows = y1 - y0 + 1;
++            if (m_workers.empty() || rows < 2 * kChunkRows)
++            {
++                body(y0, y1);
++                return;
++            }
++            std::lock_guard<std::mutex> oneAtATime(m_runMutex); // more than one GS backend may draw
++            std::unique_lock<std::mutex> lock(m_mutex);
++            m_body = &body;
++            m_y0 = y0;
++            m_y1 = y1;
++            m_next.store(y0, std::memory_order_relaxed);
++            m_rounding = std::fegetround();
++            m_pending = static_cast<int>(m_workers.size());
++            ++m_generation;
++            m_wake.notify_all();
++            lock.unlock();
++            work(); // the caller takes chunks too
++            lock.lock();
++            m_done.wait(lock, [&] { return m_pending == 0; });
++            m_body = nullptr;
++        }
++
++        static bool worthSplitting(int rows, int cols)
++        {
++            return static_cast<int64_t>(rows) * cols >= kMinPixels;
++        }
++
++    private:
++        static constexpr int kChunkRows = 8;
++        static constexpr int64_t kMinPixels = 8192;
++
++        RasterPool()
++        {
++            unsigned n = std::thread::hardware_concurrency();
++            n = n > 4 ? n - 3 : 0; // leave room for the EE, IOP and presenter threads
++            n = std::min(n, 12u);
++            if (const char *env = std::getenv("PS2X_GS_THREADS"))
++                n = static_cast<unsigned>(std::max(0, std::atoi(env)));
++            for (unsigned i = 0; i < n; ++i)
++                m_workers.emplace_back([this] { loop(); });
++        }
++
++        ~RasterPool()
++        {
++            {
++                std::lock_guard<std::mutex> lock(m_mutex);
++                m_stop = true;
++                ++m_generation;
++            }
++            m_wake.notify_all();
++            for (auto &t : m_workers)
++                t.join();
++        }
++
++        void work()
++        {
++            for (;;)
++            {
++                const int start = m_next.fetch_add(kChunkRows, std::memory_order_relaxed);
++                if (start > m_y1)
++                    return;
++                (*m_body)(start, std::min(m_y1, start + kChunkRows - 1));
++            }
++        }
++
++        void loop()
++        {
++            uint64_t seen = 0;
++            std::unique_lock<std::mutex> lock(m_mutex);
++            for (;;)
++            {
++                m_wake.wait(lock, [&] { return m_generation != seen; });
++                seen = m_generation;
++                if (m_stop)
++                    return;
++                const int rounding = m_rounding;
++                lock.unlock();
++                const int previous = std::fegetround();
++                std::fesetround(rounding);
++                work();
++                std::fesetround(previous);
++                lock.lock();
++                if (--m_pending == 0)
++                    m_done.notify_one();
++            }
++        }
++
++        std::vector<std::thread> m_workers;
++        std::mutex m_runMutex;
++        std::mutex m_mutex;
++        std::condition_variable m_wake, m_done;
++        const std::function<void(int, int)> *m_body = nullptr;
++        std::atomic<int> m_next{0};
++        int m_y0 = 0, m_y1 = -1;
++        int m_rounding = FE_TONEAREST;
++        int m_pending = 0;
++        uint64_t m_generation = 0;
++        bool m_stop = false;
++    };
++
++    void forRows(int y0, int y1, int cols, const std::function<void(int, int)> &body)
++    {
++        if (y1 < y0)
++            return;
++        if (RasterPool::worthSplitting(y1 - y0 + 1, cols))
++            RasterPool::instance().run(y0, y1, body);
++        else
++            body(y0, y1);
++    }
++}
++
+ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
+ {
+     const GSDrawState &state = batch.state;
+@@ -1132,7 +1270,8 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
+         if (spriteH < 1.0f)
+             spriteH = 1.0f;
+ 
+-        for (int y = drawY0; y <= drawY1; ++y)
++        forRows(drawY0, drawY1, drawX1 - drawX0 + 1, [&](int rowBegin, int rowEnd) {
++        for (int y = rowBegin; y <= rowEnd; ++y)
+         {
+             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
+             float texVf = v0f + (v1f - v0f) * ty;
+@@ -1164,12 +1303,15 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
+                 WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
+             }
+         }
++        });
+     }
+     else
+     {
+-        for (int y = drawY0; y <= drawY1; ++y)
+-            for (int x = drawX0; x <= drawX1; ++x)
+-                WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
++        forRows(drawY0, drawY1, drawX1 - drawX0 + 1, [&](int rowBegin, int rowEnd) {
++            for (int y = rowBegin; y <= rowEnd; ++y)
++                for (int x = drawX0; x <= drawX1; ++x)
++                    WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
++        });
+     }
+ }
+ 
+@@ -1209,7 +1351,8 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
+     const float invAbsDenom = 1.0f / std::fabs(denom);
+     constexpr float kEdgeEpsilon = 1.0e-4f;
+ 
+-    for (int y = minY; y <= maxY; ++y)
++    forRows(minY, maxY, maxX - minX + 1, [&](int rowBegin, int rowEnd) {
++    for (int y = rowBegin; y <= rowEnd; ++y)
+     {
+         float py = static_cast<float>(y) + 0.5f;
+         for (int x = minX; x <= maxX; ++x)
+@@ -1289,6 +1432,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
+             WritePixel(state, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
+         }
+     }
++    });
+ }
+ 
+ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)

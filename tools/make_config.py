@@ -82,11 +82,18 @@ def main():
     renamed = write_recomp_map(ROOT / "config/functions.csv", ROOT / "config/functions.recomp.csv")
     print(f"config/functions.recomp.csv: {renamed} of {len(KEEP_AS_GUEST)} guest-only functions renamed")
     stubs = (ROOT / "config/stubs.fragment.toml").read_text(encoding="utf-8").strip()
-    mmio = mmio_section(ROOT / "config/analyzer/analyzer.toml")
+    # No [mmio] table. ps2_analyzer derives each site's address from the
+    # nearest `lui` only and ignores the `ori`/`addiu` that completes it, so 130
+    # of its 142 entries say 0x10000000 (TIMER0); ps2_recomp then hard-codes
+    # that address, e.g. libvu1's VIF1_STAT poll at 0x00134080 read TIMER0 and
+    # spun forever. Without the table every load/store checks its computed
+    # address at run time (READ32/WRITE32 route I/O and scratchpad to the
+    # runtime), which is always right.
+    mmio = ""
     main_cfg = HEADER + general("game/SLPM_666.75", "config/functions.recomp.csv",
-                                "generated/main", stubs) + "\n" + mmio
+                                "generated/main", stubs)
     (ROOT / "config/kh2.toml").write_text(main_cfg, encoding="utf-8", newline="\n")
-    print(f"config/kh2.toml: {stubs.count('@0x')} stubs, {mmio.count(chr(10)) - 1} mmio sites")
+    print(f"config/kh2.toml: {stubs.count('@0x')} stubs, no mmio table (see comment)")
 
     outdir = ROOT / "config/overlays"
     outdir.mkdir(exist_ok=True)

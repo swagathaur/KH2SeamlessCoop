@@ -58,7 +58,18 @@ void addLog(const std::string &line)
 void warpLocked(uint8_t world, uint8_t room, uint16_t door)
 {
     addLog("going to " + kh2state::describe({world, room}));
-    kh2guest::post([world, room, door](const kh2guest::Env &env) {
+    kh2guest::post([world, room, door](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+        {
+            uint32_t task;
+            std::memcpy(&task, env.host(kh2state::addr::MapJumpTask), 4);
+            uint8_t next[10];
+            std::memcpy(next, env.host(0x0032BAF0), sizeof(next));
+            std::printf("[coop] map jump queued: task %08X, next %02X-%02X door %02X%02X\n", task, next[0], next[1],
+                        next[3], next[2]);
+            std::fflush(stdout);
+            return std::nullopt;
+        }
         uint8_t loc[10];
         loc[0] = world;
         loc[1] = room;
@@ -67,14 +78,7 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door)
         for (int i = 0; i < 3; ++i)
             std::memcpy(loc + 4 + 2 * i, &keep, 2);
         std::memcpy(env.host(env.scratch), loc, sizeof(loc));
-        kh2guest::call(env, kh2state::addr::MapJump, {env.scratch, 1u, 0u, 0u, 0u});
-        uint32_t task;
-        std::memcpy(&task, env.host(kh2state::addr::MapJumpTask), 4);
-        uint8_t next[10];
-        std::memcpy(next, env.host(0x0032BAF0), sizeof(next));
-        std::printf("[coop] map jump queued: task %08X, next %02X-%02X door %02X%02X\n", task, next[0], next[1],
-                    next[3], next[2]);
-        std::fflush(stdout);
+        return kh2guest::Call{kh2state::addr::MapJump, {env.scratch, 1u, 0u, 0u, 0u}, {}};
     });
 }
 

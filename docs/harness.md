@@ -35,7 +35,7 @@ extra arguments.
 | `--status-every=SEC` | Status line interval, 0 to disable (default 2 headless, off windowed) |
 | `--sound=native\|off` | Run the disc's sound driver (`LIBSD`, `LIBSSL`) on the emulated IOP, or stub it |
 | `--mute` | Keep the sound driver running but play nothing |
-| `--trace=ADDR[:N][,ADDR...]` | Log the first 8 calls to each guest function (args, return address), hex-dumping N bytes at `a0` with `:N`, and add per-function call counts to the status line |
+| `--trace=ADDR[:N][,ADDR...]` | Log the first 8 calls (`KH2_TRACE_LOG_FIRST=n` for more) to each guest function (args, return address, then `v0`), hex-dumping N bytes at `a0` with `:N`, and add per-function call counts to the status line. Addresses need the `0x` |
 | `--gs-dump=A,B,...` | At these guest frames write `gs_XXXXXX.txt` (GS registers, draw contexts, display source, draws grouped by target, then the last 512 GS events in order: GIFtags, register writes, draws, transfers, presents) and `vram_XXXXXX.png` (all 4 MB of GS memory as a 1024×1024 32-bit image) |
 | `--skip-movies` | End each movie as soon as it starts streaming (reaches gameplay in ~1 minute instead of ~9) |
 | `--speed=X` | Run guest time at X times real time; `0` = unpaced (as fast as the host can). Guest-frame timings (`--input`, screenshots) are unaffected |
@@ -47,6 +47,13 @@ extra arguments.
 | `--ee-dump=A,B,...` | Print the EE threads (priority, status, wait object, pc/ra/sp), semaphores and event flags at these frames. The snapshot is built lazily: ask for two consecutive frames and read the second |
 | `--stack-dump=A,B,...` | Print every host thread's stack at these frames, with symbols; the EE thread's shows the translated guest functions it is in |
 | `--watch=ADDR[,ADDR...]` | Print these guest words (hex and as float) on every status line |
+| `--mash-until=FRAME` | Stop `--mash` at this frame (so a `--script` can take over) |
+| `--script=FILE` | Timed input: lines `START FRAMES BUTTONS\|- [LX LY [RX RY]]` (sticks 0–255, 128 centre, LY 0 = up; `START` may be `+N` after the previous step); see `tools/scripts/walk-test.txt` |
+| `--ram-dump=A,B,...` | Write all 32 MB of guest RAM to `SHOTS/ram_FRAME.bin` (for `tools/analysis/find_position.py` and friends) |
+| `--actors-at=A,B,...` | Print the live object list (address, objentry id, model, type, position) and the player pointer |
+| `--warp-test=F:WW:RR` | At frame F, the game's own map jump to world WW, room RR (hex) |
+| `--spawn-test=F:ID`, `--preload-test=F:ID` | Experiments: create objentry ID in front of the player / ask the game to load its files |
+| `--host`, `--join=IP`, `--name=`, `--net-loss=F`, `--follow-host`, `--puppet-mode=` | Co-op ([playing.md](playing.md)); `--net-loss` drops that fraction of outgoing packets |
 | `--watchdog=SEC` | Print every thread's stack when the host loop stalls this long (default 20 s headless) |
 
 `--trace` status entries also list the busiest callers since the last line,
@@ -58,6 +65,20 @@ Environment: `PS2X_GS_PIXSTATS=1` makes the software rasteriser print, every
 
 Guest frames are counted in vsyncs, so a script replays identically however fast
 the host runs.
+
+Frame-triggered options fire when the guest frame passes their frame (the
+host loop can see the counter advance by more than one between checks).
+
+Environment switches for debugging: `KH2_PATCH_SKIP_CODE`, `KH2_PATCH_SKIP_DATA`
+and `KH2_PATCH_ONLY_FN=addr,...` (game patches, halves or single functions),
+`PS2X_GS_KEEP_VRAM=1` (keep the software GS's VRAM copy with the GPU
+renderer), `PS2X_AUDIO_DUMP=file` (raw 48 kHz stereo of everything played),
+`PS2_VU_PROGRAM_PROFILE=dir` (record VU1 programs, see
+[playing.md](playing.md)).
+
+Analysis tools in `tools/analysis/`: `disasm.py` (MIPS disassembly of main
+ELF functions with names), `callers.py` (jal/j call sites), `refs.py` (code
+referencing an absolute address), `find_position.py` (RAM snapshot diffing).
 
 ## Exit codes
 

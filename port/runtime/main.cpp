@@ -30,6 +30,7 @@
 #include "trace.h"
 #include "dma_log.h"
 #include "gs_image.h"
+#include "gs_env.h"
 
 namespace
 {
@@ -414,6 +415,7 @@ int main(int argc, char **argv)
     kh2ovl::install(runtime);
     kh2pad2::install(runtime);
     kh2gs::install(runtime);
+    kh2gs::installEnv(runtime);
     if (!paths.cdImage.empty())
         kh2cd::install(runtime, paths.cdImage.string());
     if (!opt.dmaLog.empty())

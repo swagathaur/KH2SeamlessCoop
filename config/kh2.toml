@@ -2,7 +2,7 @@
 # Paths are relative to the repository root (ps2_recomp runs from there).
 [general]
 input = "game/SLPM_666.75"
-ghidra_output = "config/functions.csv"
+ghidra_output = "config/functions.recomp.csv"
 output = "generated/main"
 single_file_output = false
 low_memory_mode = false
@@ -13,7 +13,6 @@ patch_cache = true
 stubs = [
     "sceGsResetGraph@0x002F1E18",
     "sceGsResetPath@0x002F1FB8",
-    "sceGsSetDefDispEnv@0x002F20D0",
     "sceGsPutDispEnv@0x002F2448",
     "sceGsSyncV@0x002F2508",
     "sceGsSyncPath@0x002F25A0",

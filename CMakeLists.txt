@@ -113,6 +113,7 @@ add_executable(kh2recomp
     port/runtime/trace.cpp
     port/runtime/dma_log.cpp
     port/runtime/gs_image.cpp
+    port/runtime/gs_env.cpp
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ps2_runtime)

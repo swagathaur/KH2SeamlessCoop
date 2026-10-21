@@ -1,7 +1,6 @@
 stubs = [
     "sceGsResetGraph@0x002F1E18",
     "sceGsResetPath@0x002F1FB8",
-    "sceGsSetDefDispEnv@0x002F20D0",
     "sceGsPutDispEnv@0x002F2448",
     "sceGsSyncV@0x002F2508",
     "sceGsSyncPath@0x002F25A0",

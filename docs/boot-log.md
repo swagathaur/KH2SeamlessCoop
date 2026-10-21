@@ -148,3 +148,25 @@ still call the original). Port code that replaces a non-stub function must add
 it to that list.
 
 **Result:** the boot logos and the copyright screen render.
+
+## 9. Right half of the screen at half brightness
+
+**Symptom:** logos and the copyright screen rendered, but x ≥ 256 was dimmed.
+
+**Cause:** KH2 runs both CRT circuits on one buffer, blended 50/50 (PMODE
+ALP=0x7F), with DISPLAY2 one line above DISPLAY1 as a flicker filter. It writes
+DISPLAY2 itself as DISPLAY1's DY − 1. The runtime's `sceGsSetDefDispEnv` stub
+built DISPLAY with DY=0 (and MAGH=0, DW in pixels), so DY − 1 borrowed through
+the upper fields (DY=2047, MAGH=15, DW=4095): circuit 2 became 256 pixels wide.
+
+**Fix:** libgraph's own `sceGsSetDefDispEnv` runs as guest code (DISPLAY now
+DX=636, DY=50, MAGH=4, DW=2559). ps2_recomp stubs any function named in the
+runtime's stub list, so `tools/make_config.py` hands it a map with that function
+renamed `guest_sceGsSetDefDispEnv` (`KEEP_AS_GUEST`). `sceGsResetGraph` stays a
+runtime stub; `port/runtime/gs_env.cpp` wraps it to fill the `sceGsGParam`
+that libgraph reads (interlace, NTSC, field mode).
+
+**Open:** the same name matching (including a leading-underscore alias) stubs
+newlib's `_malloc_r`, `_free_r`, `_calloc_r`, `malloc_extend_top` and
+`__malloc_lock`, although `gen_stubs.py` meant the guest to own the C heap.
+Boot works with the runtime's allocator; revisit if allocations fail later.

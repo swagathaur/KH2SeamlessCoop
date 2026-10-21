@@ -10,6 +10,7 @@
 0x002F6FA0    sceCdSearchFile           cd_iso.cpp
 0x002F28B8    sceGsSetDefLoadImage      gs_image.cpp
 0x002F2BE0    sceGsExecLoadImage        gs_image.cpp
+0x002F1E18    sceGsResetGraph           gs_env.cpp (wraps the stub)
 0x002F3918    sceDmaSend                dma_log.cpp (--dma-log)
 0x002F5C70    scePad2Init               pad2_hle.cpp
 0x002F5CB0    scePad2End                pad2_hle.cpp

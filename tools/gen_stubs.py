@@ -26,6 +26,12 @@ DO_NOT_STUB = {
     "_malloc_trim_r": "newlib arena internals",
     "__malloc_lock": "guest semaphore",
     "__malloc_unlock": "pairs with __malloc_lock",
+    # The runtime's version builds DISPLAY with MAGH=0, DW in pixels and DY=0.
+    # KH2 writes DISPLAY2 itself as DISPLAY1's DY - 1, which underflows to
+    # garbage (DY=2047, MAGH=15, DW=4095) and halves the picture. libgraph's
+    # own code gives hardware values; port/runtime/gs_env.cpp fills the GParam
+    # it reads, since sceGsResetGraph stays a runtime stub.
+    "sceGsSetDefDispEnv": "libgraph computes real DISPLAY values (see gs_env.cpp)",
 }
 
 

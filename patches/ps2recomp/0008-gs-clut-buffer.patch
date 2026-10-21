@@ -1,0 +1,199 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index adb9ae8..ef98cd4 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -6,6 +6,7 @@
+ #include "runtime/gs/ps2_gs_psmt8.h"
+ #include "runtime/gs/ps2_gs_memory.h"
+ #include "ps2_log.h"
++#include <array>
+ #include <atomic>
+ #include <algorithm>
+ #include <cfenv>
+@@ -599,10 +600,83 @@ void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t
+     WriteVramUnlocked(psm, base, bw, x, y, value);
+ }
+ 
++namespace
++{
++    // GS CLUT buffer contents per backend (patch 0008): 512 entries already in
++    // RGBA8888 form, filled at CLUT-load time; lookups read it instead of VRAM.
++    struct ClutBuffer
++    {
++        std::array<uint32_t, 512> entries{};
++        bool valid = false;
++    };
++    // A handful of fixed slots keyed by backend: lookups happen per texel, so
++    // they must not take a lock. Slots are claimed once and never released.
++    constexpr size_t kClutSlots = 4;
++    std::array<std::atomic<const void *>, kClutSlots> g_clutOwners{};
++    std::array<ClutBuffer, kClutSlots> g_clutBuffers;
++    constexpr uint32_t kClutLoadPsmTag = 0xC1D00000u;
++
++    ClutBuffer *clutBufferFor(const void *backend, bool create)
++    {
++        for (size_t i = 0; i < kClutSlots; ++i)
++        {
++            const void *owner = g_clutOwners[i].load(std::memory_order_acquire);
++            if (owner == backend)
++                return &g_clutBuffers[i];
++            if (owner == nullptr && create)
++            {
++                const void *expected = nullptr;
++                if (g_clutOwners[i].compare_exchange_strong(expected, backend) || expected == backend)
++                    return &g_clutBuffers[i];
++            }
++        }
++        return nullptr;
++    }
++}
++
+ void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+ {
+     if (!m_vram)
+         return;
++    if ((psm & 0xFFFF0000u) == kClutLoadPsmTag)
++    {
++        // CLUT load: psm = tag | CSM << 12 | texture PSM, base = CBP, bw = TEXCLUT.CBW,
++        // x = COU | CSA << 16, y = COV, value = CPSM.
++        // Entries are stored raw (16-bit ones widened to 8888); TEXA is applied
++        // at lookup time, as on the GS.
++        const uint8_t texPsm = static_cast<uint8_t>(psm & 0x3Fu);
++        const uint8_t clutPsm = static_cast<uint8_t>((value >> 0) & 0x3Fu);
++        const uint8_t csm = static_cast<uint8_t>((psm >> 12) & 0x1u);
++        const uint8_t csa = static_cast<uint8_t>((x >> 16) & 0x1Fu);
++        const uint32_t cou = csm ? (x & 0xFFu) : 0u;
++        const uint32_t cov = csm ? y : 0u;
++        const uint32_t clutWidth = (csm && bw != 0u) ? bw : 1u;
++        const bool fourBit = texPsm == GS_PSM_T4 || texPsm == GS_PSM_T4HL || texPsm == GS_PSM_T4HH;
++        const uint32_t count = fourBit ? 16u : 256u;
++        ClutBuffer *buffer = clutBufferFor(this, true);
++        if (!buffer)
++            return;
++        for (uint32_t i = 0; i < count; ++i)
++        {
++            // Source position ignores CSA; destination slot includes it.
++            const uint32_t src = resolveClutIndex(static_cast<uint8_t>(i), clutPsm, csm, 0u, texPsm);
++            const uint32_t dst = resolveClutIndex(static_cast<uint8_t>(i), clutPsm, csm, csa, texPsm);
++            const uint32_t cx = cou + (src & 0x0Fu);
++            const uint32_t cy = cov + (src >> 4);
++            uint32_t raw;
++            switch (clutPsm)
++            {
++            case GS_PSM_CT32: raw = GSMem::ReadCT32(m_vram, base, clutWidth, cx, cy); break;
++            case GS_PSM_CT24: raw = GSMem::ReadCT24(m_vram, base, clutWidth, cx, cy); break;
++            case GS_PSM_CT16: raw = Rgba5551ToRgba8888(GSMem::ReadCT16(m_vram, base, clutWidth, cx, cy)); break;
++            case GS_PSM_CT16S: raw = Rgba5551ToRgba8888(GSMem::ReadCT16S(m_vram, base, clutWidth, cx, cy)); break;
++            default: raw = 0xFFFF00FFu; break;
++            }
++            buffer->entries[dst & 511u] = raw;
++        }
++        buffer->valid = true;
++        return;
++    }
+     m_writeVramFuncs[psm & 0x3Fu](m_vram, base, bw, x, y, value);
+ }
+ 
+@@ -1014,6 +1088,11 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
+         case GS_PSM_T4:
+         case GS_PSM_T4HL:
+         case GS_PSM_T4HH:
++            if (const ClutBuffer *clut = clutBufferFor(this, false); clut && clut->valid)
++            {
++                const uint32_t idx = resolveClutIndex(static_cast<u8>(out), tex.cpsm, tex.csm, tex.csa, tex.psm);
++                return applyTexa(state.texa, tex.cpsm, clut->entries[idx & 511u]);
++            }
+             return LookupCLUT(state, static_cast<u8>(out), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+         }
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index d65b32b..db0b95e 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -17,6 +17,26 @@
+ #include <sstream>
+ #include <string>
+ 
++#include <mutex>
++#include <unordered_map>
++
++namespace
++{
++    // GS CLUT buffer (patch 0008). The GS copies a palette into an internal
++    // buffer when TEX0/TEX2 is written with a CLD that asks for it; games then
++    // reuse that VRAM (KH2 re-uploads its CLUT region several times a frame).
++    // The load is sent to the backend as a VRAM-write command with a sentinel
++    // PSM so it stays in order with transfers, without a new backend method.
++    constexpr uint32_t kClutLoadPsmTag = 0xC1D00000u;
++    struct ClutRegs
++    {
++        uint32_t cbp0 = 0xFFFFFFFFu;
++        uint32_t cbp1 = 0xFFFFFFFFu;
++    };
++    std::mutex g_clutRegsMutex;
++    std::unordered_map<const void *, ClutRegs> g_clutRegs;
++}
++
+ namespace
+ {
+     GSPrimReg decodePrimRegister(uint64_t value)
+@@ -1395,6 +1415,29 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
++        if (m_backend && t.cld != 0)
++        {
++            bool load = false;
++            {
++                std::lock_guard<std::mutex> lock(g_clutRegsMutex);
++                ClutRegs &cr = g_clutRegs[this];
++                switch (t.cld)
++                {
++                case 1: load = true; break;
++                case 2: load = true; cr.cbp0 = t.cbp; break;
++                case 3: load = true; cr.cbp1 = t.cbp; break;
++                case 4: load = t.cbp != cr.cbp0; cr.cbp0 = t.cbp; break;
++                case 5: load = t.cbp != cr.cbp1; cr.cbp1 = t.cbp; break;
++                default: break;
++                }
++            }
++            const bool indexed = t.psm == 0x13 || t.psm == 0x14 || t.psm == 0x1B || t.psm == 0x24 || t.psm == 0x2C;
++            if (load && indexed)
++                m_backend->WriteVram(kClutLoadPsmTag | t.psm | (static_cast<uint32_t>(t.csm) << 12),
++                                     t.cbp, m_texclut.cbw,
++                                     static_cast<uint32_t>(m_texclut.cou) | (static_cast<uint32_t>(t.csa) << 16),
++                                     m_texclut.cov, static_cast<uint32_t>(t.cpsm));
++        }
+         break;
+     }
+     case GS_REG_CLAMP_1:
+@@ -1425,6 +1468,29 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
++        if (m_backend && t.cld != 0)
++        {
++            bool load = false;
++            {
++                std::lock_guard<std::mutex> lock(g_clutRegsMutex);
++                ClutRegs &cr = g_clutRegs[this];
++                switch (t.cld)
++                {
++                case 1: load = true; break;
++                case 2: load = true; cr.cbp0 = t.cbp; break;
++                case 3: load = true; cr.cbp1 = t.cbp; break;
++                case 4: load = t.cbp != cr.cbp0; cr.cbp0 = t.cbp; break;
++                case 5: load = t.cbp != cr.cbp1; cr.cbp1 = t.cbp; break;
++                default: break;
++                }
++            }
++            const bool indexed = t.psm == 0x13 || t.psm == 0x14 || t.psm == 0x1B || t.psm == 0x24 || t.psm == 0x2C;
++            if (load && indexed)
++                m_backend->WriteVram(kClutLoadPsmTag | t.psm | (static_cast<uint32_t>(t.csm) << 12),
++                                     t.cbp, m_texclut.cbw,
++                                     static_cast<uint32_t>(m_texclut.cou) | (static_cast<uint32_t>(t.csa) << 16),
++                                     m_texclut.cov, static_cast<uint32_t>(t.cpsm));
++        }
+         break;
+     }
+     case GS_REG_XYOFFSET_1:

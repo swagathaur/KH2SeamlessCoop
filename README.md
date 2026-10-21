@@ -46,7 +46,7 @@ see [docs/harness.md](docs/harness.md).
 | `game/` | Files extracted from the disc (ignored) |
 | `generated/` | Translated C++ (ignored; regenerate with `tools/win/recomp.ps1`) |
 | `config/` | Recompiler configs and function maps (main ELF + five overlays) |
-| `port/runtime/` | Runner, overlay manager, libpad2 replacement |
+| `port/runtime/` | Runner and test harness, overlay manager, KH2-specific HLE (libpad2, CD, libgraph, CD callbacks) and debugging tools (trace, DMA log, profiler) |
 | `port/coop/` | Co-op: overrides, puppets, netcode (not started) |
 | `patches/ps2recomp/` | Small patches applied to the runtime at configure time |
 | `tools/` | Extraction, function-map, config and pipeline scripts |
@@ -58,14 +58,15 @@ see [docs/harness.md](docs/harness.md).
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0 | Toolchain | Function maps, configs, full recompile and a linked native build |
-| 1 | Boot | Native build reaches the title screen with sound |
-| 2 | Playable | Twilight Town playable end to end at full speed |
+| 0 | Toolchain | Function maps, configs, full recompile and a linked native build ✅ |
+| 1 | Boot | Native build reaches the title screen with sound ✅ (New Game and the opening movie run too) |
+| 2 | Playable | Twilight Town playable end to end at full speed (in progress) |
 | 3 | Hook layer | ImGui overlay listing live actors; first function override working |
 | 4 | Ghost | Two instances on a LAN; one player's Sora shown as a puppet in the other's party |
 | 5+ | Co-op | Enemy sync, combat events, room transitions, cutscenes |
 
-Status and findings: [docs/findings.md](docs/findings.md).
+Status and findings: [docs/findings.md](docs/findings.md); every boot blocker and
+its fix, in order: [docs/boot-log.md](docs/boot-log.md).
 
 ## Credits and licence
 

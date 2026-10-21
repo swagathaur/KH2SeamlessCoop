@@ -21,6 +21,7 @@
 
 #include "ps2_runtime.h"
 #include "runtime/ps2_pad_host.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_native_iop.h"
 #include "raylib.h"
@@ -33,6 +34,7 @@
 #include "gs_image.h"
 #include "gs_env.h"
 #include "cd_callback.h"
+#include "movie_eof.h"
 #include "profiler.h"
 
 namespace ps2_stubs
@@ -89,6 +91,7 @@ struct Options
     std::string sound = "native";      // native: run the disc's sound IRX on the emulated IOP
     bool mute = false;
     std::string trace;                 // comma-separated guest function addresses
+    double speed = 1.0;                // --speed: guest time vs wall time, 0 = as fast as possible
     unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
@@ -114,6 +117,7 @@ void usage()
         "  --sound=native|off      run LIBSD/LIBSSL on the emulated IOP, or stub them (default native)\n"
         "  --mute                  keep the sound driver running but play nothing\n"
         "  --trace=ADDR[,ADDR..]   log the first calls to these guest functions and count them\n"
+        "  --speed=X               run guest time X times real time (0 = unpaced, as fast as possible)\n"
         "  --profile[=MS]          sample host threads every MS ms (default 1) and print hot functions\n"
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
         "  --gs-dump=A,B,..        at these guest frames write GS registers and all of GS memory\n"
@@ -150,6 +154,7 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--trace=", 0) == 0) o.trace = value(a);
         else if (a.rfind("--dma-log=", 0) == 0) o.dmaLog = value(a);
         else if (a == "--profile") o.profileMs = 1;
+        else if (a.rfind("--speed=", 0) == 0) o.speed = std::stod(value(a));
         else if (a.rfind("--profile=", 0) == 0) o.profileMs = std::max(1, std::stoi(value(a)));
         else if (a.rfind("--gs-dump=", 0) == 0)
         {
@@ -332,6 +337,7 @@ bool headlessPump(void *userData)
     // No window, so the runtime's present loop never polls input; publishing an
     // idle host state is what merges the --input script in (ps2_pad.cpp).
     ps2PadPublishHostState(0u, 0u, 0x80808080u);
+    kh2movie::poll(*h.runtime); // TODO: also needs a per-frame hook in windowed mode
 
     if (frame != h.lastShotFrame &&
         ((o.screenshotEvery && frame % o.screenshotEvery == 0) || o.screenshotAt.count(frame)))
@@ -462,6 +468,11 @@ int main(int argc, char **argv)
     harness.start = harness.lastStatus = std::chrono::steady_clock::now();
     std::printf("[kh2] starting at 0x%08X\n", runtime.cpu().pc);
     std::fflush(stdout);
+    if (opt.speed != 1.0)
+    {
+        runtime.eeScheduler().setHostSpeed(opt.speed);
+        std::printf("[harness] host speed %s\n", opt.speed > 0.0 ? std::to_string(opt.speed).c_str() : "unpaced");
+    }
     if (opt.profileMs)
         kh2prof::start(opt.profileMs);
     runtime.run();

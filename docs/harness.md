@@ -36,6 +36,7 @@ extra arguments.
 | `--mute` | Keep the sound driver running but play nothing |
 | `--trace=ADDR[:N][,ADDR...]` | Log the first 8 calls to each guest function (args, return address), hex-dumping N bytes at `a0` with `:N`, and add per-function call counts to the status line |
 | `--gs-dump=A,B,...` | At these guest frames write `gs_XXXXXX.txt` (GS registers, draw contexts, display source, draws grouped by target, then the last 512 GS events in order: GIFtags, register writes, draws, transfers, presents) and `vram_XXXXXX.png` (all 4 MB of GS memory as a 1024×1024 32-bit image) |
+| `--speed=X` | Run guest time at X times real time; `0` = unpaced (as fast as the host can). Guest-frame timings (`--input`, screenshots) are unaffected |
 | `--profile[=MS]` | Sample every host thread's instruction pointer every MS ms (default 1) and print the hottest functions at exit, overall and for the four busiest threads (Windows; uses the build's PDB) |
 | `--dma-log=FRAME,COUNT` | From guest frame FRAME, decode the next COUNT GIF-channel `sceDmaSend` chains: every DMAtag, GIFtag and A+D register write |
 | `--missing=stop\|continue` | On a call into untranslated code: stop (default) or keep going |

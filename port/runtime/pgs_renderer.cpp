@@ -28,8 +28,11 @@
 #include <cstring>
 #include <memory>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "context.hpp"
 #include "device.hpp"
@@ -73,10 +76,15 @@ Program *g_uiProgram[2] = {nullptr, nullptr}; // [textured]
 // On-screen UI (Dear ImGui): F1 toggles the settings menu, F2 the frame-rate
 // display. The menu itself is drawn by a callback (overlay_ui.cpp).
 std::function<void()> g_uiCallback;
+std::function<void()> g_hudCallback;
+std::atomic<bool> g_hudVisible{false};
 std::atomic<bool> g_menuOpen{false};
 std::atomic<bool> g_showFps{false};
 bool g_imguiReady = false;
 double g_toastUntil = 0.0;
+std::string g_toastText = "F1 or Select+Start: settings   F2: frame rate   F3: game state   F12: screenshot   Alt+Enter: fullscreen";
+std::mutex g_toastMutex;
+std::atomic<bool> g_screenshotRequested{false};
 Program *g_upscaleProgram = nullptr;
 Program *g_sharpenProgram = nullptr;
 ImageHandle g_fsrTarget;
@@ -94,12 +102,56 @@ void registerThread()
     }
 }
 
+// GIF data from the guest side is queued, not fed to paraLLEl-GS directly:
+// the render thread holds g_mutex through scanout and presentation (which can
+// wait for the display), and the EE thread must never wait for that. The queue
+// is drained in order before every scanout and between frames. paraLLEl-GS
+// only draws what is shown; everything the guest can observe of the GS stays
+// with the runtime's own GS, so feeding it a little later is safe.
+std::mutex g_queueMutex;
+std::condition_variable g_queueDrained;
+std::vector<uint8_t> g_queue;    // [u32 size][size bytes]...
+std::vector<uint8_t> g_draining; // the render thread's side of the swap
+constexpr size_t kQueueLimit = 256u << 20; // past this the producer waits (render thread stuck)
+
 void tapPacket(const uint8_t *data, uint32_t size, void *)
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    registerThread();
-    if (g_gs && size >= 16)
-        g_gs->gif_transfer(3, data, size & ~15u);
+    size &= ~15u;
+    if (size == 0)
+        return;
+    std::unique_lock<std::mutex> lock(g_queueMutex);
+    if (g_queue.size() > kQueueLimit)
+        g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; });
+    const size_t at = g_queue.size();
+    g_queue.resize(at + 4 + size);
+    std::memcpy(g_queue.data() + at, &size, 4);
+    std::memcpy(g_queue.data() + at + 4, data, size);
+}
+
+// Render thread, under g_mutex.
+void drainQueue()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        if (g_queue.empty())
+            return;
+        g_draining.swap(g_queue);
+    }
+    g_queueDrained.notify_all();
+    if (g_gs)
+    {
+        size_t at = 0;
+        while (at + 4 <= g_draining.size())
+        {
+            uint32_t size;
+            std::memcpy(&size, g_draining.data() + at, 4);
+            g_gs->gif_transfer(3, g_draining.data() + at + 4, size);
+            at += 4 + size;
+        }
+    }
+    g_draining.clear();
+    if (g_draining.capacity() > (64u << 20))
+        g_draining.shrink_to_fit();
 }
 
 void tapRegister(uint8_t reg, uint64_t value, void *)
@@ -198,6 +250,16 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_showFps = !g_showFps;
             return 0;
         }
+        if (wp == VK_F3)
+        {
+            g_hudVisible = !g_hudVisible;
+            return 0;
+        }
+        if (wp == VK_F12)
+        {
+            g_screenshotRequested = true;
+            return 0;
+        }
         break;
     case WM_SYSCHAR: // no menu beep on Alt+Enter
         return 0;
@@ -236,8 +298,20 @@ bool createWindow()
     return true;
 }
 
+std::atomic<uint32_t> g_requestedSize{0}; // w << 16 | h, applied on the window thread
+
 void pumpMessages()
 {
+    if (const uint32_t req = g_requestedSize.exchange(0))
+    {
+        if (g_hwnd && !g_fullscreen)
+        {
+            RECT r{0, 0, LONG(req >> 16), LONG(req & 0xFFFF)};
+            AdjustWindowRect(&r, GetWindowLong(g_hwnd, GWL_STYLE), FALSE);
+            SetWindowPos(g_hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
     {
@@ -555,7 +629,8 @@ bool uiBuild()
         return false;
     const double now = nowSeconds();
     const bool toast = now < g_toastUntil;
-    if (!g_menuOpen && !g_showFps && !toast)
+    const bool hud = g_hudVisible && g_hudCallback;
+    if (!g_menuOpen && !g_showFps && !toast && !hud)
         return false;
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -577,9 +652,14 @@ bool uiBuild()
         ImGui::Begin("##toast", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                          ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::TextUnformatted("F1 or Select+Start: settings   F2: frame rate   Alt+Enter: fullscreen");
+        {
+            std::lock_guard<std::mutex> lock(g_toastMutex);
+            ImGui::TextUnformatted(g_toastText.c_str());
+        }
         ImGui::End();
     }
+    if (hud)
+        g_hudCallback();
     if (g_menuOpen && g_uiCallback)
         g_uiCallback();
     ImGui::Render();
@@ -797,6 +877,7 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         registerThread();
+        drainQueue();
         g_gs->flush();
         copyPrivRegisters(priv);
         VSyncInfo info = {};
@@ -829,8 +910,19 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 }
 
 void setAspect(float aspect) { g_opt.aspect = aspect; }
+float displayAspect() { return g_opt.aspect > 0.0f ? g_opt.aspect : 4.0f / 3.0f; }
+bool takeScreenshotRequest() { return g_screenshotRequested.exchange(false); }
+void toast(const std::string &text, double seconds)
+{
+    std::lock_guard<std::mutex> lock(g_toastMutex);
+    g_toastText = text;
+    g_toastUntil = nowSeconds() + seconds;
+}
 
 void setUiCallback(std::function<void()> draw) { g_uiCallback = std::move(draw); }
+void setHudCallback(std::function<void()> draw) { g_hudCallback = std::move(draw); }
+bool hudVisible() { return g_hudVisible; }
+void setHudVisible(bool on) { g_hudVisible = on; }
 bool menuOpen() { return g_menuOpen; }
 void setMenuOpen(bool open) { g_menuOpen = open; }
 void toggleMenu() { g_menuOpen = !g_menuOpen; }
@@ -878,12 +970,59 @@ void setFullscreen(bool on)
 #endif
 }
 void requestClose() { g_closed = true; }
+void setWindowSize(unsigned w, unsigned h)
+{
+#if defined(_WIN32)
+    if (w && h && w < 65536 && h < 65536)
+        g_requestedSize = (uint32_t(w) << 16) | uint32_t(h);
+#else
+    (void)w;
+    (void)h;
+#endif
+}
+void windowSize(unsigned &w, unsigned &h)
+{
+#if defined(_WIN32)
+    w = g_clientW;
+    h = g_clientH;
+#else
+    w = g_opt.windowWidth;
+    h = g_opt.windowHeight;
+#endif
+}
 
 bool pumpWindow()
 {
 #if defined(_WIN32)
     if (g_opt.windowed)
         pumpMessages();
+#endif
+    if (g_active)
+    {
+        // Keep up between frames so a frame's worth never piles up.
+        std::lock_guard<std::mutex> lock(g_mutex);
+        registerThread();
+        drainQueue();
+    }
+    return !g_closed;
+}
+
+bool redraw()
+{
+#if defined(_WIN32)
+    if (!g_opt.windowed)
+        return !g_closed;
+    pumpMessages();
+    // Paced to ~60 Hz: without guest frames nothing else limits this.
+    static double last = 0.0;
+    const double now = nowSeconds();
+    if (now - last < 1.0 / 60.0)
+        return !g_closed;
+    last = now;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    registerThread();
+    if (g_active && g_clientW && g_clientH)
+        present();
 #endif
     return !g_closed;
 }

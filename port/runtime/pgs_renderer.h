@@ -44,9 +44,21 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick);
 
 // Display aspect for presentation (e.g. 16:9 with the widescreen patch).
 void setAspect(float aspect);
+// Client area size; applied on the next message pump (ignored in fullscreen).
+void setWindowSize(unsigned w, unsigned h);
+void windowSize(unsigned &w, unsigned &h);
+// The aspect the picture is shown at (4:3 unless a patch says otherwise).
+float displayAspect();
+// F12 was pressed since the last call.
+bool takeScreenshotRequest();
+// A short message in the bottom-right corner.
+void toast(const std::string &text, double seconds = 4.0);
 
 // Process window messages only (between guest frames). False once closed.
 bool pumpWindow();
+// While the game is paused: process messages and show the last frame again
+// with the UI on top (~60 Hz). False once closed.
+bool redraw();
 
 // Read back the last scanned-out frame as RGBA8 (for screenshots).
 bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height);
@@ -54,6 +66,10 @@ bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height);
 // On-screen UI. The callback draws the settings menu with Dear ImGui while it
 // is open (F1, or Select+Start through toggleMenu()); F2 shows frame rates.
 void setUiCallback(std::function<void()> draw);
+// Drawn every frame while F3's panel is on (menu open or not).
+void setHudCallback(std::function<void()> draw);
+bool hudVisible();
+void setHudVisible(bool on);
 bool menuOpen();
 void setMenuOpen(bool open);
 void toggleMenu();

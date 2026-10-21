@@ -9,13 +9,16 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
 #include <set>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -40,6 +43,9 @@
 #include "pgs_renderer.h"
 #include "host_input.h"
 #include "game_patches.h"
+#include "game_state.h"
+#include "coop.h"
+#include "puppets.h"
 #include "watchdog.h"
 #include "overlay_ui.h"
 
@@ -96,6 +102,7 @@ struct Options
     std::string missing = "stop";      // missing-function policy
     std::string sound = "native";      // native: run the disc's sound IRX on the emulated IOP
     bool mute = false;
+    int volume = 100;                  // --volume: percent
     std::string trace;                 // comma-separated guest function addresses
     bool skipMovies = false;           // --skip-movies
     double speed = 1.0;                // --speed: guest time vs wall time, 0 = as fast as possible
@@ -104,6 +111,7 @@ struct Options
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
+    std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
     unsigned ssaa = 1;                 // GPU renderer super-sampling: 1, 2, 4, 8, 16
@@ -114,11 +122,20 @@ struct Options
     bool swapConfirm = false;          // controller: confirm on the right button instead of the bottom
     bool noRumble = false;
     bool showFps = false;
+    float ffSpeed = 3.0f;              // --ff-speed: fast-forward (hold Tab)
+    bool pauseUnfocused = false;
+    bool noMouseCamera = false;
+    float mouseSensitivity = 1.0f;
     std::string patches;               // game patches to enable, comma-separated
     uint32_t mashMask = 0;             // --mash: press these buttons every mashEvery frames
     uint64_t mashEvery = 0;
+    uint64_t mashUntil = UINT64_MAX;  // --mash-until: stop mashing at this guest frame
+    struct ScriptStep { uint64_t start, frames; uint32_t buttons; uint8_t lx, ly, rx, ry; };
+    std::vector<ScriptStep> script;    // --script: timed buttons and stick positions
     unsigned watchdog = 0;             // seconds without a host-loop iteration before dumping stacks
     bool listPatches = false;
+    kh2coop::Options coop;             // --host / --join / --name
+    std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
 };
 
 void usage()
@@ -132,6 +149,8 @@ void usage()
         "  --timeout=SEC           give up after SEC wall-clock seconds, exit 3\n"
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
         "  --screenshot-at=A,B,..  save shots at these guest frames\n"
+        "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
+        "  --ram-dump=A,B,..       write the guest's 32 MB of RAM to SHOTS/ram_FRAME.bin at these frames\n"
         "  --shots=DIR             screenshot directory (default: shots)\n"
         "  --input=SCRIPT          pad script, file or inline: '<frame> <BTN>[+BTN] [hold];...'\n"
         "                          buttons: UP DOWN LEFT RIGHT CROSS CIRCLE SQUARE TRIANGLE\n"
@@ -139,6 +158,7 @@ void usage()
         "  --status-every=SEC      status line interval (default 2, 0 = off)\n"
         "  --missing=stop|continue what to do on a call to untranslated code (default stop)\n"
         "  --sound=native|off      run LIBSD/LIBSSL on the emulated IOP, or stub them (default native)\n"
+        "  --volume=N              sound volume, 0-100 (default 100)\n"
         "  --mute                  keep the sound driver running but play nothing\n"
         "  --trace=ADDR[,ADDR..]   log the first calls to these guest functions and count them\n"
         "  --skip-movies           end each movie as soon as it starts (debugging)\n"
@@ -161,10 +181,21 @@ void usage()
         "  --swap-confirm          controller: right face button confirms (default: bottom button)\n"
         "  --no-rumble             controller vibration off\n"
         "  --show-fps              show frame rates (F2 toggles; F1 or Select+Start opens settings)\n"
+        "  --ff-speed=X            fast-forward speed while Tab is held (default 3)\n"
+        "  --no-mouse-camera       don't turn the camera with the mouse (right button held)\n"
+        "  --mouse-sensitivity=X   mouse camera speed (default 1)\n"
+        "  --pause-unfocused       pause while the window is in the background\n"
         "  --patch=NAME[,NAME..]   enable game patches (see --list-patches); --widescreen = --patch=widescreen\n"
         "  --list-patches          list the available game patches and exit\n"
         "  --watchdog=SEC          print every thread's stack if the host loop stalls this long\n"
         "                          (default 20 with --headless, off otherwise)\n"
+        "  --script=FILE           timed input: lines 'START FRAMES BUTTONS|- [LX LY [RX RY]]'\n"
+        "                          (sticks 0-255, 128 = centre, LY 0 = up; START may be +N)\n"
+        "  --host[=PORT]           host a co-op session (default port 27552)\n"
+        "  --join=HOST[:PORT]      join a co-op session\n"
+        "  --name=NAME             your name in co-op\n"
+        "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
+        "  --mash-until=FRAME      stop --mash at this guest frame\n"
         "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
         "                          dialogue whatever the load times)\n"
         "exit codes: 0 frame target reached, 1 runtime stopped early, 2 usage,\n"
@@ -208,6 +239,7 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--missing=", 0) == 0) o.missing = value(a);
         else if (a.rfind("--sound=", 0) == 0) o.sound = value(a);
         else if (a == "--mute") o.mute = true;
+        else if (a.rfind("--volume=", 0) == 0) o.volume = std::clamp(std::stoi(value(a)), 0, 100);
         else if (a.rfind("--trace=", 0) == 0) o.trace = value(a);
         else if (a.rfind("--dma-log=", 0) == 0) o.dmaLog = value(a);
         else if (a == "--profile") o.profileMs = 1;
@@ -219,6 +251,12 @@ bool parse(int argc, char **argv, Options &o)
             std::stringstream ss(value(a));
             for (std::string t; std::getline(ss, t, ',');)
                 if (!t.empty()) o.watch.push_back(static_cast<uint32_t>(std::stoul(t, nullptr, 16)));
+        }
+        else if (a.rfind("--ram-dump=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.ramDumpAt.insert(std::stoull(t));
         }
         else if (a.rfind("--stack-dump=", 0) == 0)
         {
@@ -254,6 +292,10 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--swap-confirm") o.swapConfirm = true;
         else if (a == "--no-rumble") o.noRumble = true;
         else if (a == "--show-fps") o.showFps = true;
+        else if (a.rfind("--ff-speed=", 0) == 0) o.ffSpeed = std::stof(value(a));
+        else if (a == "--pause-unfocused") o.pauseUnfocused = true;
+        else if (a == "--no-mouse-camera") o.noMouseCamera = true;
+        else if (a.rfind("--mouse-sensitivity=", 0) == 0) o.mouseSensitivity = std::stof(value(a));
         else if (a.rfind("--patch=", 0) == 0) o.patches += (o.patches.empty() ? "" : ",") + value(a);
         else if (a == "--widescreen") o.patches += o.patches.empty() ? "widescreen" : ",widescreen";
         else if (a.rfind("--mash=", 0) == 0)
@@ -269,6 +311,57 @@ bool parse(int argc, char **argv, Options &o)
                 if (!m) { std::fprintf(stderr, "unknown button %s\n", b.c_str()); return false; }
                 o.mashMask |= m;
             }
+        }
+        else if (a == "--host") o.coop.host = true;
+        else if (a.rfind("--host=", 0) == 0) { o.coop.host = true; o.coop.port = static_cast<uint16_t>(std::stoul(value(a))); }
+        else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
+        else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
+        else if (a.rfind("--net-loss=", 0) == 0) o.coop.simulatedLoss = std::stof(value(a));
+        else if (a.rfind("--spawn-test=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos) return false;
+            o.spawnTests.emplace_back(std::stoull(v.substr(0, colon)),
+                                      static_cast<uint32_t>(std::stoul(v.substr(colon + 1), nullptr, 16)));
+        }
+        else if (a.rfind("--mash-until=", 0) == 0) o.mashUntil = std::stoull(value(a));
+        else if (a.rfind("--script=", 0) == 0)
+        {
+            // Lines: START FRAMES BUTTONS|- [LX LY [RX RY]]  (sticks 0..255, 128 centre;
+            // LY 0 is up). '#' starts a comment. START may be +N, relative to the
+            // end of the previous step.
+            std::ifstream in(value(a));
+            if (!in) { std::fprintf(stderr, "cannot read %s\n", value(a).c_str()); return false; }
+            uint64_t prevEnd = 0;
+            for (std::string line; std::getline(in, line);)
+            {
+                line = line.substr(0, line.find('#'));
+                std::istringstream ls(line);
+                std::string start, buttons;
+                Options::ScriptStep st{0, 0, 0, 0x80, 0x80, 0x80, 0x80};
+                if (!(ls >> start >> st.frames >> buttons))
+                    continue;
+                st.start = start[0] == '+' ? prevEnd + std::stoull(start.substr(1)) : std::stoull(start);
+                if (buttons != "-")
+                {
+                    std::stringstream bs(buttons);
+                    for (std::string b; std::getline(bs, b, '+');)
+                    {
+                        const uint32_t m = buttonMask(b);
+                        if (!m) { std::fprintf(stderr, "unknown button %s\n", b.c_str()); return false; }
+                        st.buttons |= m;
+                    }
+                }
+                unsigned v[4] = {0x80, 0x80, 0x80, 0x80};
+                for (unsigned &x : v)
+                    if (!(ls >> x)) break;
+                st.lx = uint8_t(v[0]); st.ly = uint8_t(v[1]); st.rx = uint8_t(v[2]); st.ry = uint8_t(v[3]);
+                prevEnd = st.start + st.frames;
+                o.script.push_back(st);
+            }
+            std::fprintf(stderr, "[harness] script: %zu steps, ends at frame %llu\n", o.script.size(),
+                         static_cast<unsigned long long>(prevEnd));
         }
         else if (a.rfind("--watchdog=", 0) == 0) o.watchdog = static_cast<unsigned>(std::stoul(value(a)));
         else if (a == "--list-patches") { o.listPatches = true; o.elf = o.elf.empty() ? "-" : o.elf; }
@@ -294,9 +387,12 @@ struct Harness
     uint64_t lastGpuFrame = UINT64_MAX;
     uint64_t lastEeDumpFrame = UINT64_MAX;
     uint64_t lastStackDumpFrame = UINT64_MAX;
+    uint64_t lastRamDumpFrame = UINT64_MAX;
+    uint64_t lastSpawnFrame = UINT64_MAX;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
+    std::filesystem::path screenshotDir = "screenshots";
 };
 
 double elapsed(const Harness &h)
@@ -334,6 +430,38 @@ void saveShot(Harness &h, uint64_t frame)
         std::printf("[harness] saved %s (%ux%u)\n", path.c_str(), w, hgt);
     else
         std::fprintf(stderr, "[harness] could not write %s\n", path.c_str());
+}
+
+// F12: the current picture at the shown aspect, to screenshots\ next to the
+// executable (or the working directory).
+void saveUserShot(const std::filesystem::path &dir)
+{
+    std::vector<uint32_t> rgba;
+    uint32_t w = 0, hgt = 0;
+    if (!kh2pgs::readback(rgba, w, hgt) || !w || !hgt)
+        return;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char name[64];
+    std::strftime(name, sizeof(name), "kh2_%Y%m%d_%H%M%S", &tm);
+    std::filesystem::path path = dir / (std::string(name) + ".png");
+    for (int i = 2; std::filesystem::exists(path, ec); ++i)
+        path = dir / (std::string(name) + "_" + std::to_string(i) + ".png");
+    Image img{rgba.data(), static_cast<int>(w), static_cast<int>(hgt), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    // Stretch to the display aspect (the GS picture's pixels are not square).
+    Image out = ImageCopy(img);
+    const int outW = static_cast<int>(std::lround(hgt * kh2pgs::displayAspect()));
+    ImageResize(&out, outW, static_cast<int>(hgt));
+    const bool ok = ExportImage(out, path.string().c_str());
+    UnloadImage(out);
+    kh2pgs::toast(ok ? "Screenshot saved: " + path.filename().string() : "Could not save " + path.string());
 }
 
 // GS state and the whole of GS local memory, to see where drawing lands.
@@ -503,6 +631,27 @@ bool harnessTick(Harness &h, uint64_t frame)
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
     }
+    for (const auto &[at, entry] : o.spawnTests)
+        if (frame == at && frame != h.lastSpawnFrame)
+        {
+            h.lastSpawnFrame = frame;
+            kh2puppets::requestSpawn(entry);
+        }
+    if (o.ramDumpAt.count(frame) && frame != h.lastRamDumpFrame)
+    {
+        h.lastRamDumpFrame = frame;
+        char name[64];
+        std::snprintf(name, sizeof(name), "ram_%06llu.bin", (unsigned long long)frame);
+        const std::filesystem::path path = std::filesystem::path(o.shotDir) / name;
+        std::error_code ec;
+        std::filesystem::create_directories(o.shotDir, ec);
+        if (FILE *f = std::fopen(path.string().c_str(), "wb"))
+        {
+            std::fwrite(h.runtime->memory().getRDRAM(), 1, 32u * 1024u * 1024u, f);
+            std::fclose(f);
+            std::printf("[harness] wrote %s\n", path.string().c_str());
+        }
+    }
     if (o.stackDumpAt.count(frame) && frame != h.lastStackDumpFrame)
     {
         h.lastStackDumpFrame = frame;
@@ -549,9 +698,27 @@ bool harnessTick(Harness &h, uint64_t frame)
             std::snprintf(w, sizeof(w), " [%08X]=%08X(%g)", addr, v, f);
             watched += w;
         }
-        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s%s%s%s\n", elapsed(h),
-                    (unsigned long long)frame, kh2ovl::activeName(), kh2ovl::switchCount(), mpeg,
-                    kh2cd::stats().c_str(), watched.c_str(), o.trace.empty() ? "" : " calls:",
+        const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
+        char game[160];
+        std::snprintf(game, sizeof(game), " | %s ev=%u ctl=%u btl=%u hp=%d/%d pos=%.0f,%.0f,%.0f",
+                      kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.battle, gs.party[0].hp,
+                      gs.party[0].maxHp, gs.player.pos[0], gs.player.pos[1], gs.player.pos[2]);
+        std::string coop;
+        if (kh2coop::active())
+        {
+            coop = " | coop: " + kh2coop::statusText();
+            for (const kh2coop::RemotePlayer &r : kh2coop::remotes())
+            {
+                char rb[160];
+                std::snprintf(rb, sizeof(rb), "; %s %s pos=%.0f,%.0f,%.0f rtt=%.0fms", r.name.c_str(),
+                              r.haveState ? kh2state::describe({r.state.world, r.state.room}).c_str() : "-",
+                              r.state.pos[0], r.state.pos[1], r.state.pos[2], r.rttMs);
+                coop += rb;
+            }
+        }
+        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s%s%s%s%s\n", elapsed(h),
+                    (unsigned long long)frame, kh2ovl::activeName(), kh2ovl::switchCount(), game, mpeg,
+                    (kh2cd::stats() + coop).c_str(), watched.c_str(), o.trace.empty() ? "" : " calls:",
                     kh2trace::summary().c_str());
         std::fflush(stdout);
     }
@@ -582,17 +749,31 @@ bool headlessPump(void *userData)
     // idle host state is what merges the --input script in (ps2_pad.cpp).
     {
         // --mash: held for 4 frames out of every N.
-        const uint32_t held = (o.mashEvery && frame % o.mashEvery < 4) ? o.mashMask : 0u;
-        const uint32_t pressed = (o.mashEvery && frame % o.mashEvery == 0) ? o.mashMask : 0u;
-        ps2PadPublishHostState(held, pressed, 0x80808080u);
+        const bool mash = o.mashEvery && frame < o.mashUntil;
+        const uint32_t held = (mash && frame % o.mashEvery < 4) ? o.mashMask : 0u;
+        uint32_t pressed = (mash && frame % o.mashEvery == 0) ? o.mashMask : 0u;
+        uint32_t heldAll = held;
+        uint32_t sticks = 0x80808080u;
+        for (const Options::ScriptStep &st : o.script)
+            if (frame >= st.start && frame < st.start + st.frames)
+            {
+                heldAll |= st.buttons;
+                if (frame == st.start)
+                    pressed |= st.buttons;
+                sticks = (uint32_t(st.rx) << 24) | (uint32_t(st.ry) << 16) | (uint32_t(st.lx) << 8) | st.ly;
+            }
+        ps2PadPublishHostState(heldAll, pressed, sticks);
     }
     kh2movie::poll(*h.runtime);
     kh2patches::tick(h.runtime->memory().getRDRAM());
+    kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (kh2pgs::active() && frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;
         kh2pgs::frame(h.runtime->memory().gs(), frame);
     }
+    else if (kh2pgs::active())
+        kh2pgs::pumpWindow(); // feeds queued GS data between frames
     return harnessTick(h, frame);
 }
 
@@ -602,16 +783,19 @@ bool playPump(void *userData)
     Harness &h = *static_cast<Harness *>(userData);
     const uint64_t frame = ps2PadCurrentGuestFrame();
     kh2ui::tick();
+    if (kh2pgs::takeScreenshotRequest())
+        saveUserShot(h.screenshotDir);
     kh2input::poll(kh2pgs::windowFocused());
     kh2movie::poll(*h.runtime);
     kh2patches::tick(h.runtime->memory().getRDRAM());
+    kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;
         if (!kh2pgs::frame(h.runtime->memory().gs(), frame))
             return false; // window closed
     }
-    else if (!kh2pgs::pumpWindow())
+    else if (!(kh2ui::paused() ? kh2pgs::redraw() : kh2pgs::pumpWindow()))
         return false;
     return harnessTick(h, frame);
 }
@@ -736,6 +920,8 @@ int main(int argc, char **argv)
     inputOpt.confirmOnBottom = !opt.swapConfirm;
     kh2input::init(inputOpt);
     kh2input::setRumbleEnabled(!opt.noRumble);
+    kh2input::setMouseCamera(!opt.noMouseCamera);
+    kh2input::setMouseSensitivity(opt.mouseSensitivity);
     if (gpu)
         kh2pgs::setShowFps(opt.showFps);
     // Both must precede initialize().
@@ -754,8 +940,8 @@ int main(int argc, char **argv)
     if (opt.sound == "native")
     {
         ps2_native_iop::setModules(runtime, {"LIBSD.IRX", "LIBSSL.IRX"});
-        if (opt.mute)
-            ps2_native_iop::setVolume(0.0f);
+        if (opt.mute || opt.volume < 100)
+            ps2_native_iop::setVolume(opt.mute ? 0.0f : opt.volume / 100.0f);
     }
 
     if (!runtime.loadELF(opt.elf))
@@ -806,7 +992,13 @@ int main(int argc, char **argv)
     {
         std::error_code ec;
         const auto exeDir = std::filesystem::absolute(argv[0], ec).parent_path();
-        kh2ui::install(runtime, (exeDir / "kh2recomp.ini").string());
+        kh2ui::Options uiOpt;
+        uiOpt.fastForwardSpeed = opt.ffSpeed;
+        uiOpt.pauseUnfocused = opt.pauseUnfocused;
+        uiOpt.baseSpeed = opt.speed;
+        uiOpt.volume = opt.mute ? 0.0f : opt.volume / 100.0f;
+        kh2ui::install(runtime, (exeDir / "kh2recomp.ini").string(), uiOpt);
+        harness.screenshotDir = exeDir / "screenshots";
     }
     if (!opt.trace.empty())
         kh2trace::install(runtime, opt.trace); // last, so it wraps the final implementations
@@ -815,6 +1007,8 @@ int main(int argc, char **argv)
     std::printf("[kh2] starting at 0x%08X\n", runtime.cpu().pc);
     std::fflush(stdout);
     kh2movie::setSkip(opt.skipMovies);
+    kh2puppets::install(runtime);
+    kh2coop::init(opt.coop);
     if (opt.speed != 1.0)
     {
         runtime.eeScheduler().setHostSpeed(opt.speed);
@@ -825,6 +1019,7 @@ int main(int argc, char **argv)
     if (opt.watchdog || opt.headless)
         kh2watch::start(opt.watchdog ? opt.watchdog : 20);
     runtime.run();
+    kh2coop::shutdown();
     kh2watch::stop();
     kh2prof::stopAndReport();
     kh2pgs::shutdown();

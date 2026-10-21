@@ -85,6 +85,38 @@ def containing(funcs, addr):
     sys.exit(f"no function contains patched address 0x{addr:08X}")
 
 
+def tail_callers(blob, segs, funcs, targets):
+    """Functions that reach any of `targets` (start addresses) with a J (a tail
+    call). The recompiler emits those as direct C++ calls, which bypass the
+    runtime's function table, so they need patched variants too. Transitive."""
+    starts = sorted(f[0] for f in funcs)
+    import bisect
+    def owner(a):
+        i = bisect.bisect_right(starts, a) - 1
+        if i < 0:
+            return None
+        f = by_start[starts[i]]
+        return f if f[0] <= a < f[1] else None
+    by_start = {f[0]: f for f in funcs}
+    jumps = {}
+    for vaddr, off, size in segs:
+        for i in range(0, size - 3, 4):
+            w = struct.unpack_from("<I", blob, off + i)[0]
+            if w >> 26 == 2:  # J
+                t = ((vaddr + i + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                jumps.setdefault(t, []).append(vaddr + i)
+    found = {}
+    todo = list(targets)
+    while todo:
+        t = todo.pop()
+        for site in jumps.get(t, []):
+            f = owner(site)
+            if f and f[0] not in targets and f[0] not in found and f[0] != t:
+                found[f[0]] = f
+                todo.append(f[0])
+    return found
+
+
 def ident(name):
     return re.sub(r"\W", "_", name)
 
@@ -118,6 +150,17 @@ def main():
             else:
                 blob[off] = value & 0xFF
 
+    # Functions that tail-call a patched one get a variant too (see tail_callers).
+    original = bytes(ELF.read_bytes())
+    for p in patches:
+        mine = {f[0] for f in p["functions"]}
+        for start, f in tail_callers(original, segs, funcs, mine).items():
+            if start in owner and owner[start] != p["name"]:
+                sys.exit(f"{p['name']} and {owner[start]} both need {f[2]}")
+            owner[start] = p["name"]
+            p["functions"].append(f)
+            print(f"game patches: {p['name']}: {f[2]} tail-calls a patched function; it gets a variant too")
+
     if WORK.exists():
         shutil.rmtree(WORK)
     WORK.mkdir(parents=True)
@@ -136,14 +179,22 @@ def main():
         if code != 0:
             sys.exit(f"ps2_recomp failed (exit {code}), see {log}")
         recomp.slim_includes(staging)
+        found = {}
         for cpp in staging.glob("*.cpp"):
             text = cpp.read_text(encoding="utf-8")
             m = recomp.SIG_RE.search(text)
             if not m or int(m.group(2), 16) not in owner:
                 continue
             addr = int(m.group(2), 16)
-            new = f"kh2patch_{ident(owner[addr])}_0x{addr:x}"
-            variants[addr] = (new, cpp.name, re.sub(rf"\b{re.escape(m.group(1))}\b", new, text))
+            found[addr] = (m.group(1), cpp.name, text)
+        # Rename each variant, and inside every variant of a patch, direct
+        # calls to the patch's other functions go to their variants.
+        renames = {addr: (old, f"kh2patch_{ident(owner[addr])}_0x{addr:x}") for addr, (old, _, _) in found.items()}
+        for addr, (old, name, text) in found.items():
+            for other, (o_old, o_new) in renames.items():
+                if owner[other] == owner[addr]:
+                    text = re.sub(rf"\b{re.escape(o_old)}\b", o_new, text)
+            variants[addr] = (renames[addr][1], name, text)
         missing = sorted(set(owner) - set(variants))
         if missing:
             sys.exit("ps2_recomp produced no code for " + ", ".join(f"0x{a:08X}" for a in missing))

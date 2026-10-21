@@ -20,3 +20,9 @@ widescreen = 1        # 16:9 patch
 
 # Controls
 # swap-confirm = 1    # Japanese layout: right face button confirms
+# no-rumble = 1
+# mouse-sensitivity = 1   # mouse camera (hold the right button); no-mouse-camera = 1 turns it off
+
+# Speed
+# ff-speed = 3            # fast-forward while Tab is held
+# pause-unfocused = 1     # pause while the window is in the background

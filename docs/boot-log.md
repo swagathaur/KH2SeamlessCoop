@@ -407,3 +407,19 @@ Three separate causes turned up on the way:
 Also fixed while looking: the IOP lacked `thvpool` (variable-length memory
 pools) and `cdvdman` `sceCdStatus`, which Square Enix's sound driver imports
 (`patches/ps2recomp/0014`).
+
+## 19. Gameplay: Market Street
+
+With 0015 in, the opening plays through (Roxas's room, the Usual Spot, the
+alley with Olette) into free control in Market Street, HUD up, about 19 000
+guest frames in with `--skip-movies --mash=CIRCLE:40`. A scripted walk
+(`--script=tools/scripts/walk-test.txt`, new: timed buttons and stick
+positions) runs, turns, jumps and attacks; the 26 VU1 programs already
+recorded cover the area (no new ones in a long run).
+
+Sound checked from a `PS2X_AUDIO_DUMP` of the first two minutes: music and
+effects at normal levels, no clipping, no dropouts.
+
+Still open: the guest gets about 50 vsyncs a second in Roxas's room and Market
+Street rather than 60 (VBlanks wait for the EE to execute a frame's worth of
+cycles as well as for the host clock, so this is the EE falling behind).

@@ -96,3 +96,66 @@ input. KH2 creates two pad sockets, useful later for local co-op input.
 The game loads `LIBSD.IRX` and `LIBSSL.IRX` (probably Square's sound library) on
 the IOP and streams `bgm/*.bgm`, `*/wave*.wd` and `voice/*.vsb` from `KH2.IMG`.
 The fork can run disc IRX modules on its emulated IOP (DQ8 does this); not yet set up.
+
+## Game state and the player actor
+
+`port/coop/game_state.h` reads the game's own state. Most addresses come from
+the KH2FM modding community's PCSX2 scripts for this exact build (CRC
+F266B00B; KH2FM-Mods-Num/GoA-ROM-Edition, "F266B00B GoA ROM.lua") and check
+out at run time (the F3 panel and the harness status line show them):
+
+| Address | What |
+|---|---|
+| `0x0032BAE0` | Current location: world u8, room u8, door u16, map u16, battle u16, event u16 |
+| `0x0032BB30` | Save data in play |
+| `0x01C6C750` | Party unit slot 1 (stride `0x268`): HP `+0`, max `+4`, MP `+0x180`, max `+0x184`, drive `+0x1B1`/`+0x1B2` |
+| `0x01D48DB8` | Control state (3 in cutscenes) |
+| `0x01C61958` | Battle state: 0 none, 1 battle, 2 forced |
+| `0x00349E0C` | Game speed (float); the frame delta the game uses is next to it at `0x00349E10` |
+
+**Player actor** (found here by RAM snapshot diffing with `--ram-dump` while
+the walk script moved Roxas; `tools/analysis/find_position.py`): the static
+`0x00352400` points at the player's `YS::PLAYER` object, whose first word is
+the class vtable `0x00352410` (one entry is `YS::PLAYER::_OVR_control`). In
+the object: a 4x4 world matrix at `+0x40` (rows; translation at `+0x70`,
+y up, 0 at floor level in Market Street), a velocity-like vector at `+0x20`,
+scale at `+0x30`, and the facing angle in radians at `+0x55C` (matrix yaw + π,
+mirrored at `+0x66C`). Other statics holding the same pointer: `0x00341708`,
+`0x00348638`, `0x00348754` (next to the camera type), `0x0034E948`,
+`0x0034ED04`, `0x01C5FF10`, `0x01D48DA0`. Running moves about 7.4 units a
+frame.
+
+**Object list.** `YS::OBJ::GetPlayer()` (`0x0016B0D0`) returns `*0x0034E948`.
+All live objects hang off `0x01D48DA0`, linked through `+0x8B4`
+(`0x001B9BC8` is the game's iterator; it skips objects whose `is_leave()` is
+set). `+8` points at the object's `00objentry.bin` record (id u32, type u8 at
+`+4`, model name at `+8`). Market Street at the start of gameplay:
+`P_EX110` (Roxas, type 0), `PRIZE`, `N_EX500/510/520_RTN` (Hayner, Pence,
+Olette; type 15), `W_EX010` (his weapon, type 5). The F3 panel lists them.
+
+**Transform.** An object's position is `+0x540` (x, y, z, 1) and its direction
+`+0x550` (sin yaw, 0, cos yaw, yaw); `FUN_00193608(obj)` builds the world
+matrix (`+0x40`) from them and is called each frame by `YS::OBJ::calc_motion`
+(`0x001B9B28`) through `jal`, so the runtime can override it. Calls made with
+`j` (tail calls, such as from `YS::OBJ::set_pos`) are compiled as direct C++
+calls and cannot be redirected; `jal` and `jalr` go through the runtime's
+dispatch. Vtables put `initialize` at `+0x08`, `pre_exec` at `+0x0C`,
+`control` at `+0x10` and `leave_req` at `+0x20` (from the decomp's named
+`VTABLE<T>` functions); the player's is `0x00352410`.
+
+Tools: `tools/analysis/disasm.py` (capstone; names from the function map),
+`callers.py` (jal/j call sites), `find_position.py` (snapshot diffing).
+
+**Spawning (for real puppets; not used yet).** `FUN_0016F000(entryId, FVector*
+pos, float yaw in $f12)` is the object factory: it switches on the objentry
+type (jump table `0x0036C3DC`) and allocates each class from the area heap
+(`AREA::Alloc`), with entry `0x236` ("PLAYER") special-cased to Sora's current
+form. Room spawns go through `YS::UNIT_DATA_OBJ::appear` (`0x00199938`) →
+`FUN_00199890`, which calls the factory and then the object's vtable `+0x38`
+with the unit group and spawn record. `00objentry.bin` is in memory at
+`*0x01D5BA10` (u32 3, u32 count = 1900, then 0x60-byte entries: id u32, type
+u8 at +4, model at +8, motion set at +0x28). NPC-class versions of the player
+characters exist, which is what puppets should be: `B_EX110_RTN` (`0x084C`,
+Roxas, with motions), `P_EX020_RTN` / `P_EX030_RTN` (`0x0433`/`0x0434`, Donald
+and Goofy), `P_EX100_LAST` (`0x08D2`, Sora, type 8). Open question: their
+motion sets have to be loaded in the room first.

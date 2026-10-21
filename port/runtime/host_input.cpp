@@ -4,12 +4,14 @@
 // Controllers: XInput (Xbox and compatible pads, and most others through
 // Steam Input), first connected pad. Keyboard: same layout as the runtime's
 // raylib bindings (ps2_pad.cpp): arrows = D-pad, WASD = left stick, IJKL =
-// right stick, Enter = Start, Tab = Select, Q/E = L1/R1, Shift = L2/R2,
+// right stick (or the mouse with the right button held), Enter = Start,
+// Backspace = Select, Tab = fast-forward, Q/E = L1/R1, Shift = L2/R2,
 // X/Space = Cross, C/Esc = Circle, Z = Square, V = Triangle, R/F = L3/R3.
 
 #include "host_input.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 
 #include "runtime/ps2_pad_host.h"
@@ -42,6 +44,9 @@ std::atomic<bool> g_rumbleOn{true};
 std::atomic<bool> g_suppressed{false};
 void (*g_comboFn)() = nullptr;
 bool g_comboHeld = false;
+bool g_fastForward = false;
+std::atomic<bool> g_mouseCamera{true};
+std::atomic<float> g_mouseSensitivity{1.0f};
 
 uint8_t axisByte(int v, bool invert)
 {
@@ -62,8 +67,64 @@ uint8_t keyAxis(int lowKey, int highKey, uint8_t fallback)
         return fallback;
     return lo == hi ? 0x80 : lo ? 0x00 : 0xFF;
 }
+
+// Mouse camera: while the right button is held, mouse movement becomes the
+// right stick. The stick sets a turning rate, so the deflection follows the
+// mouse's recent speed (an exponentially decaying sum of its movement), and
+// the cursor is held in place so it never runs into the screen edge.
+struct MouseLook
+{
+    bool active = false;
+    POINT anchor{};
+    double accX = 0, accY = 0;
+    LARGE_INTEGER last{};
+};
+MouseLook g_mouse;
+
+bool mouseStick(uint8_t &rx, uint8_t &ry)
+{
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    const double dt = g_mouse.last.QuadPart ? double(now.QuadPart - g_mouse.last.QuadPart) / double(freq.QuadPart) : 0.0;
+    g_mouse.last = now;
+    if (!g_mouseCamera || !key(VK_RBUTTON))
+    {
+        g_mouse.active = false;
+        return false;
+    }
+    POINT p;
+    GetCursorPos(&p);
+    if (!g_mouse.active)
+    {
+        g_mouse.active = true;
+        g_mouse.anchor = p;
+        g_mouse.accX = g_mouse.accY = 0;
+        return true;
+    }
+    constexpr double kTau = 0.06; // seconds of movement the deflection averages
+    const double decay = std::exp(-dt / kTau);
+    g_mouse.accX = g_mouse.accX * decay + (p.x - g_mouse.anchor.x);
+    g_mouse.accY = g_mouse.accY * decay + (p.y - g_mouse.anchor.y);
+    if (p.x != g_mouse.anchor.x || p.y != g_mouse.anchor.y)
+        SetCursorPos(g_mouse.anchor.x, g_mouse.anchor.y);
+    // ~1500 px/s at sensitivity 1 is a full deflection.
+    const double scale = 127.0 * g_mouseSensitivity.load() / 1500.0 / kTau;
+    auto axis = [&](double acc) {
+        const double v = 128.0 + acc * scale;
+        return static_cast<uint8_t>(v < 0 ? 0 : v > 255 ? 255 : v);
+    };
+    rx = axis(g_mouse.accX);
+    ry = axis(g_mouse.accY);
+    return true;
+}
 #endif
 } // namespace
+
+void setMouseCamera(bool on) { g_mouseCamera = on; }
+bool mouseCamera() { return g_mouseCamera; }
+void setMouseSensitivity(float s) { g_mouseSensitivity = s; }
+float mouseSensitivity() { return g_mouseSensitivity; }
 
 void init(const Options &options) { g_opt = options; }
 void setRumbleEnabled(bool on) { g_rumbleOn = on; }
@@ -80,6 +141,8 @@ void setRumble(float small, float large)
     g_rumbleSmall = clamp(small);
     g_rumbleLarge = clamp(large);
 }
+
+bool fastForwardHeld() { return g_fastForward; }
 
 void poll(bool keyboardFocus)
 {
@@ -153,19 +216,24 @@ void poll(bool keyboardFocus)
             {'X', PAD_CROSS}, {VK_SPACE, PAD_CROSS}, {'C', PAD_CIRCLE}, {VK_ESCAPE, PAD_CIRCLE},
             {'Z', PAD_SQUARE}, {VK_NUMPAD0, PAD_SQUARE}, {'V', PAD_TRIANGLE}, {VK_NUMPAD1, PAD_TRIANGLE},
             {'Q', PAD_L1}, {'E', PAD_R1}, {VK_LSHIFT, PAD_L2}, {VK_RSHIFT, PAD_R2},
-            {VK_RETURN, PAD_START}, {VK_TAB, PAD_SELECT}, {'R', PAD_L3}, {'F', PAD_R3},
+            {VK_RETURN, PAD_START}, {VK_BACK, PAD_SELECT}, {'R', PAD_L3}, {'F', PAD_R3},
         };
         for (const Bind &k : kKeys)
             if (key(k.vk))
                 held |= k.mask;
+        g_fastForward = key(VK_TAB);
         rx = keyAxis('J', 'L', rx);
         ry = keyAxis('I', 'K', ry);
+        if (!g_suppressed)
+            mouseStick(rx, ry);
         lx = keyAxis('A', 'D', lx);
         ly = keyAxis('W', 'S', ly);
     }
 #else
     (void)keyboardFocus;
 #endif
+    if (!keyboardFocus)
+        g_fastForward = false;
     // Select+Start: settings menu.
     const bool combo = (held & (PAD_SELECT | PAD_START)) == (PAD_SELECT | PAD_START);
     if (combo && !g_comboHeld && g_comboFn)

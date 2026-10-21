@@ -37,9 +37,14 @@ letterboxed to the window.
 super-sampling, sharp upscaling, fullscreen, VSync, the frame-rate display,
 the game patches, button layout and vibration all change immediately, and
 **Save settings** writes them to `kh2recomp.ini` next to the executable. The
-menu works with the mouse, keyboard or controller; the game is paused for
-input while it is open. **F2** toggles the frame-rate display, **Alt+Enter** or
-**F11** fullscreen.
+menu works with the mouse, keyboard or controller; the game pauses while it
+is open (and, with **Pause when the window is in the background** or
+`--pause-unfocused`, while you are in another window).
+
+Hold **Tab** to fast-forward (3x by default; the menu or `--ff-speed=X` sets
+it) — handy for dialogue and long walks. **F2** toggles the frame-rate display, **F3** the game-state panel (location,
+party, live actors, co-op), **F12** saves a screenshot to `screenshots\`
+next to the executable, **Alt+Enter** or **F11** toggles fullscreen.
 
 ## Speed: compiled VU1 programs
 
@@ -66,7 +71,7 @@ gives the Japanese layout. Rumble works on XInput pads.
 |---|---|---|
 | D-pad | D-pad | Arrow keys |
 | Left stick | Left stick | W A S D |
-| Right stick | Right stick | I J K L |
+| Right stick | Right stick | I J K L, or the mouse with the right button held |
 | Circle | A (bottom) | C, Esc |
 | Cross | B (right) | X, Space |
 | Square | X | Z |
@@ -74,7 +79,10 @@ gives the Japanese layout. Rumble works on XInput pads.
 | L1 / R1 | LB / RB | Q / E |
 | L2 / R2 | LT / RT | Left / Right Shift |
 | L3 / R3 | Stick clicks | R / F |
-| Start / Select | Start / Back | Enter / Tab |
+| Start / Select | Start / Back | Enter / Backspace |
+
+The mouse camera's speed is in the menu (`--mouse-sensitivity=X`;
+`--no-mouse-camera` turns it off).
 
 ## Game patches
 
@@ -92,3 +100,20 @@ Enable several with commas: `--patch=widescreen,no-letterbox`. They are built
 by `tools/game_patches.py` (run automatically by `tools/win/recomp.ps1`): the
 game functions a patch changes are recompiled a second time from a patched copy
 of the executable, and the patched versions are swapped in at start-up.
+
+## Co-op (preview)
+
+The network layer is in: positions, rooms and HP travel between up to three
+instances, shown in the **F3** panel. In the world, each other player in your
+room is shown by borrowing an NPC that is already there (it walks where they
+walk, with its own model for now; the menu can turn this off). Proper
+puppets with the right model and animations come next.
+
+- **Host**: settings menu (F1) → Co-op → **Host**, or start with `--host`
+  (UDP port 27552; `--host=PORT` for another). Others need to reach that port:
+  same network, or forward it on your router.
+- **Join**: menu → Co-op → type the host's address → **Join**, or
+  `--join=1.2.3.4` (`:PORT` if not the default). `--name=Riku` sets your name.
+- Everyone must run the same game build; the host checks.
+
+Two instances on one PC work too (`--join=127.0.0.1`).

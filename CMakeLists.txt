@@ -237,9 +237,16 @@ add_executable(kh2recomp
     port/runtime/game_patches.cpp
     port/runtime/watchdog.cpp
     port/runtime/overlay_ui.cpp
+    port/coop/game_state.cpp
+    port/coop/coop.cpp
+    port/coop/puppets.cpp
+    port/coop/net/udp_socket.cpp
+    port/coop/net/protocol.cpp
+    port/coop/net/channel.cpp
+    port/coop/net/session.cpp
     ${KH2_PATCH_SOURCES}
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
-target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
+target_include_directories(kh2recomp PRIVATE port/runtime port/coop ${KH2_RUNTIME_INCLUDES})
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs kh2_imgui)
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)
@@ -258,3 +265,20 @@ add_executable(kh2vureplay EXCLUDE_FROM_ALL tools/vureplay/vureplay.cpp)
 target_include_directories(kh2vureplay PRIVATE ${KH2_RUNTIME_INCLUDES})
 target_link_libraries(kh2vureplay PRIVATE ps2_runtime)
 ps2x_stage_ffmpeg_runtime_dlls(kh2vureplay)
+
+# Co-op network layer test (no game needed): loopback host + two clients with
+# simulated packet loss. ctest, or run build\win\coop_net_test.exe.
+option(KH2_BUILD_TESTS "Build the co-op network tests" ON)
+if(KH2_BUILD_TESTS)
+    enable_testing()
+    add_executable(coop_net_test tests/coop_net_test.cpp
+        port/coop/net/udp_socket.cpp port/coop/net/protocol.cpp port/coop/net/channel.cpp port/coop/net/session.cpp)
+    target_include_directories(coop_net_test PRIVATE port/coop/net)
+    if(WIN32)
+        target_link_libraries(coop_net_test PRIVATE ws2_32)
+    endif()
+    add_test(NAME coop_net COMMAND coop_net_test)
+endif()
+if(WIN32)
+    target_link_libraries(kh2recomp PRIVATE ws2_32)
+endif()

@@ -25,6 +25,13 @@ bool confirmOnBottom();
 void setSuppressed(bool on);
 // Called when Select+Start are pressed together (opens the settings menu).
 void setMenuComboCallback(void (*fn)());
+// Right mouse button + mouse movement turns the camera (right stick).
+void setMouseCamera(bool on);
+bool mouseCamera();
+void setMouseSensitivity(float s);
+float mouseSensitivity();
+// The fast-forward key (Tab) is held.
+bool fastForwardHeld();
 // A pad is connected.
 bool controllerConnected();
 } // namespace kh2input

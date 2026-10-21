@@ -1,0 +1,12 @@
+# Harness input script (--script=tools/scripts/walk-test.txt), used after
+# gameplay starts in Twilight Town's Market Street (~frame 19000 with
+# --mash=CIRCLE:40 --skip-movies). START FRAMES BUTTONS [LX LY [RX RY]].
+20000  120 -  128 0      # walk forward (up)
++0     120 -  255 128    # right
++0     120 -  128 255    # back (down)
++0     120 -  0 128      # left
++30    4   CROSS          # jump
++30    4   CIRCLE         # attack
++30    4   TRIANGLE
++30    120 -  128 128 255 128   # turn the camera right
++0     240 -  128 0      # run forward

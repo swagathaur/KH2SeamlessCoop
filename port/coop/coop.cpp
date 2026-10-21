@@ -58,10 +58,10 @@ void addLog(const std::string &line)
 }
 
 // Queue the game's own map jump (runs on the EE thread next frame).
-void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0xFFFF)
+void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0xFFFF, uint16_t event = 0xFFFF)
 {
     addLog("going to " + kh2state::describe({world, room}));
-    kh2guest::post([world, room, door, battle](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([world, room, door, battle, event](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
         {
             uint32_t task;
@@ -81,6 +81,7 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0x
         for (int i = 0; i < 3; ++i)
             std::memcpy(loc + 4 + 2 * i, &keep, 2);
         std::memcpy(loc + 6, &battle, 2);
+        std::memcpy(loc + 8, &event, 2);
         std::memcpy(env.host(env.scratch), loc, sizeof(loc));
         return kh2guest::Call{kh2state::addr::MapJump, {env.scratch, 1u, 0u, 0u, 0u}, {}};
     });
@@ -380,10 +381,10 @@ void warpToHost()
     warpLocked(host.world, host.room, host.door);
 }
 
-void requestWarp(uint8_t world, uint8_t room, uint16_t door, uint16_t battle)
+void requestWarp(uint8_t world, uint8_t room, uint16_t door, uint16_t battle, uint16_t event)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    warpLocked(world, room, door, battle);
+    warpLocked(world, room, door, battle, event);
 }
 
 void setFollowHost(bool on) { g_opt.followHost = on; }

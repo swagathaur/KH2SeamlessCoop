@@ -49,12 +49,11 @@ code = [
     [0x0014ae00, 0x24050000],
 ]
 
-[no-subtitles]
-description = "Turn off subtitles in cutscenes"
-author = "ElHecht"
-code = [
-    [0x0022d8d4, 0x11e00019],
-]
+# no-subtitles (ElHecht: 0x0022d8d4 = 0x11e00019, which stops FUN_0022D880
+# building subtitle windows) is left out: in this port the cutscenes go wrong
+# without the windows (the opening's second scene loses its data and never
+# ends, also with the branch made unconditional). The runtime ignores the name
+# with a warning (port/runtime/game_patches.cpp).
 
 [no-blur]
 description = "Remove the blur effect in some cutscenes"

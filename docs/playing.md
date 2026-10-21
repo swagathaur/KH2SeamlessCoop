@@ -132,7 +132,6 @@ Switchable patches, from PCSX2's patch database (authors credited in
 |---|---|
 | `widescreen` (or `--widescreen`) | 16:9 with a wider field of view; UI, fonts and subtitles adjusted; cutscene depth of field off |
 | `no-letterbox` | No black bars in cutscenes |
-| `no-subtitles` | No cutscene subtitles |
 | `no-blur` | No blur effect in some cutscenes |
 
 Enable several with commas: `--patch=widescreen,no-letterbox`. They are built

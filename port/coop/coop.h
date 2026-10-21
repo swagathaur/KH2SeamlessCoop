@@ -49,7 +49,7 @@ void leave();
 void warpToHost();
 // The game's own map jump to a room (next frame). battle: the room's btl
 // script program (which enemy groups spawn); 0xFFFF lets the save decide.
-void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0, uint16_t battle = 0xFFFF);
+void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0, uint16_t battle = 0xFFFF, uint16_t event = 0xFFFF);
 void setFollowHost(bool on);
 bool followHost();
 void setSharedEnemies(bool on);

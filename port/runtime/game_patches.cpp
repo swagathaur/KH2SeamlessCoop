@@ -41,6 +41,14 @@ const GamePatch *find(const std::string &name)
 
 bool setEnabled(PS2Runtime &runtime, const std::string &name, bool on)
 {
+    // Patches taken out (config/game_patches.toml says why); old settings
+    // files may still name them.
+    if (name == "no-subtitles")
+    {
+        if (on)
+            std::fprintf(stderr, "[patches] no-subtitles is no longer available (it broke cutscenes); ignored\n");
+        return true;
+    }
     const GamePatch *p = find(name);
     if (!p)
     {

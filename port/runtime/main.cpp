@@ -152,7 +152,7 @@ struct Options
     std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
     struct PreloadTest { uint64_t frame; uint32_t entry, look; };
     std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
-    std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM[:BTL] (hex; world<<24|room<<16|btl)
+    std::vector<std::pair<uint64_t, uint64_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM[:BTL[:EVT]] (world<<40|room<<32|btl<<16|evt)
     std::vector<std::pair<uint64_t, int32_t>> hurtEnemies; // --hurt-enemies=FRAME:AMOUNT
     uint64_t skipCutscenesUntil = 0; // --skip-cutscenes-until=FRAME
     std::vector<std::string> overrideDirs; // --override-dir=DIR (repeatable)
@@ -172,8 +172,8 @@ void usage()
         "  --timeout=SEC           give up after SEC wall-clock seconds, exit 3\n"
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
         "  --screenshot-at=A,B,..  save shots at these guest frames\n"
-        "  --warp-test=F:WW:RR[:B] experiment: map jump to world WW room RR (hex) at frame F; B: the\n"
-        "                          room's battle program (decimal; which enemy groups spawn)\n"
+        "  --warp-test=F:WW:RR[:B[:E]] experiment: map jump to world WW room RR (hex) at frame F; B: the\n"
+        "                          room's battle program, E: its event (decimal; 65535 = the save's)\n"
         "  --preload-test=FRAME:ID[:LOOK] experiment: load objentry ID's files (hex); with LOOK, first\n"
         "                          dress puppet entry ID (84C/84D) as entry LOOK\n"
         "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
@@ -449,8 +449,11 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             const uint32_t world = static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16));
             const size_t c3 = v.find(':', c2 + 1);
             const uint32_t room = static_cast<uint32_t>(std::stoul(v.substr(c2 + 1, c3 - c2 - 1), nullptr, 16));
-            const uint32_t battle = c3 == std::string::npos ? 0xFFFFu : static_cast<uint32_t>(std::stoul(v.substr(c3 + 1)));
-            o.warpTests.emplace_back(std::stoull(v.substr(0, c1)), world << 24 | room << 16 | (battle & 0xFFFF));
+            const size_t c4 = c3 == std::string::npos ? c3 : v.find(':', c3 + 1);
+            const uint64_t battle = c3 == std::string::npos ? 0xFFFFu : std::stoul(v.substr(c3 + 1, c4 - c3 - 1));
+            const uint64_t event = c4 == std::string::npos ? 0xFFFFu : std::stoul(v.substr(c4 + 1));
+            o.warpTests.emplace_back(std::stoull(v.substr(0, c1)), uint64_t(world) << 40 | uint64_t(room) << 32 |
+                                                                      (battle & 0xFFFF) << 16 | (event & 0xFFFF));
         }
         else if (a.rfind("--preload-test=", 0) == 0)
         {
@@ -957,7 +960,7 @@ bool harnessTick(Harness &h, uint64_t frame)
         if (due(at) && frame != h.lastWarpFrame)
         {
             h.lastWarpFrame = frame;
-            kh2coop::requestWarp(uint8_t(where >> 24), uint8_t(where >> 16), 0, uint16_t(where & 0xFFFF));
+            kh2coop::requestWarp(uint8_t(where >> 40), uint8_t(where >> 32), 0, uint16_t(where >> 16), uint16_t(where));
         }
     for (const auto &t : o.preloadTests)
         if (due(t.frame))

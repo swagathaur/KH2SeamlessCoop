@@ -1,6 +1,6 @@
 [submodule "third_party/PS2Recomp"]
 	path = third_party/PS2Recomp
-	url = https://github.com/ran-j/PS2Recomp.git
+	url = https://github.com/Sinan-Karakaya/PS2Recomp.git
 [submodule "third_party/kh2-decomp"]
 	path = third_party/kh2-decomp
 	url = https://github.com/GovanifY/kh2.git

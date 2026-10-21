@@ -21,3 +21,10 @@ out/
 .vs/
 *.user
 __pycache__/
+
+# Agent runner job folder
+.agent/
+logs/
+
+# Harness screenshots (game imagery; never commit)
+shots/

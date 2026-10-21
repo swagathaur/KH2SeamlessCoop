@@ -1,0 +1,33 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index b8f9a80..e34b0ba 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -438,6 +438,10 @@ public:
+     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+     // Where the next invocation stack would be carved down from.
+     uint32_t asyncCallbackStackTop() const;
++    // Confine invocation stacks to [floor, top). By default they are carved
++    // down from the top of RAM, which is where many games keep their own main
++    // stack. Call after loadELF(), which resets the range.
++    void setAsyncCallbackStackRange(uint32_t floor, uint32_t top);
+ 
+     void drainCompletedDmacHandlers(uint8_t *rdram);
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 17a5b54..83d2e95 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2115,6 +2115,13 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
+     return top - 0x10u;
+ }
+ 
++void PS2Runtime::setAsyncCallbackStackRange(uint32_t floor, uint32_t top)
++{
++    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
++    m_asyncCallbackStackFloor = std::min(floor, PS2_RAM_SIZE);
++    m_asyncCallbackStackTop = std::min(top, PS2_RAM_SIZE);
++}
++
+ uint32_t PS2Runtime::asyncCallbackStackTop() const
+ {
+     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);

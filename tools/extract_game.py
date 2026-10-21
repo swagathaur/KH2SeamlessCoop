@@ -7,11 +7,13 @@ Writes into `game/` (git-ignored, never commit it):
   SLPM_666.75            main EE executable (verified by SHA-256)
   SYSTEM.CNF, *.IRX, IOPRP300.IMG, PAD2/DS2O.IRX
   KH2.IDX, OVL.IDX       archive indexes
-  overlays/<name>.x.cmp  EE code overlays from OVL.IMG, still compressed
+  overlays/<name>.x      EE code overlays from OVL.IMG, decompressed
+                         (flat MIPS binaries linked at 0x01F18000)
 """
 import hashlib, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from iso9660 import Iso
+from kh2_compress import decompress, stored_size
 
 ELF = "SLPM_666.75"
 ELF_SHA256 = "d869ce4b8edd61cb978c4ff9ede595fe4d7d7b21cbb96a145275217120d8bc87"
@@ -59,11 +61,15 @@ def main():
         e = idx.get(kh2_hash(name))
         if e is None:
             raise SystemExit(f"overlay {name} not found in OVL.IDX")
-        # Stored size is a padded/compressed block count; read whole sectors and keep raw.
-        data = iso.read(base + e["sector"], e["size"])
-        with open(os.path.join(out, "overlays", name + ".cmp"), "wb") as f:
+        if not e["block"] & 0x4000:
+            raise SystemExit(f"overlay {name} is not compressed; unexpected disc layout")
+        raw = iso.read(base + e["sector"], stored_size(e["block"]))
+        data = decompress(raw)
+        if len(data) != e["size"]:
+            raise SystemExit(f"overlay {name}: decompressed {len(data)} bytes, index says {e['size']}")
+        with open(os.path.join(out, "overlays", name), "wb") as f:
             f.write(data)
-        print(f"overlay {name:<18} sector {e['sector']:#07x}  {e['size']:>7} bytes  block={e['block']:#06x}")
+        print(f"overlay {name:<18} {len(raw):>7} -> {len(data):>7} bytes")
 
 if __name__ == "__main__":
     main()

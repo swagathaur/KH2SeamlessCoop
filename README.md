@@ -1,57 +1,74 @@
 # KH2FM Co-op Recomp
 
 A native PC port of **Kingdom Hearts II Final Mix** (PS2, Japan, `SLPM_666.75`),
-built by static recompilation with [PS2Recomp](https://github.com/ran-j/PS2Recomp),
-as the base for a **3-player online co-op mod**.
+built by static recompilation, as the base for a **3-player online co-op mod**.
 
-> No game code or data is in this repository. You need your own copy of the disc.
+> No game code or data is in this repository. You need your own copy of the disc;
+> everything game-derived is generated locally into ignored folders.
 
 ## Approach
 
-1. **Recompile the whole game.** PS2Recomp translates every MIPS function in the
-   ELF to C++ so the game runs natively without a finished decompilation.
+1. **Recompile the whole game.** [PS2Recomp](https://github.com/ran-j/PS2Recomp)
+   translates every MIPS function to C++, so the game runs natively without a
+   finished decompilation. We use [DQ8Recomp's fork](https://github.com/Sinan-Karakaya/PS2Recomp),
+   which adds overlay dispatch, compiled VU1 routines and faster GS rendering.
 2. **Name things with the decomp.** [GovanifY/kh2](https://github.com/GovanifY/kh2)
-   targets this exact ELF and recovered symbols and class layouts from a PS3 build.
-   Those names go into Ghidra before the function map is exported.
-3. **Replace only what co-op needs.** PS2Recomp game overrides redirect individual
-   function addresses to hand-written C++ (party AI, damage, enemy AI, room loading).
+   targets this exact ELF; its Ghidra function map and recovered names seed ours.
+3. **Replace only what co-op needs.** Individual guest functions are redirected
+   to hand-written C++ (party AI, damage, enemy AI, room loading).
 
 Co-op model: every player runs their own instance as "player 1"; other players
 appear as networked puppets in party slots. Enemies and world state are
 host-authoritative. See [docs/architecture.md](docs/architecture.md).
 
-## Setup
+## Setup (Windows)
 
-```sh
-git submodule update --init --recursive        # fetch PS2Recomp and the decomp
-python tools/extract_game.py "Src/<your disc>.iso"
+Needs Visual Studio 2022 with C++ tools (its bundled CMake and Ninja are used),
+Python 3 and Git.
+
+```powershell
+git submodule update --init --recursive
+python tools\extract_game.py "Src\<your disc>.iso"   # verifies the ELF, unpacks overlays
+# one-time: build ps2_recomp/ps2_analyzer (see .agent job 009 or docs/pipeline.md)
+tools\win\recomp.ps1      # translate the game to C++ in generated\
+tools\win\build.ps1       # build build\win\kh2recomp.exe
+tools\win\run.ps1         # play in a window
 ```
 
-`extract_game.py` verifies the ELF's SHA-256 against the decomp's target and writes
-everything into `game/` (ignored by git).
+Command-line testing (headless runs, screenshots, scripted input, exit codes):
+see [docs/harness.md](docs/harness.md).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `Src/` | Your disc image (ignored) |
-| `tools/` | Disc extraction and analysis scripts (Python, no dependencies) |
-| `config/` | PS2Recomp TOML config and Ghidra function map |
-| `generated/` | Recompiler output (ignored; regenerate from your ELF) |
-| `port/runtime/` | Game-specific runtime: entry, overlay loading, renderer glue |
-| `port/coop/` | Co-op: overrides, puppets, netcode |
-| `third_party/` | Pinned submodules |
-| `docs/` | Findings and design |
+| `game/` | Files extracted from the disc (ignored) |
+| `generated/` | Translated C++ (ignored; regenerate with `tools/win/recomp.ps1`) |
+| `config/` | Recompiler configs and function maps (main ELF + five overlays) |
+| `port/runtime/` | Runner, overlay manager, libpad2 replacement |
+| `port/coop/` | Co-op: overrides, puppets, netcode (not started) |
+| `patches/ps2recomp/` | Small patches applied to the runtime at configure time |
+| `tools/` | Extraction, function-map, config and pipeline scripts |
+| `tools/ghidra/` | Headless Ghidra scripts for the overlay function maps |
+| `tools/win/` | Windows build/run scripts and the agent job runner |
+| `docs/` | Findings, pipeline, harness and co-op design |
 
 ## Roadmap
 
 | Phase | Goal | Done when |
 |---|---|---|
-| 0 | Toolchain | ELF in Ghidra with decomp symbols; PS2Recomp builds; first full recompile compiles |
+| 0 | Toolchain | Function maps, configs, full recompile and a linked native build |
 | 1 | Boot | Native build reaches the title screen with sound |
 | 2 | Playable | Twilight Town playable end to end at full speed |
 | 3 | Hook layer | ImGui overlay listing live actors; first function override working |
 | 4 | Ghost | Two instances on a LAN; one player's Sora shown as a puppet in the other's party |
 | 5+ | Co-op | Enemy sync, combat events, room transitions, cutscenes |
 
-Current status: **Phase 0** — disc surveyed, ELF verified. See [docs/findings.md](docs/findings.md).
+Status and findings: [docs/findings.md](docs/findings.md).
+
+## Credits and licence
+
+GPL-3.0. Builds on PS2Recomp (GPL-3.0), DQ8Recomp's fork and project structure
+(GPL-3.0; adapted files say so in their headers), the GovanifY/kh2 decomp (MIT)
+and OpenKH (MIT; the KH2 decompressor is a port of its `Img.Decompress`).

@@ -34,6 +34,8 @@ struct Node
     std::string name;
     std::map<uint8_t, std::vector<uint32_t>> events; // origin -> event payloads in arrival order
     std::map<uint8_t, PlayerState> lastState;
+    EnemyStates lastEnemies;
+    int enemyPackets = 0;
     int joins = 0, leaves = 0;
 
     explicit Node(std::string n) : name(std::move(n))
@@ -47,6 +49,10 @@ struct Node
             }
         };
         s.onState = [this](const PlayerState &st) { lastState[st.origin] = st; };
+        s.onEnemies = [this](const EnemyStates &e) {
+            lastEnemies = e;
+            ++enemyPackets;
+        };
         s.onPeer = [this](uint8_t, const std::string &, bool joined) { (joined ? joins : leaves)++; };
     }
 };
@@ -119,6 +125,25 @@ int main()
             st.hp = 100 + n->s.localId();
             if (f % 2 == 0)
                 n->s.sendState(st);
+            if (f % 3 == 0)
+            {
+                // The host's enemies; clients sending them must be ignored.
+                EnemyStates es;
+                es.tick = static_cast<uint32_t>(f);
+                es.world = 2;
+                es.room = 4;
+                for (int k = 0; k < 3; ++k)
+                {
+                    EnemyState e;
+                    e.serial = static_cast<int16_t>(39 + k);
+                    e.entry = 0x13E;
+                    e.pos[0] = static_cast<float>(f + k);
+                    e.hp = 32 - k - (n == &host ? 0 : 100);
+                    e.maxHp = 32;
+                    es.enemies.push_back(e);
+                }
+                n->s.sendEnemies(es);
+            }
             if (sent < kEvents && f % 2 == 0)
             {
                 const uint32_t v = static_cast<uint32_t>(sent);
@@ -150,6 +175,19 @@ int main()
                 CHECK(n->lastState[origin].hp == 100 + origin);
         }
     }
+    // Clients have the host's enemies (and only the host's).
+    for (Node *n : {&c1, &c2})
+    {
+        CHECK(n->enemyPackets > 50);
+        CHECK(n->lastEnemies.enemies.size() == 3);
+        if (n->lastEnemies.enemies.size() == 3)
+        {
+            CHECK(n->lastEnemies.room == 4);
+            CHECK(n->lastEnemies.enemies[1].serial == 40);
+            CHECK(n->lastEnemies.enemies[2].hp == 30);
+        }
+    }
+    CHECK(host.enemyPackets == 0);
     for (const PeerInfo &p : host.s.roster())
         std::printf("host sees %u %s rtt=%.1fms loss=%.2f%s\n", p.id, p.name.c_str(), p.rttMs, p.loss,
                     p.local ? " (you)" : "");

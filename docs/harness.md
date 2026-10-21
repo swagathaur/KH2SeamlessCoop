@@ -51,9 +51,12 @@ extra arguments.
 | `--script=FILE` | Timed input: lines `START FRAMES BUTTONS\|- [LX LY [RX RY]]` (sticks 0–255, 128 centre, LY 0 = up; `START` may be `+N` after the previous step); see `tools/scripts/walk-test.txt` |
 | `--ram-dump=A,B,...` | Write all 32 MB of guest RAM to `SHOTS/ram_FRAME.bin` (for `tools/analysis/find_position.py` and friends) |
 | `--actors-at=A,B,...` | Print the live object list (address, objentry id, model, type, position) and the player pointer |
-| `--warp-test=F:WW:RR` | At frame F, the game's own map jump to world WW, room RR (hex) |
 | `--spawn-test=F:ID`, `--preload-test=F:ID[:LOOK]` | Experiments: create objentry ID in front of the player / ask the game to load its files (with LOOK, first dress puppet entry 84C or 84D as entry LOOK, e.g. `84C:5A` for Roxas) |
-| `--teleport=F:X,Y,Z` | Put the player at a position at frame F |
+| `--teleport=F:X,Y,Z` | Put the player at a position at frame F (repeatable) |
+| `--skip-cutscenes` | Skip every in-engine cutscene (with `--skip-movies`, free control in Market Street at ~frame 2200) |
+| `--menu-at=F,..:S`, `--ff-at=A-B,..` | Windowed runs: open the settings menu at these frames for S seconds; fast-forward over frame ranges |
+| `--no-settings` | Ignore kh2recomp.ini (`tools\win\test.ps1` passes it) |
+| `--warp-test=F:WW:RR[:B]` | Map jump to world WW room RR (hex) at frame F; B is the room's battle program (which enemy groups spawn; `tools/analysis/ard.py`) |
 | `--mark-actors` | Mark every object's projected feet (magenta) and head height (cyan) in screenshots, to check the camera projection |
 | `--host`, `--join=IP`, `--name=`, `--net-loss=F`, `--follow-host`, `--puppet-mode=` | Co-op ([playing.md](playing.md)); `--net-loss` drops that fraction of outgoing packets |
 | `--watchdog=SEC` | Print every thread's stack when the host loop stalls this long (default 20 s headless) |

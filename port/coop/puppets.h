@@ -53,6 +53,16 @@ void requestPreload(uint32_t entryId);
 // (lookEntry 0 puts its own back). Takes effect for later loads and spawns.
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
 
+// Other objects whose position and facing come from elsewhere (the host's
+// enemies, on clients): applied in the same matrix hook. Replaces the set.
+struct Override
+{
+    uint32_t object = 0;
+    float pos[3] = {0, 0, 0};
+    float yaw = 0;
+};
+void setOverrides(std::vector<Override> overrides);
+
 struct Assignment
 {
     uint8_t playerId;

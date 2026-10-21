@@ -13,6 +13,7 @@
 #include "host_input.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
@@ -61,6 +62,8 @@ std::atomic<float> g_mouseSensitivity{1.0f};
 std::mutex g_keysMutex;
 kh2keys::Bindings g_keys = kh2keys::Bindings::defaults();
 std::atomic<bool> g_capturing{false}; // the menu is waiting for a key to bind
+double g_skipSince = -1.0;
+std::atomic<double> g_skipHeld{0.0};
 std::mutex g_nameMutex;
 std::string g_padName;
 
@@ -250,6 +253,7 @@ kh2keys::Bindings keyBindings()
     return g_keys;
 }
 void setCapturingKey(bool on) { g_capturing = on; }
+double skipHeldSeconds() { return g_skipHeld.load(); }
 int newlyPressedKey()
 {
 #if defined(_WIN32)
@@ -411,6 +415,23 @@ void poll(bool keyboardFocus)
     {
         held = 0;
         lx = ly = rx = ry = 0x80;
+    }
+    // The skip button (Cross: B by default, X/Space on the keyboard), timed
+    // before the menu's suppression so a hold is seen whatever the game does.
+    {
+        using namespace std::chrono;
+        const double t = duration<double>(steady_clock::now().time_since_epoch()).count();
+        if (held & PAD_CROSS)
+        {
+            if (g_skipSince < 0)
+                g_skipSince = t;
+            g_skipHeld = t - g_skipSince;
+        }
+        else
+        {
+            g_skipSince = -1.0;
+            g_skipHeld = 0.0;
+        }
     }
     const uint32_t pressed = held & ~g_prevHeld;
     g_prevHeld = held;

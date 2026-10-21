@@ -22,4 +22,6 @@ void install(PS2Runtime &runtime, const std::string &iniPath, const Options &opt
 void tick();
 // The game clock is stopped (menu open, or in the background).
 bool paused();
+// Testing: fast-forward as if Tab were held.
+void setTestFastForward(bool on);
 } // namespace kh2ui

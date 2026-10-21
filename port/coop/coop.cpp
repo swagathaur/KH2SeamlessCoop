@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 
+#include "enemies.h"
 #include "game_state.h"
 #include "puppets.h"
 #include "guest_call.h"
@@ -36,6 +37,8 @@ uint64_t g_lastSentFrame = UINT64_MAX;
 double g_lastWarp = -100.0;
 double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
+const uint8_t *g_rdram = nullptr; // during tick(), for session callbacks
+uint64_t g_lastEnemyFrame = UINT64_MAX;
 
 
 double now()
@@ -55,10 +58,10 @@ void addLog(const std::string &line)
 }
 
 // Queue the game's own map jump (runs on the EE thread next frame).
-void warpLocked(uint8_t world, uint8_t room, uint16_t door)
+void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0xFFFF)
 {
     addLog("going to " + kh2state::describe({world, room}));
-    kh2guest::post([world, room, door](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([world, room, door, battle](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
         {
             uint32_t task;
@@ -74,9 +77,10 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door)
         loc[0] = world;
         loc[1] = room;
         std::memcpy(loc + 2, &door, 2);
-        const uint16_t keep = 0xFFFF;
+        const uint16_t keep = 0xFFFF; // map, battle, event: what the save says
         for (int i = 0; i < 3; ++i)
             std::memcpy(loc + 4 + 2 * i, &keep, 2);
+        std::memcpy(loc + 6, &battle, 2);
         std::memcpy(env.host(env.scratch), loc, sizeof(loc));
         return kh2guest::Call{kh2state::addr::MapJump, {env.scratch, 1u, 0u, 0u, 0u}, {}};
     });
@@ -106,7 +110,20 @@ void makeSession()
         Remote &r = g_remotes[s.origin];
         r.interp.push(s, now());
     };
-    g_session->onEvent = [](uint8_t, uint16_t, const std::vector<uint8_t> &) {};
+    g_session->onEnemies = [](const kh2net::EnemyStates &s) {
+        if (g_opt.sharedEnemies)
+            kh2enemies::onHostStates(s, now());
+    };
+    g_session->onEvent = [](uint8_t, uint16_t type, const std::vector<uint8_t> &data) {
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage) && g_session->isHost() && g_rdram &&
+            g_opt.sharedEnemies)
+        {
+            uint8_t world, room;
+            kh2enemies::Damage d;
+            if (kh2enemies::decodeDamage(data, world, room, d))
+                kh2enemies::applyDamage(g_rdram, world, room, d.serial, d.amount);
+        }
+    };
 }
 
 kh2net::SessionConfig config(const std::string &name, uint16_t port)
@@ -159,6 +176,7 @@ void leave()
         addLog("left the session");
     g_session.reset();
     g_remotes.clear();
+    kh2enemies::reset();
 }
 
 void init(const Options &options)
@@ -181,7 +199,9 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         return;
     }
     const auto before = g_session->status();
+    g_rdram = rdram;
     g_session->update(now());
+    g_rdram = nullptr;
     if (g_session->status() == kh2net::Session::Status::Failed && before != kh2net::Session::Status::Failed)
         addLog(g_session->lastError());
     if (!g_session->active())
@@ -233,6 +253,26 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
                 warpLocked(host.world, host.room, host.door);
             }
         }
+    }
+    // Enemies: the host sends its own ~20 times a second; clients follow them
+    // and report their hits.
+    if (g_opt.sharedEnemies)
+    {
+        const kh2state::State me = kh2state::read(rdram);
+        if (g_session->isHost())
+        {
+            if (guestFrame / 3 != g_lastEnemyFrame / 3 && me.now.world != 0)
+            {
+                g_lastEnemyFrame = guestFrame;
+                g_session->sendEnemies(
+                    kh2enemies::snapshot(rdram, me.now.world, me.now.room, static_cast<uint32_t>(guestFrame)));
+            }
+        }
+        else
+            for (const kh2enemies::Damage &d :
+                 kh2enemies::clientTick(const_cast<uint8_t *>(rdram), me.now.world, me.now.room, now()))
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage),
+                                     kh2enemies::encodeDamage(me.now.world, me.now.room, d));
     }
     // 30 updates a second: every other guest frame.
     if (guestFrame / 2 == g_lastSentFrame / 2)
@@ -340,12 +380,20 @@ void warpToHost()
     warpLocked(host.world, host.room, host.door);
 }
 
-void requestWarp(uint8_t world, uint8_t room, uint16_t door)
+void requestWarp(uint8_t world, uint8_t room, uint16_t door, uint16_t battle)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    warpLocked(world, room, door);
+    warpLocked(world, room, door, battle);
 }
 
 void setFollowHost(bool on) { g_opt.followHost = on; }
+void setSharedEnemies(bool on)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_opt.sharedEnemies = on;
+    if (!on)
+        kh2enemies::reset();
+}
+bool sharedEnemies() { return g_opt.sharedEnemies; }
 bool followHost() { return g_opt.followHost; }
 } // namespace kh2coop

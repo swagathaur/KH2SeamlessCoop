@@ -5,6 +5,12 @@ tools\win\run.ps1                      # window, GPU renderer
 tools\win\run.ps1 --ssaa=4 --widescreen
 ```
 
+The easiest way is **`Play KH2.bat`** in the project folder: it starts the
+game with the project's files, writes the session's output to
+`logs\play.log`, and on a first run creates `build\win\kh2recomp.ini` with
+4x super-sampling and widescreen. If the game crashes, `crashes\` gets a
+report (every thread's stack) and a minidump; please keep those.
+
 Settings can live in `kh2recomp.ini` next to `kh2recomp.exe` (start from
 `kh2recomp.ini.example`): keys are the command-line options without `--`, and
 command-line arguments override the file. With `elf`, `iso` and `cd-root` set
@@ -42,7 +48,15 @@ is open (and, with **Pause when the window is in the background** or
 `--pause-unfocused`, while you are in another window).
 
 Hold **Tab** to fast-forward (3x by default; the menu or `--ff-speed=X` sets
-it) — handy for dialogue and long walks. **F2** toggles the frame-rate display, **F3** the game-state panel (location,
+it) — handy for dialogue and long walks; during a pre-rendered movie, Tab
+skips the movie instead (movies follow their audio and cannot run faster).
+
+**Skipping scenes.** Hold **B** (the PS2's Cross; **X** or **Space** on the
+keyboard) for a second to skip the movie or in-engine cutscene that is
+playing; cutscenes end the way the Final Mix pause menu's *Skip* ends them.
+**Skip movies** and **Skip cutscenes** in the menu (`--skip-movies`,
+`--skip-cutscenes`; `skip-movies = 1`, `skip-cutscenes = 1`) skip them all:
+with both, a new game reaches Market Street in about half a minute. **F2** toggles the frame-rate display, **F3** the game-state panel (location,
 party, live actors, co-op), **F12** saves a screenshot to `screenshots\`
 next to the executable, **Alt+Enter** or **F11** toggles fullscreen.
 
@@ -138,6 +152,14 @@ they enter your room (its files load first). The menu can turn puppets off,
 or show players by moving an NPC already in the room instead
 (`--puppet-mode=borrow`). Each puppet has its player's name over it (Co-op →
 **Name tags**, or `--no-name-tags`). Puppets do not fight or take hits yet.
+
+**Shared enemies** (first version). In the host's room, a client's enemies
+stand where the host's are and never have more HP than the host's; a hit a
+client lands is sent to the host and counts there, so everyone's hits wear
+the same enemies down, and an enemy the host's game kills dies for everyone.
+The enemies' AI still runs on each machine (an enemy may swing at you from
+where the host sees it). Co-op → **Shared enemies** turns it off on a client
+(`--no-shared-enemies`).
 
 - **Host**: settings menu (F1) → Co-op → **Host**, or start with `--host`
   (UDP port 27552; `--host=PORT` for another). Others need to reach that port:

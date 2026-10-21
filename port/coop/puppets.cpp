@@ -48,6 +48,8 @@ double now()
 }
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
+std::atomic<bool> g_anyOverride{false};
+std::vector<Override> g_overrides; // under g_mutex
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
@@ -229,16 +231,25 @@ void buildMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         if (player && getRegU32(ctx, 4) == player)
             kh2guest::runPending(rdram, ctx, runtime, kh2state::addr::ObjBuildMatrix); // may not return
     }
-    if (g_any.load(std::memory_order_relaxed))
+    if (g_any.load(std::memory_order_relaxed) || g_anyOverride.load(std::memory_order_relaxed))
     {
         const uint32_t obj = getRegU32(ctx, 4);
         std::lock_guard<std::mutex> lock(g_mutex);
+        bool done = false;
         for (const Slot &s : g_slots)
             if (s.active && !s.pending && s.object == obj)
             {
                 writeTransform(rdram, obj, s.pos, s.yaw);
+                done = true;
                 break;
             }
+        if (!done)
+            for (const Override &o : g_overrides)
+                if (o.object == obj)
+                {
+                    writeTransform(rdram, obj, o.pos, o.yaw);
+                    break;
+                }
     }
     kh2::callOriginal(g_buildMatrix, rdram, ctx, runtime);
 }
@@ -455,6 +466,13 @@ void requestPreload(uint32_t entryId)
 }
 
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
+
+void setOverrides(std::vector<Override> overrides)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_overrides = std::move(overrides);
+    g_anyOverride = !g_overrides.empty();
+}
 
 void setMode(Mode mode) { g_mode = mode; }
 Mode mode() { return g_mode; }

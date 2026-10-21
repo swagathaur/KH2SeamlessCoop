@@ -13,6 +13,9 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
+#include <csignal>
+#include <cstdlib>
+#include <exception>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -93,7 +96,7 @@ std::string describe(DWORD64 ip)
     return out;
 }
 
-void dumpAll(DWORD self)
+void dumpAll(DWORD self, FILE *out = stdout)
 {
     static bool symInit = false;
     if (!symInit)
@@ -135,15 +138,100 @@ void dumpAll(DWORD self)
         }
         CloseHandle(h);
     }
-    std::fprintf(stdout, "[watchdog] stacks of %zu threads:\n", stacks.size());
+    std::fprintf(out, "[watchdog] stacks of %zu threads:\n", stacks.size());
     for (const Stack &s : stacks)
     {
-        std::fprintf(stdout, "[watchdog] thread %lu\n", s.tid);
+        std::fprintf(out, "[watchdog] thread %lu\n", s.tid);
         for (int f = 0; f < s.n; ++f)
-            std::fprintf(stdout, "[watchdog]   %2d %016llx %s\n", f, (unsigned long long)s.frames[f],
+            std::fprintf(out, "[watchdog]   %2d %016llx %s\n", f, (unsigned long long)s.frames[f],
                          describe(s.frames[f]).c_str());
     }
-    std::fflush(stdout);
+    std::fflush(out);
+}
+
+// --- Crash reports -------------------------------------------------------
+std::string g_crashDir = "crashes";
+std::atomic<bool> g_crashing{false};
+
+void symInitOnce()
+{
+    static bool done = false;
+    if (!done)
+    {
+        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+        done = true;
+    }
+}
+
+// Writes crashes\kh2recomp-<time>.txt (what and where, every thread's
+// stack) and a minidump next to it; says where on stderr.
+void report(const char *what, EXCEPTION_POINTERS *ep)
+{
+    if (g_crashing.exchange(true))
+        return; // a second fault while reporting the first
+    CreateDirectoryA(g_crashDir.c_str(), nullptr);
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char base[512];
+    std::snprintf(base, sizeof(base), "%s\\kh2recomp-%04u%02u%02u-%02u%02u%02u", g_crashDir.c_str(), t.wYear, t.wMonth,
+                  t.wDay, t.wHour, t.wMinute, t.wSecond);
+    const std::string txt = std::string(base) + ".txt", dmp = std::string(base) + ".dmp";
+    FILE *f = std::fopen(txt.c_str(), "w");
+    if (!f)
+        f = stderr;
+    symInitOnce();
+    std::fprintf(f, "kh2recomp crashed: %s\n", what);
+    if (ep && ep->ExceptionRecord)
+    {
+        const EXCEPTION_RECORD *er = ep->ExceptionRecord;
+        std::fprintf(f, "exception %08lX at %016llx %s\n", er->ExceptionCode,
+                     (unsigned long long)(uintptr_t)er->ExceptionAddress,
+                     describe(reinterpret_cast<DWORD64>(er->ExceptionAddress)).c_str());
+        if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+            std::fprintf(f, "  %s address %016llx\n", er->ExceptionInformation[0] == 1 ? "writing" : er->ExceptionInformation[0] == 8 ? "executing" : "reading",
+                         (unsigned long long)er->ExceptionInformation[1]);
+    }
+    std::fprintf(f, "crashing thread %lu:\n", GetCurrentThreadId());
+    if (ep && ep->ContextRecord)
+    {
+        DWORD64 frames[kMaxFrames];
+        const int n = unwind(*ep->ContextRecord, frames);
+        for (int i = 0; i < n; ++i)
+            std::fprintf(f, "  %2d %016llx %s\n", i, (unsigned long long)frames[i], describe(frames[i]).c_str());
+    }
+    dumpAll(GetCurrentThreadId(), f);
+    HANDLE h = CreateFileA(dmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        MINIDUMP_EXCEPTION_INFORMATION mei{GetCurrentThreadId(), ep, FALSE};
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          MINIDUMP_TYPE(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules), ep ? &mei : nullptr,
+                          nullptr, nullptr);
+        CloseHandle(h);
+    }
+    if (f != stderr)
+        std::fclose(f);
+    std::fprintf(stderr, "[kh2] crashed (%s); report: %s\n", what, txt.c_str());
+    std::fflush(stderr);
+}
+
+LONG WINAPI onUnhandled(EXCEPTION_POINTERS *ep)
+{
+    report("unhandled exception", ep);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void onTerminate()
+{
+    report("std::terminate (an uncaught C++ exception or a failed check)", nullptr);
+    std::_Exit(3);
+}
+
+void onAbort(int)
+{
+    report("abort()", nullptr);
+    std::_Exit(3);
 }
 
 void run(DWORD self)
@@ -180,6 +268,18 @@ void beat() { g_lastBeat.store(nowMs(), std::memory_order_relaxed); }
 
 void dumpNow() { dumpAll(GetCurrentThreadId()); }
 
+void installCrashHandler(const char *dir)
+{
+    if (dir && *dir)
+        g_crashDir = dir;
+    SetUnhandledExceptionFilter(&onUnhandled);
+    std::set_terminate(&onTerminate);
+    std::signal(SIGABRT, &onAbort);
+    // No "this program has stopped working" box: the report is the message.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+}
+
 void stop()
 {
     if (!g_running.exchange(false))
@@ -196,6 +296,7 @@ void start(unsigned) {}
 void beat() {}
 void stop() {}
 void dumpNow() {}
+void installCrashHandler(const char *) {}
 } // namespace kh2watch
 
 #endif

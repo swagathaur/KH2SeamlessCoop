@@ -245,6 +245,7 @@ add_executable(kh2recomp
     port/runtime/cd_iso.cpp
     port/runtime/cd_callback.cpp
     port/runtime/movie_eof.cpp
+    port/runtime/cutscene_skip.cpp
     port/runtime/trace.cpp
     port/runtime/dma_log.cpp
     port/runtime/gs_image.cpp
@@ -259,6 +260,7 @@ add_executable(kh2recomp
     port/coop/game_state.cpp
     port/coop/coop.cpp
     port/coop/puppets.cpp
+    port/coop/enemies.cpp
     port/coop/guest_call.cpp
     port/coop/net/udp_socket.cpp
     port/coop/net/protocol.cpp

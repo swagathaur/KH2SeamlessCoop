@@ -206,6 +206,20 @@ so those scales are about twice the visible frustum's. `--mark-actors`
 draws the projection of every object into screenshots; the co-op name tags
 use it.
 
+**Enemies and battles.** Rooms spawn enemies from their `.ard` (world files
+are listed in `000<world>.idx` inside KH2.IMG; `tools/extract_file.py --world
+tt ...`): the `btl` script's program for the current battle number spawns
+named groups (`Spawn "b_00"`), and a group's enemies appear when the player
+walks into its trigger box (`tools/analysis/ard.py enemies|script|group`).
+The map jump's LOCATION carries that battle number (+6), so `--warp-test=
+F:02:04:1` puts three Dusks (`M_EX990`, objentry `0x13E`) in the Sandlot,
+behind a trigger box around the middle of the room. An object's stats are a
+`YS::SHEET` at `+0x48C` (HP, max HP, min HP as three ints; the player's is
+the party slot at `0x01C6C750`); its vtable `+0x78` is add_hp `(obj, amount,
+sheet index, flag)` (`FUN_00187520`: `FUN_001A1910` clamps the sum to the
+min/max, `YS::BTLOBJ::dead` at 0); `+0x81C` points at its spawn entry in the
+room data, whose serial (`+0x1E`) names it the same way on every machine.
+
 **Map jump.** `FUN_00104F58(const LOCATION*, int fade, int delay, u8, int
 callback)`: LOCATION is 10 bytes (world, room, door u16, map/battle/event u16;
 0xFFFF = the save's choice). Unless the byte at `0x003A7B00` is set (then it

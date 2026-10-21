@@ -141,6 +141,19 @@ void Session::sendState(const PlayerState &state)
         p->channel.queue(static_cast<uint8_t>(MsgType::PlayerState), body);
 }
 
+void Session::sendEnemies(const EnemyStates &states)
+{
+    if (!isHost())
+        return;
+    EnemyStates s = states;
+    s.origin = m_localId;
+    std::vector<uint8_t> body;
+    ByteWriter w(body);
+    writeEnemyStates(w, s);
+    for (auto &p : m_peers)
+        p->channel.queue(static_cast<uint8_t>(MsgType::EnemyStates), body);
+}
+
 void Session::sendEvent(uint16_t type, const std::vector<uint8_t> &data)
 {
     if (!active())
@@ -404,6 +417,16 @@ void Session::deliver(Peer &from, uint8_t type, const std::vector<uint8_t> &body
         }
         if (onState)
             onState(s);
+        break;
+    }
+    case MsgType::EnemyStates:
+    {
+        if (isHost())
+            return; // only the host's world counts
+        ByteReader r(body.data(), body.size());
+        EnemyStates s;
+        if (readEnemyStates(r, s) && onEnemies)
+            onEnemies(s);
         break;
     }
     case MsgType::GameEvent:

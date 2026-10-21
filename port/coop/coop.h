@@ -19,6 +19,7 @@ struct Options
     uint16_t port = kh2net::kDefaultPort;
     float simulatedLoss = 0;
     bool followHost = false;    // clients warp to the host's room when it changes
+    bool sharedEnemies = true;  // clients follow the host's enemies (enemies.h)
 };
 
 struct RemotePlayer
@@ -46,10 +47,13 @@ void leave();
 // Clients: go to the room the host is in (now), and keep doing so when they
 // move (follow).
 void warpToHost();
-// The game's own map jump to a room (next frame).
-void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0);
+// The game's own map jump to a room (next frame). battle: the room's btl
+// script program (which enemy groups spawn); 0xFFFF lets the save decide.
+void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0, uint16_t battle = 0xFFFF);
 void setFollowHost(bool on);
 bool followHost();
+void setSharedEnemies(bool on);
+bool sharedEnemies();
 
 // For display.
 bool active();

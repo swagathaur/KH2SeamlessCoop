@@ -9,6 +9,10 @@
 //             ack bits u32, then messages:
 //               type u8, length u16, body; types with kReliableBit set start
 //               their body with a u16 reliable id
+//
+// Message bodies: PlayerState (writePlayerState), EnemyStates
+// (writeEnemyStates; host only), Roster, GameEvent (origin u8, type u16,
+// data; GameEventType below).
 //   Disconnect sender u8
 #pragma once
 
@@ -20,7 +24,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 2;
+constexpr uint8_t kProtocolVersion = 3;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -47,6 +51,13 @@ enum class MsgType : uint8_t
     PlayerState = 1,                 // unreliable, newest wins
     Roster = 2 | kReliableBit,       // host -> clients: who is in the session
     GameEvent = 3 | kReliableBit,    // reliable, ordered, relayed by the host
+    EnemyStates = 4,                 // unreliable, host -> clients, newest wins
+};
+
+// GameEvent types.
+enum class GameEventType : uint16_t
+{
+    EnemyDamage = 1, // client -> host: world u8, room u8, serial i16, amount i32
 };
 
 // Where a player is and what they are doing, sent ~30 times a second.
@@ -64,6 +75,26 @@ struct PlayerState
     int32_t hp = 0, maxHp = 0;
     uint8_t flags = 0;
 };
+
+// The enemies in the host's room, sent ~20 times a second. Each is known by
+// its spawn serial in the room's data (the same on every machine).
+struct EnemyState
+{
+    int16_t serial = 0;
+    uint16_t entry = 0; // objentry id
+    float pos[3] = {0, 0, 0};
+    float yaw = 0;
+    uint16_t motion = 0;
+    int32_t hp = 0, maxHp = 0;
+};
+struct EnemyStates
+{
+    uint8_t origin = 0;
+    uint32_t tick = 0;
+    uint8_t world = 0, room = 0;
+    std::vector<EnemyState> enemies; // at most kMaxEnemies
+};
+constexpr size_t kMaxEnemies = 32;
 
 struct RosterEntry
 {
@@ -137,6 +168,8 @@ private:
 
 void writePlayerState(ByteWriter &w, const PlayerState &s);
 bool readPlayerState(ByteReader &r, PlayerState &s);
+void writeEnemyStates(ByteWriter &w, const EnemyStates &s);
+bool readEnemyStates(ByteReader &r, EnemyStates &s);
 
 // Sequence numbers wrap; a is newer than b.
 inline bool seqNewer(uint16_t a, uint16_t b)

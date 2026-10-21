@@ -1041,7 +1041,16 @@ bool redraw()
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     if (g_active && g_clientW && g_clientH)
+    {
+        // GS data drained between frames (pumpWindow) sits in a command buffer
+        // paraLLEl-GS has not submitted yet; ending the WSI frame waits for
+        // every requested command buffer, so present without flushing first
+        // hung the game whenever it paused mid-frame (the settings menu during
+        // a busy 3D scene).
+        drainQueue();
+        g_gs->flush();
         present();
+    }
 #endif
     return !g_closed;
 }

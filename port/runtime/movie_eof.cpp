@@ -40,10 +40,18 @@ constexpr uint32_t kReadBusy = 0x01F294E8u;       // u8
 constexpr uint32_t kPlayState = 0x01F29470u;      // u32: 1 = stop requested, 3 = decoder finished
 bool g_streaming = false;
 bool g_skip = false;
+bool g_skipOnce = false;
 unsigned g_streams = 0;
 } // namespace
 
 void setSkip(bool skip) { g_skip = skip; }
+bool skipping() { return g_skip; }
+bool playing() { return g_streaming; }
+void skipCurrent()
+{
+    if (g_streaming)
+        g_skipOnce = true;
+}
 
 void poll(PS2Runtime &runtime)
 {
@@ -62,8 +70,11 @@ void poll(PS2Runtime &runtime)
                     *reinterpret_cast<const uint32_t *>(rdram + kPlayState));
     static bool s_stopSent = false;
     if (!g_streaming)
+    {
         s_stopSent = false;
-    if (g_skip && g_streaming && !s_stopSent)
+        g_skipOnce = false;
+    }
+    if ((g_skip || g_skipOnce) && g_streaming && !s_stopSent)
     {
         uint32_t state;
         std::memcpy(&state, rdram + kPlayState, sizeof(state));
@@ -72,7 +83,7 @@ void poll(PS2Runtime &runtime)
             s_stopSent = true;
             const uint32_t stop = 1u;
             std::memcpy(runtime.memory().getRDRAM() + kPlayState, &stop, sizeof(stop));
-            std::printf("[kh2-movie] stream %u: stop requested (--skip-movies)\n", g_streams);
+            std::printf("[kh2-movie] stream %u: stop requested (%s)\n", g_streams, g_skip ? "--skip-movies" : "skipped");
         }
     }
     if (!g_streaming && remaining != 0)

@@ -5,6 +5,7 @@
 #include "overlay_ui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -22,6 +23,8 @@
 #include "coop.h"
 #include "puppets.h"
 #include "host_input.h"
+#include "movie_eof.h"
+#include "cutscene_skip.h"
 #include "pgs_renderer.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
@@ -36,6 +39,7 @@ std::filesystem::path g_iniPath;
 std::string g_status;
 Options g_opt;
 bool g_paused = false;
+bool g_testFastForward = false;
 double g_speed = 1.0;
 
 // Keyboard rebinding: the action waiting for a key (-1: none), and whether the
@@ -134,7 +138,7 @@ bool save()
                                                     "widescreen", "patch",   "swap-confirm", "no-rumble",
                                                     "show-fps",   "ff-speed", "pause-unfocused",
                                                     "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window",
-                                                    "no-name-tags"};
+                                                    "no-name-tags", "skip-movies", "skip-cutscenes"};
         for (std::string line; std::getline(in, line);)
         {
             std::string key = line.substr(0, line.find_first_of("=#;"));
@@ -181,6 +185,10 @@ bool save()
     out << "ff-speed = " << g_opt.fastForwardSpeed << "\n";
     if (g_opt.pauseUnfocused)
         out << "pause-unfocused = 1\n";
+    if (kh2movie::skipping())
+        out << "skip-movies = 1\n";
+    if (kh2skip::autoSkip())
+        out << "skip-cutscenes = 1\n";
     if (!g_opt.nameTags)
         out << "no-name-tags = 1\n";
     for (const std::string &line : kh2input::keyBindings().iniLines())
@@ -260,6 +268,14 @@ void draw()
     ImGui::SeparatorText("Speed");
     ImGui::SliderFloat("Fast-forward (hold Tab)", &g_opt.fastForwardSpeed, 1.5f, 8.0f, "%.1fx");
     ImGui::Checkbox("Pause when the window is in the background", &g_opt.pauseUnfocused);
+    bool skipMovies = kh2movie::skipping();
+    if (ImGui::Checkbox("Skip movies", &skipMovies))
+        kh2movie::setSkip(skipMovies);
+    ImGui::SetItemTooltip("Skip the pre-rendered movies (hold B, or Tab, to skip the one playing)");
+    bool skipCut = kh2skip::autoSkip();
+    if (ImGui::Checkbox("Skip cutscenes", &skipCut))
+        kh2skip::setAutoSkip(skipCut);
+    ImGui::SetItemTooltip("Skip every in-engine cutscene, as the pause menu's Skip does (hold B to skip just one)");
 
     ImGui::SeparatorText("Game patches");
     const std::vector<kh2patches::Info> patches = kh2patches::available();
@@ -314,6 +330,10 @@ void draw()
                 if (ImGui::Checkbox("Follow the host", &follow))
                     kh2coop::setFollowHost(follow);
                 ImGui::SetItemTooltip("Go to the host's room whenever they change rooms (when you are free to move)");
+                bool shared = kh2coop::sharedEnemies();
+                if (ImGui::Checkbox("Shared enemies", &shared))
+                    kh2coop::setSharedEnemies(shared);
+                ImGui::SetItemTooltip("In the host's room, enemies are where the host's are, with the host's HP; your hits count for everyone");
             }
             bool puppets = kh2puppets::enabled();
             if (ImGui::Checkbox("Show other players", &puppets))
@@ -539,7 +559,22 @@ void tick()
         g_runtime->eeScheduler().setHostPaused(paused);
         ps2_native_iop::setPaused(paused);
     }
-    const double speed = kh2input::fastForwardHeld() ? g_opt.fastForwardSpeed : g_opt.baseSpeed;
+    bool ff = kh2input::fastForwardHeld() || g_testFastForward;
+    if (ff && kh2movie::playing())
+    {
+        // Movies follow their audio, which does not speed up: fast-forward
+        // only stuttered them. Tab skips the movie instead.
+        static double s_lastSkip = -10.0;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (t - s_lastSkip > 2.0)
+        {
+            s_lastSkip = t;
+            kh2movie::skipCurrent();
+            kh2pgs::toast("Movie skipped");
+        }
+        ff = false;
+    }
+    const double speed = ff ? g_opt.fastForwardSpeed : g_opt.baseSpeed;
     if (speed != g_speed)
     {
         g_speed = speed;
@@ -548,4 +583,5 @@ void tick()
 }
 
 bool paused() { return g_paused; }
+void setTestFastForward(bool on) { g_testFastForward = on; }
 } // namespace kh2ui

@@ -59,6 +59,8 @@ public:
     void sendState(const PlayerState &state);
     // A reliable, ordered event for everyone else.
     void sendEvent(uint16_t type, const std::vector<uint8_t> &data);
+    // Host: the enemies in its room, to every client.
+    void sendEnemies(const EnemyStates &states);
 
     Status status() const { return m_status; }
     bool active() const { return m_status == Status::Hosting || m_status == Status::Connected; }
@@ -69,6 +71,7 @@ public:
     uint16_t port() const { return m_socket.localPort(); }
 
     std::function<void(const PlayerState &)> onState;
+    std::function<void(const EnemyStates &)> onEnemies; // clients
     std::function<void(uint8_t origin, uint16_t type, const std::vector<uint8_t> &data)> onEvent;
     std::function<void(uint8_t id, const std::string &name, bool joined)> onPeer;
     std::function<void(const std::string &)> onLog;

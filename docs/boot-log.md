@@ -491,3 +491,31 @@ briefly is the newest one, which `GetPlayer` returns).
 With this, the map jump works (02-07 Market Street to 02-02 the Usual Spot)
 and spawned objects come back from the factory and join the object list;
 they are not drawn yet.
+
+## 22. Freezes when pausing, and skipping scenes
+
+Playing by hand turned up a freeze when opening the settings menu during a
+busy in-engine scene. The watchdog's stacks showed the main thread in
+`kh2pgs::redraw` (the paused path) waiting in Granite's
+`Device::end_frame_context`, which waits until every command buffer
+requested in the frame has been submitted. Between guest frames
+`pumpWindow` feeds queued GS data to paraLLEl-GS, which records it into a
+command buffer of its own and submits it at the next flush (vsync). If the
+game paused right after such a drain, `redraw` presented with that buffer
+still open and waited forever. `redraw` now drains and flushes the GS
+before presenting. (`--menu-at=F,..:S` opens the menu at frames for a few
+seconds in windowed runs, to test this.)
+
+Fast-forward stuttered in movies (the player paces itself by its audio,
+which runs at normal speed): Tab, or holding B, now skips the movie. In-engine
+cutscenes are skipped as Final Mix's pause menu does it (`FUN_0026E754`):
+`dk::kickUnc` sets `sa::EVENT`'s skip flag (`0x0035DE08`, read by
+`EVENT::isSkipping`) and the byte at `0x00352770`; the event winds itself
+up. With `--skip-movies --skip-cutscenes` a new game reaches free control in
+Market Street at guest frame ~2200 instead of ~17900.
+
+Crashes now leave `crashes\kh2recomp-<time>.txt` (exception, every thread's
+stack, symbolised from the PDB) and a minidump; `Play KH2.bat` writes the
+session's output to `logs\play.log`. A settings file the game cannot parse
+no longer stops it: such lines are skipped with a warning (on/off keys take
+1/0; every other key keeps its value, so `mouse-sensitivity = 1` is a number).

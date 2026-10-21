@@ -6,7 +6,7 @@ param([string]$Name = 'run', [int]$KillAfter = 300, [Parameter(ValueFromRemainin
 New-Item -ItemType Directory -Force logs, "shots\$Name" | Out-Null
 $iso = (Get-ChildItem Src -Filter *.iso | Select-Object -First 1).FullName
 $log = "logs\run_$Name.log"
-$argsList = @('game\SLPM_666.75', "--iso=$iso", '--cd-root=game', '--headless', "--shots=shots\$Name") + @($Rest | Where-Object { $_ -ne '--' })
+$argsList = @('game\SLPM_666.75', "--iso=$iso", '--cd-root=game', '--headless', '--no-settings', "--shots=shots\$Name") + @($Rest | Where-Object { $_ -ne '--' })
 # Start-Process joins arguments with spaces and does not quote them.
 $argsList = $argsList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
 $p = Start-Process -FilePath 'build\win\kh2recomp.exe' -ArgumentList $argsList -NoNewWindow -PassThru `

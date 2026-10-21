@@ -18,6 +18,9 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#if defined(_WIN32)
+#include <io.h>
+#endif
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -47,6 +50,7 @@
 #include "coop.h"
 #include "puppets.h"
 #include "watchdog.h"
+#include "cutscene_skip.h"
 #include "overlay_ui.h"
 
 namespace ps2_stubs
@@ -139,11 +143,14 @@ struct Options
     bool puppetSpawn = true;           // --puppet-mode=spawn|borrow
     bool markActors = false;           // --mark-actors
     bool noNameTags = false;           // --no-name-tags
+    std::set<uint64_t> menuAt;         // --menu-at=F1,F2,..:SECONDS (windowed runs)
+    double menuSeconds = 3.0;
+    std::vector<std::pair<uint64_t, uint64_t>> ffAt; // --ff-at=FROM-TO,.. (windowed runs)
     kh2keys::Bindings keys = kh2keys::Bindings::defaults(); // --key-ACTION=KEY[,KEY..]
     std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
     struct PreloadTest { uint64_t frame; uint32_t entry, look; };
     std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
-    std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM (hex)
+    std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM[:BTL] (hex; world<<24|room<<16|btl)
     struct Teleport { uint64_t frame; float pos[3]; };
     std::vector<Teleport> teleports; // --teleport=FRAME:X,Y,Z
 };
@@ -159,7 +166,8 @@ void usage()
         "  --timeout=SEC           give up after SEC wall-clock seconds, exit 3\n"
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
         "  --screenshot-at=A,B,..  save shots at these guest frames\n"
-        "  --warp-test=F:WW:RR     experiment: map jump to world WW room RR (hex) at frame F\n"
+        "  --warp-test=F:WW:RR[:B] experiment: map jump to world WW room RR (hex) at frame F; B: the\n"
+        "                          room's battle program (decimal; which enemy groups spawn)\n"
         "  --preload-test=FRAME:ID[:LOOK] experiment: load objentry ID's files (hex); with LOOK, first\n"
         "                          dress puppet entry ID (84C/84D) as entry LOOK\n"
         "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
@@ -213,8 +221,13 @@ void usage()
         "                          default) or by moving an NPC already in the room ('borrow')\n"
         "  --no-name-tags          co-op: no names over other players\n"
         "  --teleport=FRAME:X,Y,Z  testing: put the player at this position at FRAME\n"
+        "  --menu-at=F,..:S        testing (windowed): open the settings menu at these frames for S seconds\n"
+        "  --ff-at=A-B,..          testing (windowed): fast-forward from frame A to B\n"
+        "  --skip-cutscenes        skip every in-engine cutscene (hold B to skip one)\n"
+        "  --no-settings           don't read kh2recomp.ini\n"
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
+        "  --no-shared-enemies     co-op client: keep your own enemies instead of the host's\n"
         "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
         "  --mash-until=FRAME      stop --mash at this guest frame\n"
         "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
@@ -235,7 +248,22 @@ uint32_t buttonMask(const std::string &name)
     return it == kButtons.end() ? 0u : it->second;
 }
 
+bool parseUnchecked(int argc, char **argv, Options &o);
+// A bad number ("--ssaa=lots") makes std::stoi throw: that is a usage error too.
 bool parse(int argc, char **argv, Options &o)
+{
+    try
+    {
+        return parseUnchecked(argc, argv, o);
+    }
+    catch (const std::exception &)
+    {
+        std::fprintf(stderr, "bad value in the arguments\n");
+        return false;
+    }
+}
+
+bool parseUnchecked(int argc, char **argv, Options &o)
 {
     auto value = [](const std::string &arg) { return arg.substr(arg.find('=') + 1); };
     for (int i = 1; i < argc; ++i)
@@ -351,7 +379,33 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
         else if (a == "--follow-host") o.coop.followHost = true;
+        else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
         else if (a == "--mark-actors") o.markActors = true;
+        else if (a == "--no-settings") {} // handled before parsing
+        else if (a == "--skip-cutscenes") kh2skip::setAutoSkip(true);
+        else if (a.rfind("--menu-at=", 0) == 0)
+        {
+            std::string v = value(a);
+            const size_t colon = v.find(':');
+            if (colon != std::string::npos)
+            {
+                o.menuSeconds = std::stod(v.substr(colon + 1));
+                v = v.substr(0, colon);
+            }
+            std::stringstream ss(v);
+            for (std::string f; std::getline(ss, f, ',');)
+                o.menuAt.insert(std::stoull(f));
+        }
+        else if (a.rfind("--ff-at=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string r; std::getline(ss, r, ',');)
+            {
+                const size_t dash = r.find('-');
+                if (dash == std::string::npos) return false;
+                o.ffAt.emplace_back(std::stoull(r.substr(0, dash)), std::stoull(r.substr(dash + 1)));
+            }
+        }
         else if (a.rfind("--teleport=", 0) == 0)
         {
             Options::Teleport t{};
@@ -369,8 +423,10 @@ bool parse(int argc, char **argv, Options &o)
             const size_t c1 = v.find(':'), c2 = v.find(':', c1 + 1);
             if (c1 == std::string::npos || c2 == std::string::npos) return false;
             const uint32_t world = static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16));
-            const uint32_t room = static_cast<uint32_t>(std::stoul(v.substr(c2 + 1), nullptr, 16));
-            o.warpTests.emplace_back(std::stoull(v.substr(0, c1)), world << 8 | room);
+            const size_t c3 = v.find(':', c2 + 1);
+            const uint32_t room = static_cast<uint32_t>(std::stoul(v.substr(c2 + 1, c3 - c2 - 1), nullptr, 16));
+            const uint32_t battle = c3 == std::string::npos ? 0xFFFFu : static_cast<uint32_t>(std::stoul(v.substr(c3 + 1)));
+            o.warpTests.emplace_back(std::stoull(v.substr(0, c1)), world << 24 | room << 16 | (battle & 0xFFFF));
         }
         else if (a.rfind("--preload-test=", 0) == 0)
         {
@@ -459,6 +515,8 @@ struct Harness
     uint64_t lastSpawnFrame = UINT64_MAX;
     uint64_t lastWarpFrame = UINT64_MAX;
     uint64_t lastActorsFrame = UINT64_MAX;
+    std::chrono::steady_clock::time_point menuOpenedAt;
+    bool menuByHarness = false;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
@@ -721,6 +779,33 @@ bool harnessTick(Harness &h, uint64_t frame)
         auto it = prev == UINT64_MAX ? at.begin() : at.upper_bound(prev);
         return it != at.end() && *it <= frame;
     };
+    // Settings menu opened and closed again (crash hunting: pausing mid-scene).
+    if (!o.menuAt.empty())
+    {
+        if (!h.menuByHarness && frame != prev && hit(o.menuAt))
+        {
+            h.menuByHarness = true;
+            h.menuOpenedAt = std::chrono::steady_clock::now();
+            kh2pgs::setMenuOpen(true);
+            std::printf("[harness] frame %llu: settings menu opened\n", (unsigned long long)frame);
+            std::fflush(stdout);
+        }
+        else if (h.menuByHarness &&
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - h.menuOpenedAt).count() > o.menuSeconds)
+        {
+            h.menuByHarness = false;
+            kh2pgs::setMenuOpen(false);
+            std::printf("[harness] frame %llu: settings menu closed\n", (unsigned long long)frame);
+            std::fflush(stdout);
+        }
+    }
+    if (!o.ffAt.empty())
+    {
+        bool ff = false;
+        for (const auto &[a, b] : o.ffAt)
+            ff = ff || (frame >= a && frame < b);
+        kh2ui::setTestFastForward(ff);
+    }
     if (frame != h.lastShotFrame &&
         ((o.screenshotEvery && (prev == UINT64_MAX || frame / o.screenshotEvery != prev / o.screenshotEvery)) ||
          hit(o.screenshotAt)))
@@ -741,8 +826,20 @@ bool harnessTick(Harness &h, uint64_t frame)
         std::memcpy(&player, ram + kh2state::addr::PlayerPtr, 4);
         std::printf("[actors] frame %llu, player %08X:\n", (unsigned long long)frame, player);
         for (const kh2state::ActorInfo &a : kh2state::actors(ram))
-            std::printf("[actors]   %08X %04X %-24s %-18s %.0f,%.0f,%.0f\n", a.address, a.entryId, a.name,
-                        kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2]);
+        {
+            // Fighters (player, party, bosses, enemies) show their HP (YS::SHEET at +0x48C).
+            char hp[32] = "";
+            uint32_t sheet = 0;
+            std::memcpy(&sheet, ram + ((a.address + 0x48C) & 0x01FFFFFFu), 4);
+            if ((a.type <= 1 || a.type == 3 || a.type == 4) && sheet >= 0x00100000u && sheet < 0x02000000u)
+            {
+                int32_t v[3];
+                std::memcpy(v, ram + sheet, sizeof(v));
+                std::snprintf(hp, sizeof(hp), " hp %d/%d min %d", v[0], v[1], v[2]);
+            }
+            std::printf("[actors]   %08X %04X %-24s %-18s %.0f,%.0f,%.0f%s\n", a.address, a.entryId, a.name,
+                        kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2], hp);
+        }
         std::fflush(stdout);
     }
     for (const auto &t : o.teleports)
@@ -762,7 +859,7 @@ bool harnessTick(Harness &h, uint64_t frame)
         if (due(at) && frame != h.lastWarpFrame)
         {
             h.lastWarpFrame = frame;
-            kh2coop::requestWarp(uint8_t(where >> 8), uint8_t(where & 0xFF));
+            kh2coop::requestWarp(uint8_t(where >> 24), uint8_t(where >> 16), 0, uint16_t(where & 0xFFFF));
         }
     for (const auto &t : o.preloadTests)
         if (due(t.frame))
@@ -905,6 +1002,7 @@ bool headlessPump(void *userData)
         ps2PadPublishHostState(heldAll, pressed, sticks);
     }
     kh2movie::poll(*h.runtime);
+    kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (kh2pgs::active() && frame != h.lastGpuFrame)
@@ -927,6 +1025,7 @@ bool playPump(void *userData)
         saveUserShot(h.screenshotDir);
     kh2input::poll(kh2pgs::windowFocused());
     kh2movie::poll(*h.runtime);
+    kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (frame != h.lastGpuFrame)
@@ -977,14 +1076,22 @@ std::vector<std::string> readSettings(const char *argv0)
             const std::string val = eq == std::string::npos ? std::string() : trim(l.substr(eq + 1));
             if (key.empty())
                 continue;
+            // On/off switches take 1/0 (true/false, yes/no, on/off); every other
+            // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
+            static const std::set<std::string> kSwitches = {
+                "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mouse-camera",
+                "no-name-tags", "no-rumble", "no-shared-enemies", "pause-unfocused", "profile", "show-fps",
+                "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
+            const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
+            const bool off = val == "0" || val == "false" || val == "no" || val == "off";
             if (key == "elf")
                 out.push_back(val);
-            else if (key.rfind("key-", 0) == 0) // values like "1" or "0" are keys here
-                out.push_back("--" + key + "=" + val);
-            else if (val.empty() || val == "1" || val == "true" || val == "yes" || val == "on")
+            else if (kSwitches.count(key) && on)
                 out.push_back("--" + key);
-            else if (val == "0" || val == "false" || val == "no" || val == "off")
+            else if (kSwitches.count(key) && off)
                 continue;
+            else if (val.empty())
+                std::fprintf(stderr, "[kh2] settings: '%s' has no value (ignored)\n", key.c_str());
             else
                 out.push_back("--" + key + "=" + val);
         }
@@ -997,8 +1104,19 @@ std::vector<std::string> readSettings(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    kh2watch::installCrashHandler("crashes");
+#if defined(_WIN32)
+    // Output going to a file (the launcher's logs\play.log) is written as it
+    // happens, so a crash cannot swallow the last lines.
+    if (!_isatty(_fileno(stdout)))
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+#endif
     Options opt;
-    std::vector<std::string> merged = readSettings(argv[0]);
+    // --no-settings: ignore kh2recomp.ini (test runs).
+    bool noSettings = false;
+    for (int i = 1; i < argc; ++i)
+        noSettings |= std::string(argv[i]) == "--no-settings";
+    std::vector<std::string> merged = noSettings ? std::vector<std::string>{} : readSettings(argv[0]);
     // An ELF given on the command line replaces one from the settings.
     bool cliElf = false;
     for (int i = 1; i < argc; ++i)
@@ -1007,6 +1125,21 @@ int main(int argc, char **argv)
         merged.erase(std::remove_if(merged.begin(), merged.end(),
                                     [](const std::string &a) { return !a.empty() && a[0] != '-'; }),
                      merged.end());
+    // A line in the settings file the game does not understand is skipped, not
+    // fatal: the game should always start.
+    merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                [&](std::string &a) {
+                                    if (a.empty() || a[0] != '-')
+                                        return false;
+                                    Options scratch;
+                                    std::string elf = "x.elf";
+                                    char *one[] = {argv[0], elf.data(), a.data()};
+                                    if (parse(3, one, scratch))
+                                        return false;
+                                    std::fprintf(stderr, "[kh2] kh2recomp.ini: ignoring '%s'\n", a.c_str() + 2);
+                                    return true;
+                                }),
+                 merged.end());
     for (int i = 1; i < argc; ++i)
         merged.push_back(argv[i]);
     std::vector<char *> mergedArgv{argv[0]};

@@ -34,6 +34,8 @@ kh2keys::Bindings keyBindings();
 void setCapturingKey(bool on);
 // A key or mouse button pressed since the last call (Windows VK), or 0.
 int newlyPressedKey();
+// How long the skip button (Cross: B / X / Space) has been held, in seconds.
+double skipHeldSeconds();
 // Called when Select+Start are pressed together (opens the settings menu).
 void setMenuComboCallback(void (*fn)());
 // Right mouse button + mouse movement turns the camera (right stick).

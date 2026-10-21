@@ -185,3 +185,33 @@ copyright and title screens; a logo fade differed by one step, from timing).
 900 guest frames now take 23 s instead of ~100 s (~39 fps). The remaining cost
 is the per-pixel path itself (`std::function` VRAM accessors, float
 interpolation, `lroundf`), the obvious next step if needed.
+
+## 10. Scripted input ignored headless
+
+**Symptom:** `--input` presses never reached the title menu.
+
+**Cause:** the runtime merges the script in `publishHostState`, which only its
+windowed present loop calls (`ps2PadPollHost` returns early without a window).
+
+**Fix:** the harness pump publishes an idle host state every iteration, which
+applies the script. NEW GAME and its option screens now respond.
+
+## 11. Callbacks merged into neighbouring functions
+
+**Symptom:** after confirming NEW GAME, a series of
+`[guest-branch:missing-target] kind=IndirectCall` stops at addresses inside
+known functions (`0x003216B8`, `0x001AFE18`, `0x001E99F0`).
+
+**Cause:** Ghidra merged small functions reached only through pointers into
+the function before them; the runtime can only enter a function at its start.
+
+**Fix:** `branchlib.split_after_returns` splits a function after any
+unconditional transfer (`jr $ra`, `j`, `b`) when no branch connects the two
+parts (functions with jump tables are left alone). Code-built (`lui`/`addiu`)
+callback addresses after such a transfer are taken as starts, and pointer
+scanning is repeated each gap-filling round, since newly found functions can
+build more of them. Main map 13,267 → 13,716 functions, overlays +306; all maps
+still check clean.
+
+**Result:** the new-game flow runs through difficulty, vibration and sound
+selection and the confirmation, to the white "KINGDOM HEARTS" fade.

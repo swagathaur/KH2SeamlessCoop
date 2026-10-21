@@ -314,6 +314,9 @@ bool headlessPump(void *userData)
     const Options &o = *h.opt;
     const uint64_t frame = ps2PadCurrentGuestFrame();
     ++h.presented;
+    // No window, so the runtime's present loop never polls input; publishing an
+    // idle host state is what merges the --input script in (ps2_pad.cpp).
+    ps2PadPublishHostState(0u, 0u, 0x80808080u);
 
     if (frame != h.lastShotFrame &&
         ((o.screenshotEvery && frame % o.screenshotEvery == 0) || o.screenshotAt.count(frame)))

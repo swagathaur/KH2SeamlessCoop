@@ -15,6 +15,10 @@ Gap filling: Ghidra's map leaves some reachable code outside any function
 pointers). Every .ctors target, and every `addiu $sp,$sp,-N` prologue lying in
 a gap between known functions, becomes a function that runs to the next one.
 
+Functions Ghidra merged across a `jr $ra` are split when no branch connects
+the two parts (branchlib.split_after_returns); the later part is reached only
+through a pointer.
+
 Overlays call into the main executable too: every J/JAL target in an overlay
 that lands in the main ELF must also be a function start there.
 
@@ -27,7 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from branchlib import extend_into_gaps  # noqa: E402
+from branchlib import ends_flow, extend_into_gaps, split_after_returns  # noqa: E402
 
 IDENT = re.compile(r"[^A-Za-z0-9_]")
 
@@ -208,6 +212,19 @@ def extend_main_gaps(layout, elf_path: Path) -> int:
     return n
 
 
+def split_main_returns(layout, elf_path: Path) -> int:
+    text = elf_path.read_bytes()[ELF_TEXT_OFF:ELF_TEXT_OFF + ELF_TEXT_SIZE]
+    word = lambda va: struct.unpack_from("<I", text, va - ELF_TEXT_VA)[0]
+    funcs = {s: [v["name"], v["end"]] for s, v in layout.items()}
+    n = split_after_returns(funcs, word)
+    for s, (name, e) in funcs.items():
+        if s in layout:
+            layout[s]["end"] = e
+        else:
+            layout[s] = {"end": e, "name": name}
+    return n
+
+
 def split_at_calls(layout, elf_path: Path, external=frozenset()):
     """JAL targets (and any branch from another binary) must be function starts:
     split a function such a branch lands inside, or seed one in a gap."""
@@ -265,6 +282,7 @@ def pointer_targets(layout, elf_path: Path):
         return i if i >= 0 and a < ends[i] else None
 
     candidates = set()
+    from_code = set()  # built with lui + addiu/ori: never a switch-table case label
     for off in range(0, ELF_TEXT_SIZE - 3, 4):
         va = ELF_TEXT_VA + off
         if va < code_end and owner(va) is not None:
@@ -289,6 +307,7 @@ def pointer_targets(layout, elf_path: Path):
                     if op2 == 0x09 and lo & 0x8000:
                         lo -= 0x10000
                     candidates.add(((hi << 16) + lo) & 0xFFFFFFFF)
+                    from_code.add(((hi << 16) + lo) & 0xFFFFFFFF)
                     break
     found = set()
     for t in candidates:
@@ -304,6 +323,9 @@ def pointer_targets(layout, elf_path: Path):
             found.add(t)            # stack-frame prologue: a real function start
         elif after_return:
             found.add(t)            # nothing falls through into it
+        elif t in from_code and t - 8 >= ELF_TEXT_VA and \
+                ends_flow(struct.unpack_from("<I", text, t - 8 - ELF_TEXT_VA)[0]):
+            found.add(t)            # callback address after a j/b (0x001AFE18)
         elif i is None:
             # In a gap: only if it directly follows a known function (after zero
             # padding), as compiled functions are packed; data blobs that merely
@@ -326,18 +348,20 @@ def main():
 
     layout = read_layout(decomp / "layout.tsv")
     if elf:
-        ptrs = pointer_targets(layout, elf)
-        print(f"code pointers in data: {len(ptrs)}")
-        external |= ptrs
         eps = read_analyzer_entry_points(analyzer)
         total, rounds = 0, 0
         while True:   # seeded functions can reveal further targets
+            # Re-scanned each round: code that gap filling turns into a
+            # function can build further callback addresses (0x001AFE18).
+            ptrs = pointer_targets(layout, elf)
+            external |= ptrs
             added = fill_gaps(layout, elf, eps) + split_at_calls(layout, elf, external)
             added += extend_main_gaps(layout, elf)
+            added += split_main_returns(layout, elf)
             total, rounds = total + added, rounds + 1
             if added == 0 or rounds > 20:
                 break
-        print(f"gap filling added {total} functions in {rounds} rounds")
+        print(f"gap filling added {total} functions in {rounds} rounds ({len(external)} external/pointer targets)")
     decomp_names = read_decomp_names(decomp / "functions.tsv")
     sdk_names = read_analyzer_names(analyzer)
 

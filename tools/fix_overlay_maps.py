@@ -3,7 +3,8 @@
 
 Within an overlay, every JAL target must be a function start and every J must
 stay inside its function or land on a start. Targets in unmapped gaps become
-functions; a call landing inside a function splits it. Repeats to a fixpoint.
+functions; a call landing inside a function splits it; code after a `jr $ra`
+that no branch connects to the rest is split off. Repeats to a fixpoint.
 
 Usage: fix_overlay_maps.py <overlay> ...   (run from the repository root)
 """
@@ -13,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from branchlib import extend_into_gaps  # noqa: E402
+from branchlib import ends_flow, extend_into_gaps, split_after_returns  # noqa: E402
 
 BASE, ARENA_END = 0x01F18000, 0x01FC0000
 
@@ -36,6 +37,7 @@ for name in sys.argv[1:]:
         i = bisect.bisect_right(starts, a) - 1
         return starts[i] if i >= 0 and a < funcs[starts[i]][1] else None
     candidates = set()
+    from_code = set()  # lui + addiu/ori constants: never switch-table case labels
     for va in range(BASE, limit - 3, 4):
         if not (va < code_end and owner(va) is not None):
             candidates.add(word(va))
@@ -55,6 +57,7 @@ for name in sys.argv[1:]:
                     if w2 >> 26 == 0x09 and lo & 0x8000:
                         lo -= 0x10000
                     candidates.add(((hi << 16) + lo) & 0xFFFFFFFF)
+                    from_code.add(((hi << 16) + lo) & 0xFFFFFFFF)
                     break
     ptr_added = 0
     for t in sorted(candidates):
@@ -64,7 +67,8 @@ for name in sys.argv[1:]:
         if not w:
             continue
         prologue = w >> 16 == 0x27BD and (w & 0xFFFF) >= 0x8000
-        after_return = t - 8 >= BASE and word(t - 8) == 0x03E00008
+        after_return = t - 8 >= BASE and (word(t - 8) == 0x03E00008 or
+                                          (t in from_code and ends_flow(word(t - 8))))
         own = owner(t)
         if own is not None:
             if not (prologue or after_return):
@@ -113,6 +117,7 @@ for name in sys.argv[1:]:
                     continue
                 starts = sorted(funcs)
                 added += 1
+        added += split_after_returns(funcs, word, name + "_FUN_{:08x}")
         total += added
         if not added:
             break

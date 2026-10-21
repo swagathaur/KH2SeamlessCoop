@@ -465,3 +465,29 @@ With `--widescreen` the script VM then jumped through a corrupted jump table
 recompiled variant differs from the original only in that constant, so this
 is the game's own message code writing out of bounds with the lower window;
 the change is left out of our widescreen patch.
+
+## 21. Calling game code from the host
+
+The co-op layer runs game functions itself: the map jump, the object
+factory, an object's leave method, `YS::MOTION::change`. Calling a
+translated function directly from C++ looked like it worked, but the
+results were odd: a spawned object came back as a different pointer than
+the one the factory logged, and its setup method ran after the caller had
+already "returned". Every call between translated functions is a scheduler
+safe point; when a checkpoint is due there, `dispatch` returns false and the
+C++ stack unwinds with `ctx->pc` set to where the guest should continue, so
+the direct call returned with the guest function only partly run.
+
+`port/coop/guest_call.cpp` now runs each call as a scheduler invocation
+(`EeScheduler::invokeCurrent`, kind `HleCall`, on the scheduler's
+invocation stack, with an `onComplete` that keeps v0): the function runs to
+completion, preemptible like any guest code, and the hook it was issued
+from (the player's matrix build, once a frame) runs again afterwards. Jobs
+are small step machines that see the previous call's v0 before choosing the
+next call. A guard keeps the hook from re-entering a job while its call is
+still running (the factory builds the new object's matrix, and that object
+briefly is the newest one, which `GetPlayer` returns).
+
+With this, the map jump works (02-07 Market Street to 02-02 the Usual Spot)
+and spawned objects come back from the factory and join the object list;
+they are not drawn yet.

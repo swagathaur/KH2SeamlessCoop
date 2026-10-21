@@ -1,7 +1,7 @@
-// Puppets, first version ("ghosts"): each remote player in the same room as
-// us borrows an NPC already there and moves it to where that player is.
-// The NPC keeps its own model and animation for now; driving the right model
-// and its motions comes next.
+// Puppets: each remote player in the same room as us is shown by an object
+// that follows their position. Borrow mode moves an NPC already in the room
+// (it keeps its own look); spawn mode creates an NPC-class object dressed in
+// the player's own model and motions, and plays their current motion.
 //
 // How: YS::OBJ::calc_motion rebuilds every object's world matrix each frame
 // through FUN_00193608 from its position (+0x540) and direction (+0x550).
@@ -46,9 +46,12 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets);
 // with the game's factory (FUN_0016F000) `distance` units in front of the
 // player. The result is printed ([puppets] spawned ...).
 void requestSpawn(uint32_t entryId, float distance = 150.0f);
-// Experiment: ask the game to load an objentry's model and motions
-// (FUN_0016EB48, what loading a drive form uses).
+// Ask the game to load an objentry's model and motions (the objentry read
+// request a room's spawn list makes, then CACHE_BUFF::Flush).
 void requestPreload(uint32_t entryId);
+// Give a puppet entry (0x084C or 0x084D) another entry's model and motion set
+// (lookEntry 0 puts its own back). Takes effect for later loads and spawns.
+void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
 
 struct Assignment
 {

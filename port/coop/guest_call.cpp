@@ -1,5 +1,6 @@
 #include "guest_call.h"
 
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -23,6 +24,11 @@ struct Active
 std::mutex g_mutex;
 std::deque<Step> g_queue;
 std::unique_ptr<Active> g_active; // EE thread only
+// A call is running: the hook can be reached again from inside it (the object
+// factory builds the new object's matrix, and that object briefly is the
+// "player"), and must then leave the job alone.
+bool g_inFlight = false;
+std::chrono::steady_clock::time_point g_inFlightSince;
 
 Env envFor(uint8_t *rdram, R5900Context *ctx)
 {
@@ -51,6 +57,16 @@ void postCall(Call call, std::function<void(const Env &, uint32_t)> done)
 
 void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t hookAddress)
 {
+    if (g_inFlight)
+    {
+        // A call that never finished (its thread was torn down with a room,
+        // say) must not block every later job.
+        if (std::chrono::steady_clock::now() - g_inFlightSince < std::chrono::seconds(10))
+            return;
+        std::fprintf(stderr, "[guest] call did not finish in 10 s; job dropped\n");
+        g_inFlight = false;
+        g_active.reset();
+    }
     for (;;)
     {
         if (!g_active)
@@ -95,9 +111,12 @@ void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t
         c.pc = call->address;
         invocation.context = c;
         invocation.onComplete = [](const R5900Context &finished, R5900Context &) {
+            g_inFlight = false;
             if (g_active)
                 g_active->lastResult = getRegU32(&finished, 2);
         };
+        g_inFlight = true;
+        g_inFlightSince = std::chrono::steady_clock::now();
         // Run the hook again (same registers) once the call has finished.
         ctx->pc = hookAddress;
         scheduler.invokeCurrent(std::move(invocation)); // does not return

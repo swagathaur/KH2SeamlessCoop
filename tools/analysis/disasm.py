@@ -35,9 +35,17 @@ for arg in sys.argv[1:]:
     s, e, n = f
     print(f"== {n} 0x{s:08X}-0x{e:08X}")
     code = read(s, e - s)
-    for ins in md.disasm(code, s):
-        extra = ""
-        if ins.mnemonic in ("jal", "j"):
-            t = int(ins.op_str, 16)
-            extra = "  ; " + by_start.get(t, "")
-        print(f"  {ins.address:08X}: {ins.mnemonic:8s} {ins.op_str}{extra}")
+    pos = 0
+    while pos < len(code):
+        # Capstone stops at EE-only opcodes (MMI, COP2...): show the word, go on.
+        for ins in md.disasm(code[pos:], s + pos):
+            extra = ""
+            if ins.mnemonic in ("jal", "j"):
+                t = int(ins.op_str, 16)
+                extra = "  ; " + by_start.get(t, "")
+            print(f"  {ins.address:08X}: {ins.mnemonic:8s} {ins.op_str}{extra}")
+            pos = ins.address + ins.size - s
+        if pos < len(code):
+            w = struct.unpack_from("<I", code, pos)[0]
+            print(f"  {s + pos:08X}: .word    0x{w:08X}  (EE-specific)")
+            pos += 4

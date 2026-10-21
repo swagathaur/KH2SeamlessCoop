@@ -2,6 +2,10 @@
 // the keyboard, published to the runtime's pad emulation. See host_input.cpp.
 #pragma once
 
+#include <string>
+
+#include "key_bindings.h"
+
 namespace kh2input
 {
 struct Options
@@ -23,6 +27,13 @@ void setConfirmOnBottom(bool on);
 bool confirmOnBottom();
 // While suppressed (the settings menu is open) the game sees an idle pad.
 void setSuppressed(bool on);
+// Keyboard layout (key-* lines in kh2recomp.ini; the menu's Keyboard section).
+void setKeyBindings(const kh2keys::Bindings &b);
+kh2keys::Bindings keyBindings();
+// While the menu waits for a key to bind, the keyboard does not reach the game.
+void setCapturingKey(bool on);
+// A key or mouse button pressed since the last call (Windows VK), or 0.
+int newlyPressedKey();
 // Called when Select+Start are pressed together (opens the settings menu).
 void setMenuComboCallback(void (*fn)());
 // Right mouse button + mouse movement turns the camera (right stick).
@@ -32,6 +43,7 @@ void setMouseSensitivity(float s);
 float mouseSensitivity();
 // The fast-forward key (Tab) is held.
 bool fastForwardHeld();
-// A pad is connected.
+// A pad is connected, and what it is ("" if none).
 bool controllerConnected();
+std::string controllerName();
 } // namespace kh2input

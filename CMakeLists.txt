@@ -210,6 +210,24 @@ FetchContent_Declare(kh2_imgui_src
     GIT_TAG v1.92.0
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(kh2_imgui_src)
+# SDL3, for controllers only (PlayStation, Switch and other pads natively,
+# with rumble; XInput stays as the fallback). Static, most subsystems off.
+option(KH2_SDL3 "Use SDL3 for game controllers" ON)
+if(KH2_SDL3)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+    foreach(_sub AUDIO GPU RENDER CAMERA DIALOG POWER)
+        set(SDL_${_sub} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    FetchContent_Declare(kh2_sdl3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.2.28
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(kh2_sdl3)
+endif()
+
 add_library(kh2_imgui STATIC
     ${kh2_imgui_src_SOURCE_DIR}/imgui.cpp
     ${kh2_imgui_src_SOURCE_DIR}/imgui_draw.cpp
@@ -234,6 +252,7 @@ add_executable(kh2recomp
     port/runtime/profiler.cpp
     port/runtime/pgs_renderer.cpp
     port/runtime/host_input.cpp
+    port/runtime/key_bindings.cpp
     port/runtime/game_patches.cpp
     port/runtime/watchdog.cpp
     port/runtime/overlay_ui.cpp
@@ -269,7 +288,7 @@ ps2x_stage_ffmpeg_runtime_dlls(kh2vureplay)
 
 # Co-op network layer test (no game needed): loopback host + two clients with
 # simulated packet loss. ctest, or run build\win\coop_net_test.exe.
-option(KH2_BUILD_TESTS "Build the co-op network tests" ON)
+option(KH2_BUILD_TESTS "Build the tests that need no game (co-op network, key bindings)" ON)
 if(KH2_BUILD_TESTS)
     enable_testing()
     add_executable(coop_net_test tests/coop_net_test.cpp
@@ -279,7 +298,14 @@ if(KH2_BUILD_TESTS)
         target_link_libraries(coop_net_test PRIVATE ws2_32)
     endif()
     add_test(NAME coop_net COMMAND coop_net_test)
+    add_executable(key_bindings_test tests/key_bindings_test.cpp port/runtime/key_bindings.cpp)
+    target_include_directories(key_bindings_test PRIVATE port/runtime)
+    add_test(NAME key_bindings COMMAND key_bindings_test)
 endif()
 if(WIN32)
     target_link_libraries(kh2recomp PRIVATE ws2_32)
+endif()
+if(KH2_SDL3)
+    target_link_libraries(kh2recomp PRIVATE SDL3::SDL3-static)
+    target_compile_definitions(kh2recomp PRIVATE KH2_HAVE_SDL3=1)
 endif()

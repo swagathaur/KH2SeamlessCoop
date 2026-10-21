@@ -1,27 +1,38 @@
 // Host input when the GPU renderer owns the window (the runtime's raylib
 // window, which normally polls input, is not created then).
 //
-// Controllers: XInput (Xbox and compatible pads, and most others through
-// Steam Input), first connected pad. Keyboard: same layout as the runtime's
-// raylib bindings (ps2_pad.cpp): arrows = D-pad, WASD = left stick, IJKL =
-// right stick (or the mouse with the right button held), Enter = Start,
-// Backspace = Select, Tab = fast-forward, Q/E = L1/R1, Shift = L2/R2,
-// X/Space = Cross, C/Esc = Circle, Z = Square, V = Triangle, R/F = L3/R3.
+// Controllers: SDL3's gamepad API when built in (Xbox, PlayStation, Switch and
+// most others, with rumble), else XInput (Xbox and compatible pads, and most
+// others through Steam Input); the first connected pad. Keyboard: rebindable
+// (key_bindings.h); by default the runtime's raylib layout (ps2_pad.cpp):
+// arrows = D-pad, WASD = left stick, IJKL = right stick (or the mouse with the
+// right button held), Enter = Start, Backspace = Select, Tab = fast-forward,
+// Q/E = L1/R1, Shift = L2/R2, X/Space = Cross, C/Esc = Circle, Z = Square,
+// V = Triangle, R/F = L3/R3.
 
 #include "host_input.h"
 
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
+#include <string>
 
+#include "key_bindings.h"
 #include "runtime/ps2_pad_host.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <xinput.h>
 #pragma comment(lib, "xinput.lib")
+#endif
+
+#if defined(KH2_HAVE_SDL3)
+#include <SDL3/SDL.h>
 #endif
 
 namespace kh2input
@@ -47,6 +58,103 @@ bool g_comboHeld = false;
 bool g_fastForward = false;
 std::atomic<bool> g_mouseCamera{true};
 std::atomic<float> g_mouseSensitivity{1.0f};
+std::mutex g_keysMutex;
+kh2keys::Bindings g_keys = kh2keys::Bindings::defaults();
+std::atomic<bool> g_capturing{false}; // the menu is waiting for a key to bind
+std::mutex g_nameMutex;
+std::string g_padName;
+
+uint8_t axisByte(int v, bool invert);
+
+#if defined(KH2_HAVE_SDL3)
+bool g_sdlReady = false;
+SDL_Gamepad *g_sdlPad = nullptr;
+unsigned g_sdlScan = 0;
+uint16_t g_sdlSentSmall = 0, g_sdlSentLarge = 0;
+uint64_t g_sdlRumbleAt = 0;
+
+void sdlInit()
+{
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    g_sdlReady = SDL_Init(SDL_INIT_GAMEPAD);
+    if (!g_sdlReady)
+        return;
+    // Nothing drains SDL's event queue: poll state instead.
+    SDL_SetGamepadEventsEnabled(false);
+    SDL_SetJoystickEventsEnabled(false);
+}
+
+// Fills the pad state from an SDL gamepad; false when there is none.
+bool sdlPoll(uint32_t &held, uint8_t &lx, uint8_t &ly, uint8_t &rx, uint8_t &ry)
+{
+    if (!g_sdlReady)
+        return false;
+    SDL_UpdateGamepads(); // also notices pads being plugged in
+    if (g_sdlPad && !SDL_GamepadConnected(g_sdlPad))
+    {
+        SDL_CloseGamepad(g_sdlPad);
+        g_sdlPad = nullptr;
+        std::lock_guard<std::mutex> lock(g_nameMutex);
+        g_padName.clear();
+    }
+    if (!g_sdlPad && (g_sdlScan++ % 60) == 0)
+    {
+        int count = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&count);
+        if (ids && count > 0)
+        {
+            g_sdlPad = SDL_OpenGamepad(ids[0]);
+            if (g_sdlPad)
+            {
+                const char *name = SDL_GetGamepadName(g_sdlPad);
+                std::lock_guard<std::mutex> lock(g_nameMutex);
+                g_padName = name ? name : "Controller";
+                g_sdlSentSmall = g_sdlSentLarge = 0;
+            }
+        }
+        SDL_free(ids);
+    }
+    if (!g_sdlPad)
+        return false;
+    auto button = [](SDL_GamepadButton b) { return SDL_GetGamepadButton(g_sdlPad, b); };
+    const uint32_t bottom = g_opt.confirmOnBottom ? PAD_CIRCLE : PAD_CROSS;
+    const uint32_t right = g_opt.confirmOnBottom ? PAD_CROSS : PAD_CIRCLE;
+    if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) held |= PAD_UP;
+    if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) held |= PAD_DOWN;
+    if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) held |= PAD_LEFT;
+    if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) held |= PAD_RIGHT;
+    if (button(SDL_GAMEPAD_BUTTON_START)) held |= PAD_START;
+    if (button(SDL_GAMEPAD_BUTTON_BACK) || button(SDL_GAMEPAD_BUTTON_TOUCHPAD)) held |= PAD_SELECT;
+    if (button(SDL_GAMEPAD_BUTTON_LEFT_STICK)) held |= PAD_L3;
+    if (button(SDL_GAMEPAD_BUTTON_RIGHT_STICK)) held |= PAD_R3;
+    if (button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) held |= PAD_L1;
+    if (button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) held |= PAD_R1;
+    if (button(SDL_GAMEPAD_BUTTON_SOUTH)) held |= bottom;
+    if (button(SDL_GAMEPAD_BUTTON_EAST)) held |= right;
+    if (button(SDL_GAMEPAD_BUTTON_WEST)) held |= PAD_SQUARE;
+    if (button(SDL_GAMEPAD_BUTTON_NORTH)) held |= PAD_TRIANGLE;
+    if (SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000) held |= PAD_L2;
+    if (SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000) held |= PAD_R2;
+    // SDL sticks are positive down, like the PS2's (0 = up).
+    lx = axisByte(SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_LEFTX), false);
+    ly = axisByte(SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_LEFTY), false);
+    rx = axisByte(SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_RIGHTX), false);
+    ry = axisByte(SDL_GetGamepadAxis(g_sdlPad, SDL_GAMEPAD_AXIS_RIGHTY), false);
+
+    // Rumble: SDL effects time out, so refresh them while they last.
+    const bool rumble = g_rumbleOn && !g_suppressed;
+    const uint16_t small = rumble ? g_rumbleSmall.load() : 0, large = rumble ? g_rumbleLarge.load() : 0;
+    const uint64_t now = SDL_GetTicks();
+    if (small != g_sdlSentSmall || large != g_sdlSentLarge || ((small || large) && now - g_sdlRumbleAt > 100))
+    {
+        SDL_RumbleGamepad(g_sdlPad, large, small, (small || large) ? 250 : 0);
+        g_sdlSentSmall = small;
+        g_sdlSentLarge = large;
+        g_sdlRumbleAt = now;
+    }
+    return true;
+}
+#endif
 
 uint8_t axisByte(int v, bool invert)
 {
@@ -60,13 +168,6 @@ uint8_t axisByte(int v, bool invert)
 #if defined(_WIN32)
 bool key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-uint8_t keyAxis(int lowKey, int highKey, uint8_t fallback)
-{
-    const bool lo = key(lowKey), hi = key(highKey);
-    if (!lo && !hi)
-        return fallback;
-    return lo == hi ? 0x80 : lo ? 0x00 : 0xFF;
-}
 
 // Mouse camera: while the right button is held, mouse movement becomes the
 // right stick. The stick sets a turning rate, so the deflection follows the
@@ -126,14 +227,64 @@ bool mouseCamera() { return g_mouseCamera; }
 void setMouseSensitivity(float s) { g_mouseSensitivity = s; }
 float mouseSensitivity() { return g_mouseSensitivity; }
 
-void init(const Options &options) { g_opt = options; }
+void init(const Options &options)
+{
+    g_opt = options;
+#if defined(KH2_HAVE_SDL3)
+    sdlInit();
+#endif
+}
 void setRumbleEnabled(bool on) { g_rumbleOn = on; }
 bool rumbleEnabled() { return g_rumbleOn; }
 void setConfirmOnBottom(bool on) { g_opt.confirmOnBottom = on; }
 bool confirmOnBottom() { return g_opt.confirmOnBottom; }
 void setSuppressed(bool on) { g_suppressed = on; }
+void setKeyBindings(const kh2keys::Bindings &b)
+{
+    std::lock_guard<std::mutex> lock(g_keysMutex);
+    g_keys = b;
+}
+kh2keys::Bindings keyBindings()
+{
+    std::lock_guard<std::mutex> lock(g_keysMutex);
+    return g_keys;
+}
+void setCapturingKey(bool on) { g_capturing = on; }
+int newlyPressedKey()
+{
+#if defined(_WIN32)
+    // Keys (and mouse buttons) that went down since the last call.
+    static bool down[256] = {};
+    int found = 0;
+    for (int vk = 1; vk < 256; ++vk)
+    {
+        const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (now && !down[vk] && !found && !kh2keys::reserved(vk) && vk != 0x10 && vk != 0x11 && vk != 0x12)
+            found = vk;
+        down[vk] = now;
+    }
+    return found;
+#else
+    return 0;
+#endif
+}
 void setMenuComboCallback(void (*fn)()) { g_comboFn = fn; }
-bool controllerConnected() { return g_pad >= 0; }
+bool controllerConnected()
+{
+#if defined(KH2_HAVE_SDL3)
+    if (g_sdlPad)
+        return true;
+#endif
+    return g_pad >= 0;
+}
+
+std::string controllerName()
+{
+    std::lock_guard<std::mutex> lock(g_nameMutex);
+    if (!g_padName.empty())
+        return g_padName;
+    return g_pad >= 0 ? "Xbox controller (XInput)" : "";
+}
 
 void setRumble(float small, float large)
 {
@@ -148,10 +299,14 @@ void poll(bool keyboardFocus)
 {
     uint32_t held = 0;
     uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
+    bool sdlPad = false;
+#if defined(KH2_HAVE_SDL3)
+    sdlPad = sdlPoll(held, lx, ly, rx, ry);
+#endif
 #if defined(_WIN32)
     // Look for a pad now and then rather than every call: XInputGetState on an
-    // empty slot is slow.
-    if (g_pad < 0 && (g_scanTick++ % 120) == 0)
+    // empty slot is slow. (Not when SDL has a pad: it would be the same one.)
+    if (!sdlPad && g_pad < 0 && (g_scanTick++ % 120) == 0)
     {
         for (DWORD i = 0; i < XUSER_MAX_COUNT && g_pad < 0; ++i)
         {
@@ -160,7 +315,7 @@ void poll(bool keyboardFocus)
                 g_pad = static_cast<int>(i);
         }
     }
-    if (g_pad >= 0)
+    if (!sdlPad && g_pad >= 0)
     {
         XINPUT_STATE st{};
         if (XInputGetState(static_cast<DWORD>(g_pad), &st) != ERROR_SUCCESS)
@@ -204,30 +359,43 @@ void poll(bool keyboardFocus)
             }
         }
     }
-    if (keyboardFocus)
+    if (keyboardFocus && !g_capturing)
     {
-        struct Bind
+        kh2keys::Bindings keys;
         {
-            int vk;
-            uint32_t mask;
+            std::lock_guard<std::mutex> lock(g_keysMutex);
+            keys = g_keys;
+        }
+        auto any = [&](kh2keys::Action a) {
+            for (int vk : keys.keys[a])
+                if (key(vk))
+                    return true;
+            return false;
         };
-        static const Bind kKeys[] = {
-            {VK_UP, PAD_UP}, {VK_DOWN, PAD_DOWN}, {VK_LEFT, PAD_LEFT}, {VK_RIGHT, PAD_RIGHT},
-            {'X', PAD_CROSS}, {VK_SPACE, PAD_CROSS}, {'C', PAD_CIRCLE}, {VK_ESCAPE, PAD_CIRCLE},
-            {'Z', PAD_SQUARE}, {VK_NUMPAD0, PAD_SQUARE}, {'V', PAD_TRIANGLE}, {VK_NUMPAD1, PAD_TRIANGLE},
-            {'Q', PAD_L1}, {'E', PAD_R1}, {VK_LSHIFT, PAD_L2}, {VK_RSHIFT, PAD_R2},
-            {VK_RETURN, PAD_START}, {VK_BACK, PAD_SELECT}, {'R', PAD_L3}, {'F', PAD_R3},
+        static const std::pair<kh2keys::Action, uint32_t> kButtons[] = {
+            {kh2keys::DpadUp, PAD_UP},     {kh2keys::DpadDown, PAD_DOWN}, {kh2keys::DpadLeft, PAD_LEFT},
+            {kh2keys::DpadRight, PAD_RIGHT}, {kh2keys::Cross, PAD_CROSS}, {kh2keys::Circle, PAD_CIRCLE},
+            {kh2keys::Square, PAD_SQUARE}, {kh2keys::Triangle, PAD_TRIANGLE}, {kh2keys::L1, PAD_L1},
+            {kh2keys::R1, PAD_R1},         {kh2keys::L2, PAD_L2},         {kh2keys::R2, PAD_R2},
+            {kh2keys::L3, PAD_L3},         {kh2keys::R3, PAD_R3},         {kh2keys::Start, PAD_START},
+            {kh2keys::Select, PAD_SELECT},
         };
-        for (const Bind &k : kKeys)
-            if (key(k.vk))
-                held |= k.mask;
-        g_fastForward = key(VK_TAB);
-        rx = keyAxis('J', 'L', rx);
-        ry = keyAxis('I', 'K', ry);
+        for (const auto &[action, mask] : kButtons)
+            if (any(action))
+                held |= mask;
+        g_fastForward = any(kh2keys::FastForward);
+        auto axis = [&](kh2keys::Action low, kh2keys::Action high, uint8_t fallback) -> uint8_t {
+            const bool lo = any(low), hi = any(high);
+            if (!lo && !hi)
+                return fallback;
+            return lo == hi ? 0x80 : lo ? 0x00 : 0xFF;
+        };
+        rx = axis(kh2keys::RStickLeft, kh2keys::RStickRight, rx);
+        ry = axis(kh2keys::RStickUp, kh2keys::RStickDown, ry);
         if (!g_suppressed)
             mouseStick(rx, ry);
-        lx = keyAxis('A', 'D', lx);
-        ly = keyAxis('W', 'S', ly);
+        lx = axis(kh2keys::LStickLeft, kh2keys::LStickRight, lx);
+        ly = axis(kh2keys::LStickUp, kh2keys::LStickDown, ly);
     }
 #else
     (void)keyboardFocus;

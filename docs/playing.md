@@ -62,10 +62,11 @@ Programs not recorded yet still run, interpreted. Recording more is always safe.
 
 ## Controls
 
-Xbox-style controllers through XInput (most others work through Steam Input),
-and the keyboard. The bottom face button confirms and attacks, as in the
+Controllers through SDL3: Xbox, PlayStation (DualShock 4, DualSense), Switch
+Pro and most others work directly, with vibration (XInput is the fallback in
+builds without SDL), plus the keyboard and mouse. The bottom face button confirms and attacks, as in the
 international releases (KH2 Final Mix itself uses Circle); `--swap-confirm`
-gives the Japanese layout. Rumble works on XInput pads.
+gives the Japanese layout. The settings menu shows which controller is in use.
 
 | PS2 | Controller | Keyboard |
 |---|---|---|
@@ -82,7 +83,31 @@ gives the Japanese layout. Rumble works on XInput pads.
 | Start / Select | Start / Back | Enter / Backspace |
 
 The mouse camera's speed is in the menu (`--mouse-sensitivity=X`;
-`--no-mouse-camera` turns it off).
+`--no-mouse-camera` turns it off). Tab (hold) fast-forwards.
+
+**Rebinding the keyboard.** Settings menu → Controls → **Keyboard**: click a
+binding and press a key (Esc cancels), **+** adds a second key, **x** clears
+it, **Default keys** resets them all; **Save settings** keeps them. In
+`kh2recomp.ini` (or on the command line as `--key-ACTION=...`) they are one
+line per changed action, keys separated by commas:
+
+```ini
+key-circle = J, MouseLeft
+key-cross = K, Space
+key-l3 = none
+```
+
+Actions: `up` `down` `left` `right` (D-pad), `cross` `circle` `square`
+`triangle` `l1` `r1` `l2` `r2` `l3` `r3` `start` `select`,
+`lstick-up/down/left/right`, `rstick-up/down/left/right` (camera) and
+`fast-forward`. Keys: letters and digits, `F13`-`F24`, `Space` `Enter`
+`Escape` `Tab` `Backspace` `Up` `Down` `Left` `Right` `LShift` `RShift`
+`LCtrl` `RCtrl` `Insert` `Delete` `Home` `End` `PageUp` `PageDown`
+`Numpad0`-`Numpad9`, punctuation by name (`Comma` `Period` `Slash`
+`Semicolon` `Quote` `LBracket` `RBracket` `Backslash` `Minus` `Equals`
+`Backquote`), mouse buttons (`MouseLeft` `MouseRight` `MouseMiddle`
+`Mouse4` `Mouse5`), or a virtual-key code (`0x5A`). F1-F12, Alt and the
+Windows keys stay with the host.
 
 ## Game patches
 

@@ -37,6 +37,84 @@ Options g_opt;
 bool g_paused = false;
 double g_speed = 1.0;
 
+// Keyboard rebinding: the action waiting for a key (-1: none), and whether the
+// key is added to its list rather than replacing it.
+int g_bindAction = -1;
+bool g_bindAdd = false;
+
+void stopCapture()
+{
+    g_bindAction = -1;
+    kh2input::setCapturingKey(false);
+}
+
+void drawKeyboard()
+{
+    if (g_bindAction >= 0)
+    {
+        const int vk = kh2input::newlyPressedKey();
+        if (vk == 0x1B && !g_bindAdd) // Escape cancels a replace
+            stopCapture();
+        else if (vk)
+        {
+            kh2keys::Bindings b = kh2input::keyBindings();
+            auto &list = b.keys[g_bindAction];
+            if (!g_bindAdd)
+                list.clear();
+            if (std::find(list.begin(), list.end(), vk) == list.end())
+                list.push_back(vk);
+            kh2input::setKeyBindings(b);
+            stopCapture();
+        }
+    }
+    if (!ImGui::CollapsingHeader("Keyboard"))
+        return;
+    ImGui::TextDisabled("Click a binding, then press a key (Esc cancels). + adds a second key.");
+    kh2keys::Bindings b = kh2input::keyBindings();
+    if (ImGui::BeginTable("keys", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+    {
+        for (int i = 0; i < kh2keys::ActionCount; ++i)
+        {
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(kh2keys::actionLabel(kh2keys::Action(i)));
+            ImGui::TableNextColumn();
+            const bool waiting = g_bindAction == i;
+            const std::string text = waiting ? (g_bindAdd ? "Press a key to add..." : "Press a key...")
+                                             : kh2keys::keyListText(b.keys[i]);
+            if (ImGui::Button(text.c_str(), ImVec2(200, 0)))
+            {
+                g_bindAction = i;
+                g_bindAdd = false;
+                kh2input::newlyPressedKey(); // forget keys already down
+                kh2input::setCapturingKey(true);
+            }
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("+"))
+            {
+                g_bindAction = i;
+                g_bindAdd = true;
+                kh2input::newlyPressedKey();
+                kh2input::setCapturingKey(true);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x"))
+            {
+                b.keys[i].clear();
+                kh2input::setKeyBindings(b);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Default keys"))
+    {
+        stopCapture();
+        kh2input::setKeyBindings(kh2keys::Bindings::defaults());
+    }
+}
+
 const unsigned kSsaa[] = {1, 2, 4, 8, 16};
 const char *kSsaaNames[] = {"Off (native)", "2x", "4x", "8x", "16x"};
 
@@ -60,7 +138,7 @@ bool save()
             std::string key = line.substr(0, line.find_first_of("=#;"));
             key.erase(0, key.find_first_not_of(" \t"));
             key.erase(key.find_last_not_of(" \t\r") + 1);
-            if (!owned.count(key))
+            if (!owned.count(key) && key.rfind("key-", 0) != 0)
                 kept.push_back(line);
         }
     }
@@ -101,6 +179,8 @@ bool save()
     out << "ff-speed = " << g_opt.fastForwardSpeed << "\n";
     if (g_opt.pauseUnfocused)
         out << "pause-unfocused = 1\n";
+    for (const std::string &line : kh2input::keyBindings().iniLines())
+        out << line << "\n";
     return true;
 }
 
@@ -257,7 +337,14 @@ void draw()
     float sens = kh2input::mouseSensitivity();
     if (ImGui::SliderFloat("Mouse sensitivity", &sens, 0.25f, 4.0f, "%.2f"))
         kh2input::setMouseSensitivity(sens);
-    ImGui::TextDisabled(kh2input::controllerConnected() ? "Controller connected" : "No controller (keyboard: see docs)");
+    {
+        const std::string pad = kh2input::controllerName();
+        if (pad.empty())
+            ImGui::TextDisabled("No controller: keyboard (layout below)");
+        else
+            ImGui::TextDisabled("Controller: %s", pad.c_str());
+    }
+    drawKeyboard();
 
     ImGui::Separator();
     if (ImGui::Button("Save settings"))
@@ -272,7 +359,10 @@ void draw()
         ImGui::TextDisabled("%s", g_status.c_str());
     ImGui::End();
     if (!open)
+    {
+        stopCapture();
         kh2pgs::setMenuOpen(false);
+    }
 }
 
 // F3: live game state (the co-op layer's view of the game).

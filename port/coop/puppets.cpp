@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 
 #include "game_state.h"
@@ -49,7 +50,6 @@ std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
-constexpr uint32_t kEntryLoad = 0x0016EB48;    // (entry id, priority, 4, 7): queue loading its files
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
 constexpr uint32_t kVtableLeave = 0x20; // obj->vtable[+0x20](obj): leave (what trap_obj_leave_force calls)
 std::atomic<Mode> g_mode{Mode::Borrow};
@@ -134,18 +134,81 @@ void postLeave(uint32_t obj)
     });
 }
 
-// The NPC-class entry that shows a player character (docs/findings.md).
-uint32_t puppetEntryFor(uint16_t model)
+// Puppets are NPC-class objects ("npc, no collision", objentry type 15) whose
+// objentry record is dressed in the remote player's model and motion set
+// names (the record's +0x08 and +0x28, 32 bytes each) before its files are
+// requested and the object is made: the NPC class's code with the player's
+// look and motions. Each puppet slot has its own record (entries the game
+// uses only in a few cutscenes), put back when the puppet goes.
+constexpr uint32_t kPuppetEntries[kMaxPuppets] = {0x084C, 0x084D}; // B_EX110_RTN, B_EX170_RTN
+constexpr uint32_t kEntrySize = 0x60, kEntryLook = 0x08, kEntryLookSize = 0x40;
+
+uint32_t entryRecord(const uint8_t *rdram, uint32_t id)
 {
-    switch (model)
-    {
-    case 0x005A: case 0x0323: case 0x088E: // Roxas (P_EX110 and forms)
-        return 0x084C;                      // B_EX110_RTN
-    case 0x0054: case 0x0055: case 0x0056: case 0x0057: case 0x0058: case 0x0059: case 0x0236: case 0x02B5:
-        return 0x08D2; // Sora: P_EX100_LAST
-    default:
+    uint32_t table, count;
+    std::memcpy(&table, rdram + (kh2state::addr::Obj0Ptr & 0x01FFFFFFu), 4);
+    if (!table || table >= 0x02000000u)
         return 0;
+    std::memcpy(&count, rdram + ((table + 4) & 0x01FFFFFFu), 4);
+    for (uint32_t i = 0; i < count && i < 4096; ++i)
+    {
+        const uint32_t rec = table + 8 + i * kEntrySize;
+        uint32_t eid;
+        std::memcpy(&eid, rdram + (rec & 0x01FFFFFFu), 4);
+        if ((eid & 0xFFFF) == (id & 0xFFFF))
+            return rec;
     }
+    return 0;
+}
+
+struct Dress
+{
+    bool saved = false;
+    uint8_t original[kEntryLookSize];
+};
+Dress g_dress[kMaxPuppets]; // EE thread only (guest jobs)
+
+int dressSlot(uint32_t puppetEntry)
+{
+    for (size_t i = 0; i < kMaxPuppets; ++i)
+        if (kPuppetEntries[i] == puppetEntry)
+            return int(i);
+    return -1;
+}
+
+// Guest job: give `puppetEntry` the look of `lookEntry` (0: its own again).
+void postDress(uint32_t puppetEntry, uint32_t lookEntry)
+{
+    kh2guest::post([puppetEntry, lookEntry](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
+        const int slot = dressSlot(puppetEntry);
+        const uint32_t rec = entryRecord(env.rdram, puppetEntry);
+        if (slot < 0 || !rec)
+            return std::nullopt;
+        Dress &d = g_dress[slot];
+        uint8_t *look = env.host(rec + kEntryLook);
+        if (!lookEntry)
+        {
+            if (d.saved)
+                std::memcpy(look, d.original, kEntryLookSize);
+            d.saved = false;
+            return std::nullopt;
+        }
+        const uint32_t from = entryRecord(env.rdram, lookEntry);
+        if (!from)
+        {
+            std::printf("[puppets] no objentry %04X to dress %04X as\n", lookEntry, puppetEntry);
+            return std::nullopt;
+        }
+        if (!d.saved)
+        {
+            std::memcpy(d.original, look, kEntryLookSize);
+            d.saved = true;
+        }
+        std::memcpy(look, env.host(from + kEntryLook), kEntryLookSize);
+        std::printf("[puppets] entry %04X dressed as %.32s\n", puppetEntry, reinterpret_cast<const char *>(look));
+        std::fflush(stdout);
+        return std::nullopt;
+    });
 }
 
 void writeTransform(uint8_t *rdram, uint32_t obj, const float pos[3], float yaw)
@@ -264,6 +327,8 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
                 // Ours and still in this room: make it leave.
                 postLeave(s.object);
             }
+            if (s.spawned)
+                postDress(s.entry, 0);
             s = Slot{};
             continue;
         }
@@ -322,18 +387,20 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
                     free = &s;
             if (!free)
                 break;
-            const uint32_t entry = g_mode == Mode::Spawn ? puppetEntryFor(tg.model) : 0;
+            const uint32_t entry = g_mode == Mode::Spawn && tg.model ? kPuppetEntries[free - g_slots] : 0;
             if (entry)
             {
-                // Spawn mode: load the character's files first.
+                // Spawn mode: dress the slot's entry as their character and
+                // load its files first.
                 *free = Slot{};
                 free->active = free->spawned = free->pending = true;
                 free->playerId = tg.playerId;
                 free->entry = entry;
                 free->loadAt = t;
-                std::snprintf(free->name, sizeof(free->name), "puppet %04X", entry);
+                std::snprintf(free->name, sizeof(free->name), "puppet %04X", tg.model);
                 std::memcpy(free->pos, tg.pos, sizeof(free->pos));
                 free->yaw = tg.yaw;
+                postDress(entry, tg.model);
                 requestPreload(entry);
                 any = true;
                 continue;
@@ -365,11 +432,29 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
 
 void requestPreload(uint32_t entryId)
 {
-    kh2guest::postCall({kEntryLoad, {entryId, 0x1388u, 4u, 7u}, {}}, [entryId](const kh2guest::Env &, uint32_t) {
-        std::printf("[puppets] requested loading entry %04X\n", entryId);
-        std::fflush(stdout);
+    // As a room's spawn list does (FUN_00199D38): the objentry's read request
+    // (model, textures, motions into the cache buffer), then
+    // CACHE_BUFF::Flush(nullptr), as the script's trap_file_flush does, which
+    // starts the reads; a request alone just waits for the next room load.
+    constexpr uint32_t kEntryRequest = 0x0016ED50; // (entry id, -1, 0x1E)
+    constexpr uint32_t kCacheFlush = 0x00170888;   // YS::CACHE_BUFF::Flush(TASK*)
+    auto step = std::make_shared<int>(0);
+    kh2guest::post([entryId, step](const kh2guest::Env &, uint32_t, bool) -> std::optional<kh2guest::Call> {
+        switch ((*step)++)
+        {
+        case 0:
+            return kh2guest::Call{kEntryRequest, {entryId, 0xFFFFFFFFu, 0x1Eu}, {}};
+        case 1:
+            return kh2guest::Call{kCacheFlush, {0u}, {}};
+        default:
+            std::printf("[puppets] requested loading entry %04X\n", entryId);
+            std::fflush(stdout);
+            return std::nullopt;
+        }
     });
 }
+
+void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
 
 void setMode(Mode mode) { g_mode = mode; }
 Mode mode() { return g_mode; }

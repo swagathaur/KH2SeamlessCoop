@@ -137,8 +137,10 @@ struct Options
     bool listPatches = false;
     kh2coop::Options coop;             // --host / --join / --name
     bool puppetSpawn = false;          // --puppet-mode=spawn
+    kh2keys::Bindings keys = kh2keys::Bindings::defaults(); // --key-ACTION=KEY[,KEY..]
     std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
-    std::vector<std::pair<uint64_t, uint32_t>> preloadTests; // --preload-test=FRAME:ENTRY
+    struct PreloadTest { uint64_t frame; uint32_t entry, look; };
+    std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
     std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM (hex)
 };
 
@@ -154,7 +156,8 @@ void usage()
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
         "  --screenshot-at=A,B,..  save shots at these guest frames\n"
         "  --warp-test=F:WW:RR     experiment: map jump to world WW room RR (hex) at frame F\n"
-        "  --preload-test=FRAME:ID experiment: ask the game to load objentry ID's files (hex)\n"
+        "  --preload-test=FRAME:ID[:LOOK] experiment: load objentry ID's files (hex); with LOOK, first\n"
+        "                          dress puppet entry ID (84C/84D) as entry LOOK\n"
         "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
         "  --actors-at=A,B,..      print the live object list at these frames\n"
         "  --ram-dump=A,B,..       write the guest's 32 MB of RAM to SHOTS/ram_FRAME.bin at these frames\n"
@@ -191,6 +194,7 @@ void usage()
         "  --ff-speed=X            fast-forward speed while Tab is held (default 3)\n"
         "  --no-mouse-camera       don't turn the camera with the mouse (right button held)\n"
         "  --mouse-sensitivity=X   mouse camera speed (default 1)\n"
+        "  --key-ACTION=KEY[,KEY]  keyboard binding, e.g. --key-cross=X,Space (see docs/playing.md)\n"
         "  --pause-unfocused       pause while the window is in the background\n"
         "  --patch=NAME[,NAME..]   enable game patches (see --list-patches); --widescreen = --patch=widescreen\n"
         "  --list-patches          list the available game patches and exit\n"
@@ -312,6 +316,13 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--pause-unfocused") o.pauseUnfocused = true;
         else if (a == "--no-mouse-camera") o.noMouseCamera = true;
         else if (a.rfind("--mouse-sensitivity=", 0) == 0) o.mouseSensitivity = std::stof(value(a));
+        else if (a.rfind("--key-", 0) == 0)
+        {
+            const size_t eq = a.find('=');
+            std::string error;
+            if (!o.keys.apply(a.substr(0, eq), eq == std::string::npos ? "" : a.substr(eq + 1), &error))
+                std::fprintf(stderr, "[kh2] %s: %s (ignored)\n", a.c_str(), error.c_str());
+        }
         else if (a.rfind("--patch=", 0) == 0) o.patches += (o.patches.empty() ? "" : ",") + value(a);
         else if (a == "--widescreen") o.patches += o.patches.empty() ? "widescreen" : ",widescreen";
         else if (a.rfind("--mash=", 0) == 0)
@@ -349,8 +360,12 @@ bool parse(int argc, char **argv, Options &o)
             const std::string v = value(a);
             const size_t colon = v.find(':');
             if (colon == std::string::npos) return false;
-            o.preloadTests.emplace_back(std::stoull(v.substr(0, colon)),
-                                        static_cast<uint32_t>(std::stoul(v.substr(colon + 1), nullptr, 16)));
+            const size_t colon2 = v.find(':', colon + 1);
+            Options::PreloadTest t{std::stoull(v.substr(0, colon)),
+                                   static_cast<uint32_t>(std::stoul(v.substr(colon + 1, colon2 - colon - 1), nullptr, 16)), 0};
+            if (colon2 != std::string::npos)
+                t.look = static_cast<uint32_t>(std::stoul(v.substr(colon2 + 1), nullptr, 16));
+            o.preloadTests.push_back(t);
         }
         else if (a.rfind("--spawn-test=", 0) == 0)
         {
@@ -697,9 +712,13 @@ bool harnessTick(Harness &h, uint64_t frame)
             h.lastWarpFrame = frame;
             kh2coop::requestWarp(uint8_t(where >> 8), uint8_t(where & 0xFF));
         }
-    for (const auto &[at, entry] : o.preloadTests)
-        if (due(at))
-            kh2puppets::requestPreload(entry);
+    for (const auto &t : o.preloadTests)
+        if (due(t.frame))
+        {
+            if (t.look)
+                kh2puppets::requestDress(t.entry, t.look);
+            kh2puppets::requestPreload(t.entry);
+        }
     for (const auto &[at, entry] : o.spawnTests)
         if (due(at) && frame != h.lastSpawnFrame)
         {
@@ -908,6 +927,8 @@ std::vector<std::string> readSettings(const char *argv0)
                 continue;
             if (key == "elf")
                 out.push_back(val);
+            else if (key.rfind("key-", 0) == 0) // values like "1" or "0" are keys here
+                out.push_back("--" + key + "=" + val);
             else if (val.empty() || val == "1" || val == "true" || val == "yes" || val == "on")
                 out.push_back("--" + key);
             else if (val == "0" || val == "false" || val == "no" || val == "off")
@@ -991,6 +1012,7 @@ int main(int argc, char **argv)
     kh2input::setRumbleEnabled(!opt.noRumble);
     kh2input::setMouseCamera(!opt.noMouseCamera);
     kh2input::setMouseSensitivity(opt.mouseSensitivity);
+    kh2input::setKeyBindings(opt.keys);
     if (gpu)
         kh2pgs::setShowFps(opt.showFps);
     // Both must precede initialize().

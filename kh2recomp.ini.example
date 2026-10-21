@@ -22,6 +22,9 @@ widescreen = 1        # 16:9 patch
 # swap-confirm = 1    # Japanese layout: right face button confirms
 # no-rumble = 1
 # mouse-sensitivity = 1   # mouse camera (hold the right button); no-mouse-camera = 1 turns it off
+# Keyboard: one line per changed action, keys comma-separated (docs/playing.md)
+# key-circle = J, MouseLeft
+# key-cross = K, Space
 
 # Speed
 # ff-speed = 3            # fast-forward while Tab is held

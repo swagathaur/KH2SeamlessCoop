@@ -168,6 +168,15 @@ and read by NPC code every frame. `port/coop/puppets.cpp` passes a zeroed
 group and a spawn record (entry, position, yaw at `+0x14`) allocated with
 `AREA::Alloc` (`0x001050D8`, the room's heap).
 
+Other factory callers: event code (`FUN_002332A8` and neighbours) ORs
+`0x40000000` into the entry id, checks the object made it into the list
+(`FUN_001BA028`) and calls `sa::EVENT::setActorParam`; the script trap
+`FUN_00170F98` and a reaction-command spawner (`FUN_001C4918`, entry `0x558`,
+then `YS::OBJ::set_unit_arg`) call only the factory. Class constructors by
+objentry type are in the jump table: type 15 ("npc, no collision", which
+`B_EX110_RTN` and the townsfolk are) is `FUN_0018ABA0` on a `0xB40`-byte
+object, over the shared base `FUN_001980D0` → `FUN_00169398`.
+
 **Motion.** The object's `YS::MOTION` is at `+0x140`; its `+0x14` (object
 `+0x154`) is the motion index: 0 idle, 2 run, 3 jump, 5 attack (Roxas, Market
 Street), `+0x0C` points at the current motion's data. `YS::MOTION::change`

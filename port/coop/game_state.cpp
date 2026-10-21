@@ -1,5 +1,6 @@
 #include "game_state.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +15,43 @@ template <typename T> T rd(const uint8_t *ram, uint32_t a)
     return v;
 }
 } // namespace
+
+bool readCamera(const uint8_t *ram, Camera &out)
+{
+    out = Camera{};
+    std::memcpy(out.view, ram + addr::CameraView, sizeof(out.view));
+    float p00, p11;
+    std::memcpy(&p00, ram + addr::CameraProj, 4);
+    std::memcpy(&p11, ram + addr::CameraProj + 0x14, 4);
+    // Measured against screenshots: the picture's half-width covers x/z =
+    // 1 / (0.47 * p00) (and likewise y), i.e. the stored scales are about
+    // twice the visible frustum's (a guard band for clipping, presumably).
+    constexpr float kVisible = 0.47f;
+    out.scaleX = p00 * kVisible;
+    out.scaleY = p11 * kVisible;
+    const float w = out.view[15];
+    out.valid = std::isfinite(p00) && std::isfinite(p11) && p00 > 0.1f && p00 < 20.0f && p11 > 0.1f &&
+                p11 < 20.0f && std::fabs(w - 1.0f) < 1e-3f;
+    for (float v : out.view)
+        out.valid = out.valid && std::isfinite(v);
+    return out.valid;
+}
+
+bool project(const Camera &cam, const float p[3], float &x, float &y, float &depth)
+{
+    if (!cam.valid)
+        return false;
+    const float *m = cam.view;
+    const float vx = p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12];
+    const float vy = p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13];
+    const float vz = p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14];
+    if (vz < 10.0f)
+        return false;
+    x = vx / vz * cam.scaleX;
+    y = vy / vz * cam.scaleY;
+    depth = vz;
+    return true;
+}
 
 State read(const uint8_t *ram)
 {

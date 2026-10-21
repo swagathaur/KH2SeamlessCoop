@@ -66,6 +66,12 @@ bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height);
 // On-screen UI. The callback draws the settings menu with Dear ImGui while it
 // is open (F1, or Select+Start through toggleMenu()); F2 shows frame rates.
 void setUiCallback(std::function<void()> draw);
+// Labels drawn over the game picture (co-op name tags): called every frame
+// while setWorldOverlayActive(true), before the HUD and menu.
+void setWorldCallback(std::function<void()> draw);
+void setWorldOverlayActive(bool on);
+// Where the game picture is in the window (pixels), for placing such labels.
+void pictureRect(float &x, float &y, float &w, float &h);
 // Drawn every frame while F3's panel is on (menu open or not).
 void setHudCallback(std::function<void()> draw);
 bool hudVisible();

@@ -65,6 +65,14 @@ constexpr uint32_t ActorFacing = 0x55C; // radians; matrix yaw + pi (mirrored at
 // Offsets in a unit slot.
 constexpr uint32_t SlotHp = 0x000, SlotMaxHp = 0x004, SlotMp = 0x180, SlotMaxMp = 0x184;
 constexpr uint32_t SlotDrivePct = 0x1B0, SlotDrive = 0x1B1, SlotMaxDrive = 0x1B2;
+// The field camera: a 4x4 view matrix (row vectors: v * M; up is -y), then
+// the eye, the point looked at and the up vector (x, y, z, 1 each). Just
+// before it, a projection whose x and y scales are at +0x00 and +0x14
+// (docs/findings.md, "Camera").
+constexpr uint32_t CameraView = 0x003A7F80;
+constexpr uint32_t CameraEye = 0x003A7FC0;
+constexpr uint32_t CameraTarget = 0x003A7FD0;
+constexpr uint32_t CameraProj = 0x003A7EF0;
 } // namespace addr
 
 struct Location
@@ -110,6 +118,18 @@ struct State
     uint16_t reaction = 0;
     uint32_t cutsceneTime = 0, cutsceneLength = 0;
 };
+
+struct Camera
+{
+    bool valid = false;
+    float view[16] = {};
+    float scaleX = 0, scaleY = 0; // screen half-extents per unit of x/z, y/z
+};
+// Where a world point is on the game's picture: x, y in -1..1 across the
+// picture (y down), and its depth in front of the camera. False when it is
+// behind the camera or the camera is unknown.
+bool readCamera(const uint8_t *rdram, Camera &out);
+bool project(const Camera &cam, const float world[3], float &x, float &y, float &depth);
 
 // rdram: the guest's 32 MB.
 State read(const uint8_t *rdram);

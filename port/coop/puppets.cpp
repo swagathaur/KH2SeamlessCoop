@@ -52,7 +52,7 @@ PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
 constexpr uint32_t kVtableLeave = 0x20; // obj->vtable[+0x20](obj): leave (what trap_obj_leave_force calls)
-std::atomic<Mode> g_mode{Mode::Borrow};
+std::atomic<Mode> g_mode{Mode::Spawn};
 
 // Spawning, as a guest job (one call per frame): allocate a spawn record and
 // an empty unit group from the room's heap (AREA::Alloc; what a room's spawn

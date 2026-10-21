@@ -1,0 +1,38 @@
+# Memory card save test (--script): after --warp-test to 02-02 (the Usual Spot) and
+# --teleport=20500:250,0,40 (just short of its save point at 250,0,-200), walk onto
+# the save point, open the save menu (Triangle: the Save reaction command)
+# and confirm everything with Circle.
+20540  45  -  128 0      # walk forward onto the save point
+20620  6   TRIANGLE
+20680  6   TRIANGLE
+20740  6   TRIANGLE
+20820  4   CIRCLE
+20860  4   CIRCLE
+20900  4   CIRCLE
+20940  4   CIRCLE
+20980  4   CIRCLE
+21020  4   CIRCLE
+21060  4   CIRCLE
+21100  4   CIRCLE
+21140  4   CIRCLE
+21180  4   CIRCLE
+21220  4   CIRCLE
+21260  4   CIRCLE
+21300  4   CIRCLE
+21340  4   CIRCLE
+21380  4   CIRCLE
+21420  4   CIRCLE
+21460  4   CIRCLE
+21500  4   CIRCLE
+21540  4   CIRCLE
+21580  4   CIRCLE
+21620  4   CIRCLE
+21660  4   CIRCLE
+21700  4   CIRCLE
+21740  4   CIRCLE
+21780  4   CIRCLE
+21820  4   CIRCLE
+21860  4   CIRCLE
+21900  4   CIRCLE
+21940  4   CIRCLE
+21980  4   CIRCLE

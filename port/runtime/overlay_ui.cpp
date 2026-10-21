@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -132,7 +133,8 @@ bool save()
         static const std::set<std::string> owned = {"ssaa",       "no-fsr",  "vsync",   "fullscreen",
                                                     "widescreen", "patch",   "swap-confirm", "no-rumble",
                                                     "show-fps",   "ff-speed", "pause-unfocused",
-                                                    "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window"};
+                                                    "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window",
+                                                    "no-name-tags"};
         for (std::string line; std::getline(in, line);)
         {
             std::string key = line.substr(0, line.find_first_of("=#;"));
@@ -179,6 +181,8 @@ bool save()
     out << "ff-speed = " << g_opt.fastForwardSpeed << "\n";
     if (g_opt.pauseUnfocused)
         out << "pause-unfocused = 1\n";
+    if (!g_opt.nameTags)
+        out << "no-name-tags = 1\n";
     for (const std::string &line : kh2input::keyBindings().iniLines())
         out << line << "\n";
     return true;
@@ -314,10 +318,12 @@ void draw()
             bool puppets = kh2puppets::enabled();
             if (ImGui::Checkbox("Show other players", &puppets))
                 kh2puppets::setEnabled(puppets);
-            int pm = kh2puppets::mode() == kh2puppets::Mode::Spawn ? 1 : 0;
-            const char *modes[] = {"Borrow an NPC in the room", "Their character (experimental)"};
+            ImGui::SameLine();
+            ImGui::Checkbox("Name tags", &g_opt.nameTags);
+            int pm = kh2puppets::mode() == kh2puppets::Mode::Spawn ? 0 : 1;
+            const char *modes[] = {"Their own character", "An NPC already in the room"};
             if (ImGui::Combo("Shown as", &pm, modes, 2))
-                kh2puppets::setMode(pm ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
+                kh2puppets::setMode(pm ? kh2puppets::Mode::Borrow : kh2puppets::Mode::Spawn);
             if (ImGui::Button("Leave session"))
                 kh2coop::leave();
         }
@@ -466,6 +472,45 @@ void drawHud()
     ImGui::End();
 }
 
+// Co-op: each other player's name over their puppet.
+void drawNameTags()
+{
+    const uint8_t *ram = g_runtime->memory().getRDRAM();
+    kh2state::Camera cam;
+    if (!kh2state::readCamera(ram, cam))
+        return;
+    float px, py, pw, ph;
+    kh2pgs::pictureRect(px, py, pw, ph);
+    if (pw <= 0 || ph <= 0)
+        return;
+    const std::vector<kh2coop::RemotePlayer> players = kh2coop::remotes();
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+    {
+        if (!a.object)
+            continue;
+        std::string name;
+        for (const kh2coop::RemotePlayer &r : players)
+            if (r.id == a.playerId)
+                name = r.name;
+        if (name.empty())
+            continue;
+        float pos[4];
+        std::memcpy(pos, ram + ((a.object + kh2state::addr::ObjPos) & 0x01FFFFFFu), sizeof(pos));
+        pos[1] -= 200.0f; // above the head (up is -y)
+        float x, y, depth;
+        if (!kh2state::project(cam, pos, x, y, depth) || std::fabs(x) > 1.2f || std::fabs(y) > 1.2f)
+            continue;
+        const ImVec2 at(px + (x * 0.5f + 0.5f) * pw, py + (y * 0.5f + 0.5f) * ph);
+        // Fade out with distance (1 near, 0.35 far).
+        const float alpha = std::clamp(1.0f - (depth - 600.0f) / 4000.0f, 0.35f, 1.0f);
+        const ImVec2 size = ImGui::CalcTextSize(name.c_str());
+        const ImVec2 tl(at.x - size.x * 0.5f - 6, at.y - size.y - 4), br(at.x + size.x * 0.5f + 6, at.y);
+        dl->AddRectFilled(tl, br, ImGui::GetColorU32(ImVec4(0.05f, 0.05f, 0.1f, 0.55f * alpha)), 5.0f);
+        dl->AddText(ImVec2(tl.x + 6, tl.y + 2), ImGui::GetColorU32(ImVec4(1.0f, 0.95f, 0.75f, alpha)), name.c_str());
+    }
+}
+
 void onCombo() { kh2pgs::toggleMenu(); }
 } // namespace
 
@@ -477,6 +522,7 @@ void install(PS2Runtime &runtime, const std::string &iniPath, const Options &opt
     g_iniPath = iniPath;
     kh2pgs::setUiCallback(&draw);
     kh2pgs::setHudCallback(&drawHud);
+    kh2pgs::setWorldCallback(&drawNameTags);
     kh2input::setMenuComboCallback(&onCombo);
 }
 
@@ -485,6 +531,7 @@ void tick()
     kh2input::setSuppressed(kh2pgs::menuOpen());
     if (!g_runtime)
         return;
+    kh2pgs::setWorldOverlayActive(g_opt.nameTags && kh2coop::active() && !kh2puppets::assignments().empty());
     const bool paused = kh2pgs::menuOpen() || (g_opt.pauseUnfocused && !kh2pgs::windowFocused());
     if (paused != g_paused)
     {

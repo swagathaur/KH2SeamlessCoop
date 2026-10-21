@@ -136,12 +136,16 @@ struct Options
     unsigned watchdog = 0;             // seconds without a host-loop iteration before dumping stacks
     bool listPatches = false;
     kh2coop::Options coop;             // --host / --join / --name
-    bool puppetSpawn = false;          // --puppet-mode=spawn
+    bool puppetSpawn = true;           // --puppet-mode=spawn|borrow
+    bool markActors = false;           // --mark-actors
+    bool noNameTags = false;           // --no-name-tags
     kh2keys::Bindings keys = kh2keys::Bindings::defaults(); // --key-ACTION=KEY[,KEY..]
     std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
     struct PreloadTest { uint64_t frame; uint32_t entry, look; };
     std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
     std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM (hex)
+    struct Teleport { uint64_t frame; float pos[3]; };
+    std::vector<Teleport> teleports; // --teleport=FRAME:X,Y,Z
 };
 
 void usage()
@@ -205,8 +209,11 @@ void usage()
         "  --host[=PORT]           host a co-op session (default port 27552)\n"
         "  --join=HOST[:PORT]      join a co-op session\n"
         "  --name=NAME             your name in co-op\n"
-        "  --puppet-mode=M         co-op: 'borrow' an NPC in the room (default) or 'spawn' a copy of\n"
-        "                          the player's character (experimental)\n"
+        "  --puppet-mode=M         co-op: show other players as their own character ('spawn',\n"
+        "                          default) or by moving an NPC already in the room ('borrow')\n"
+        "  --no-name-tags          co-op: no names over other players\n"
+        "  --teleport=FRAME:X,Y,Z  testing: put the player at this position at FRAME\n"
+        "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
         "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
         "  --mash-until=FRAME      stop --mash at this guest frame\n"
@@ -344,7 +351,17 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
         else if (a == "--follow-host") o.coop.followHost = true;
-        else if (a.rfind("--puppet-mode=", 0) == 0) o.puppetSpawn = value(a) == "spawn";
+        else if (a == "--mark-actors") o.markActors = true;
+        else if (a.rfind("--teleport=", 0) == 0)
+        {
+            Options::Teleport t{};
+            if (std::sscanf(value(a).c_str(), "%llu:%f,%f,%f", reinterpret_cast<unsigned long long *>(&t.frame), &t.pos[0],
+                            &t.pos[1], &t.pos[2]) != 4)
+                return false;
+            o.teleports.push_back(t);
+        }
+        else if (a == "--no-name-tags") o.noNameTags = true;
+        else if (a.rfind("--puppet-mode=", 0) == 0) o.puppetSpawn = value(a) != "borrow";
         else if (a.rfind("--net-loss=", 0) == 0) o.coop.simulatedLoss = std::stof(value(a));
         else if (a.rfind("--warp-test=", 0) == 0)
         {
@@ -474,6 +491,28 @@ void saveShot(Harness &h, uint64_t frame)
     {
         std::printf("[harness] frame %llu: no displayable frame yet\n", (unsigned long long)frame);
         return;
+    }
+    if (h.opt->markActors)
+    {
+        // Debug: a cross at each object's projected feet (magenta) and head
+        // height (cyan), to check the camera projection used for name tags.
+        const uint8_t *ram = h.runtime->memory().getRDRAM();
+        kh2state::Camera cam;
+        if (kh2state::readCamera(ram, cam))
+            for (const kh2state::ActorInfo &a : kh2state::actors(ram))
+                for (int part = 0; part < 2; ++part)
+                {
+                    const float p[3] = {a.pos[0], a.pos[1] - (part ? 170.0f : 0.0f), a.pos[2]};
+                    float x, y, d;
+                    if (!kh2state::project(cam, p, x, y, d))
+                        continue;
+                    const int cx = int((x * 0.5f + 0.5f) * float(w)), cy = int((y * 0.5f + 0.5f) * float(hgt));
+                    const uint32_t colour = part ? 0xFFFFFF00u : 0xFFFF00FFu; // ABGR
+                    for (int k = -4; k <= 4; ++k)
+                        for (const auto [px, py] : {std::pair<int, int>{cx + k, cy}, {cx, cy + k}})
+                            if (px >= 0 && py >= 0 && px < int(w) && py < int(hgt))
+                                std::memcpy(&h.pixels[(size_t(py) * w + px) * 4], &colour, 4);
+                }
     }
     char name[64];
     std::snprintf(name, sizeof(name), "frame_%06llu.png", (unsigned long long)frame);
@@ -706,6 +745,19 @@ bool harnessTick(Harness &h, uint64_t frame)
                         kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2]);
         std::fflush(stdout);
     }
+    for (const auto &t : o.teleports)
+        if (due(t.frame))
+        {
+            uint8_t *ram = h.runtime->memory().getRDRAM();
+            uint32_t player;
+            std::memcpy(&player, ram + kh2state::addr::PlayerPtr, 4);
+            if (player && player < 0x02000000u)
+            {
+                const float p[4] = {t.pos[0], t.pos[1], t.pos[2], 1.0f};
+                std::memcpy(ram + player + kh2state::addr::ObjPos, p, sizeof(p));
+                std::printf("[harness] player %08X put at %.0f,%.0f,%.0f\n", player, p[0], p[1], p[2]);
+            }
+        }
     for (const auto &[at, where] : o.warpTests)
         if (due(at) && frame != h.lastWarpFrame)
         {
@@ -788,9 +840,9 @@ bool harnessTick(Harness &h, uint64_t frame)
         }
         const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
         char game[160];
-        std::snprintf(game, sizeof(game), " | %s ev=%u ctl=%u btl=%u hp=%d/%d pos=%.0f,%.0f,%.0f",
-                      kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.battle, gs.party[0].hp,
-                      gs.party[0].maxHp, gs.player.pos[0], gs.player.pos[1], gs.player.pos[2]);
+        std::snprintf(game, sizeof(game), " | %s ev=%u ctl=%u btl=%u react=%04X hp=%d/%d pos=%.0f,%.0f,%.0f",
+                      kh2state::describe(gs.now).c_str(), gs.now.event, gs.control, gs.battle, gs.reaction,
+                      gs.party[0].hp, gs.party[0].maxHp, gs.player.pos[0], gs.player.pos[1], gs.player.pos[2]);
         std::string coop;
         if (kh2coop::active())
         {
@@ -1088,6 +1140,7 @@ int main(int argc, char **argv)
         uiOpt.pauseUnfocused = opt.pauseUnfocused;
         uiOpt.baseSpeed = opt.speed;
         uiOpt.volume = opt.mute ? 0.0f : opt.volume / 100.0f;
+        uiOpt.nameTags = !opt.noNameTags;
         kh2ui::install(runtime, (exeDir / "kh2recomp.ini").string(), uiOpt);
         harness.screenshotDir = exeDir / "screenshots";
     }

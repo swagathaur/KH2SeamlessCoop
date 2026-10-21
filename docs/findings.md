@@ -146,7 +146,7 @@ dispatch. Vtables put `initialize` at `+0x08`, `pre_exec` at `+0x0C`,
 Tools: `tools/analysis/disasm.py` (capstone; names from the function map),
 `callers.py` (jal/j call sites), `find_position.py` (snapshot diffing).
 
-**Spawning (for real puppets; not used yet).** `FUN_0016F000(entryId, FVector*
+**Spawning (puppets).** `FUN_0016F000(entryId, FVector*
 pos, float yaw in $f12)` is the object factory: it switches on the objentry
 type (jump table `0x0036C3DC`) and allocates each class from the area heap
 (`AREA::Alloc`), with entry `0x236` ("PLAYER") special-cased to Sora's current
@@ -154,10 +154,19 @@ form. Room spawns go through `YS::UNIT_DATA_OBJ::appear` (`0x00199938`) →
 `FUN_00199890`, which calls the factory and then the object's vtable `+0x38`
 with the unit group and spawn record. `00objentry.bin` is in memory at
 `*0x01D5BA10` (u32 3, u32 count = 1900, then 0x60-byte entries: id u32, type
-u8 at +4, model at +8, motion set at +0x28). NPC-class versions of the player
-characters exist, which is what puppets should be: `B_EX110_RTN` (`0x084C`,
-Roxas, with motions), `P_EX020_RTN` / `P_EX030_RTN` (`0x0433`/`0x0434`, Donald
-and Goofy), `P_EX100_LAST` (`0x08D2`, Sora, type 8). Calling the factory
+u8 at +4, model at +8, motion set at +0x28). (`B_EX110_RTN`, `0x084C`, is Axel, not Roxas: `EX110`
+is Roxas only with the `P_` prefix.) Puppets are type-15 objects ("npc, no
+collision", the townsfolk's class) whose objentry record is first dressed in
+the remote player's model and motion-set names (+0x08 and +0x28, copied from
+their own entry, e.g. `0x005A` `P_EX110`); the slots use `0x084C` and
+`0x084D` and are put back afterwards.
+
+**Loading an entry's files.** `FUN_0016EB48` / `FUN_0016ED50(entry, -1, 0x1E)`
+(what a room's spawn list does, `FUN_00199D38`) only queue reads into
+`YS::CACHE_BUFF`; `CACHE_BUFF::Flush(TASK*)` (`0x00170888`) starts them, and
+with a null task returns at once (the script's `trap_file_flush`). Without the
+flush a spawned object gets no model (+0x7AC, +0x7B4 and its MOTION stay 0)
+and is never drawn. Calling the factory
 from an override works (it returns an object linked at the list head), but:
 `0x0034E948` is not a dedicated player pointer, it is the newest object
 constructed (the player just happens to be created last when a room loads),
@@ -184,6 +193,18 @@ Street), `+0x0C` points at the current motion's data. `YS::MOTION::change`
 it, as the script trap `0x001711B0` does. The current *action* (`+0x0C`, a
 state object from the table at `0x0034E9F8`) stays 0 ("normal") while
 walking, jumping and attacking.
+
+**Camera.** The field camera is at `0x003A7F80`: a 4x4 view matrix (row
+vectors, `v * M`; the world's up is -y), then the eye (`+0x40`), the point
+looked at (`+0x50`, the player's head height, 170 units up) and the up
+vector (`+0x60`), each x, y, z, 1 (copies at `0x003A80A0` and `0x003511D0`).
+A projection precedes it (`0x003A7EF0`: x scale 2.2568, y scale 3.0091 in
+Market Street; `0x003A7E90` holds the GS screen centre 2048, 2048). Against
+screenshots the visible picture's half-extent is x/z = 1 / (0.47 * scale)
+(townsfolk at three depths and the player's feet agree within a few pixels),
+so those scales are about twice the visible frustum's. `--mark-actors`
+draws the projection of every object into screenshots; the co-op name tags
+use it.
 
 **Map jump.** `FUN_00104F58(const LOCATION*, int fade, int delay, u8, int
 callback)`: LOCATION is 10 bytes (world, room, door u16, map/battle/event u16;

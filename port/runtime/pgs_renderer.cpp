@@ -78,6 +78,9 @@ Program *g_uiProgram[2] = {nullptr, nullptr}; // [textured]
 std::function<void()> g_uiCallback;
 std::function<void()> g_hudCallback;
 std::atomic<bool> g_hudVisible{false};
+std::function<void()> g_worldCallback;
+std::atomic<bool> g_worldActive{false};
+std::atomic<float> g_picX{0}, g_picY{0}, g_picW{0}, g_picH{0};
 std::atomic<bool> g_menuOpen{false};
 std::atomic<bool> g_showFps{false};
 bool g_imguiReady = false;
@@ -630,7 +633,8 @@ bool uiBuild()
     const double now = nowSeconds();
     const bool toast = now < g_toastUntil;
     const bool hud = g_hudVisible && g_hudCallback;
-    if (!g_menuOpen && !g_showFps && !toast && !hud)
+    const bool world = g_worldActive && g_worldCallback;
+    if (!g_menuOpen && !g_showFps && !toast && !hud && !world)
         return false;
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -658,6 +662,8 @@ bool uiBuild()
         }
         ImGui::End();
     }
+    if (world)
+        g_worldCallback();
     if (hud)
         g_hudCallback();
     if (g_menuOpen && g_uiCallback)
@@ -693,6 +699,10 @@ void present()
         vpY = std::round(0.5f * float(sh - h));
         vpW = float(w);
         vpH = float(h);
+        g_picX = vpX;
+        g_picY = vpY;
+        g_picW = vpW;
+        g_picH = vpH;
         if (g_opt.fsr && (!g_fsrTarget || g_fsrTarget->get_width() != w || g_fsrTarget->get_height() != h))
         {
             auto info = ImageCreateInfo::render_target(w, h, VK_FORMAT_R8G8B8A8_UNORM);
@@ -921,6 +931,15 @@ void toast(const std::string &text, double seconds)
 
 void setUiCallback(std::function<void()> draw) { g_uiCallback = std::move(draw); }
 void setHudCallback(std::function<void()> draw) { g_hudCallback = std::move(draw); }
+void setWorldCallback(std::function<void()> draw) { g_worldCallback = std::move(draw); }
+void setWorldOverlayActive(bool on) { g_worldActive = on; }
+void pictureRect(float &x, float &y, float &w, float &h)
+{
+    x = g_picX;
+    y = g_picY;
+    w = g_picW;
+    h = g_picH;
+}
 bool hudVisible() { return g_hudVisible; }
 void setHudVisible(bool on) { g_hudVisible = on; }
 bool menuOpen() { return g_menuOpen; }

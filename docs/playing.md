@@ -130,9 +130,14 @@ of the executable, and the patched versions are swapped in at start-up.
 
 The network layer is in: positions, rooms and HP travel between up to three
 instances, shown in the **F3** panel. In the world, each other player in your
-room is shown by borrowing an NPC that is already there (it walks where they
-walk, with its own model for now; the menu can turn this off). Proper
-puppets with the right model and animations come next.
+room appears as their own character (tested with Roxas; Sora and his forms
+use the same path): a copy the
+game itself runs as an NPC, which walks where they walk and plays the
+motion they are playing. It takes about a second and a half to appear after
+they enter your room (its files load first). The menu can turn puppets off,
+or show players by moving an NPC already in the room instead
+(`--puppet-mode=borrow`). Each puppet has its player's name over it (Co-op →
+**Name tags**, or `--no-name-tags`). Puppets do not fight or take hits yet.
 
 - **Host**: settings menu (F1) → Co-op → **Host**, or start with `--host`
   (UDP port 27552; `--host=PORT` for another). Others need to reach that port:

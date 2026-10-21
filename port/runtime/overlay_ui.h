@@ -13,6 +13,7 @@ struct Options
     bool pauseUnfocused = false;   // pause the game while the window is in the background
     double baseSpeed = 1.0;        // --speed
     float volume = 1.0f;           // 0..1
+    bool nameTags = true;          // co-op: names over other players
 };
 // Hook the menu into the renderer and input. iniPath: where "Save" writes.
 void install(PS2Runtime &runtime, const std::string &iniPath, const Options &options);

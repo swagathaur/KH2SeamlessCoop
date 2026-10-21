@@ -157,5 +157,32 @@ with the unit group and spawn record. `00objentry.bin` is in memory at
 u8 at +4, model at +8, motion set at +0x28). NPC-class versions of the player
 characters exist, which is what puppets should be: `B_EX110_RTN` (`0x084C`,
 Roxas, with motions), `P_EX020_RTN` / `P_EX030_RTN` (`0x0433`/`0x0434`, Donald
-and Goofy), `P_EX100_LAST` (`0x08D2`, Sora, type 8). Open question: their
-motion sets have to be loaded in the room first.
+and Goofy), `P_EX100_LAST` (`0x08D2`, Sora, type 8). Calling the factory
+from an override works (it returns an object linked at the list head), but:
+`0x0034E948` is not a dedicated player pointer, it is the newest object
+constructed (the player just happens to be created last when a room loads),
+so a spawn must save and restore it or the camera follows the new object;
+and room spawns finish an object with vtable `+0x38` (`0x0016BF38`, shared by
+all objects): `(obj, UNIT_GROUP*, UNIT_DATA_OBJ*)`, stored at `+0x818`/`+0x81C`
+and read by NPC code every frame. `port/coop/puppets.cpp` passes a zeroed
+group and a spawn record (entry, position, yaw at `+0x14`) allocated with
+`AREA::Alloc` (`0x001050D8`, the room's heap).
+
+**Motion.** The object's `YS::MOTION` is at `+0x140`; its `+0x14` (object
+`+0x154`) is the motion index: 0 idle, 2 run, 3 jump, 5 attack (Roxas, Market
+Street), `+0x0C` points at the current motion's data. `YS::MOTION::change`
+(`0x0017F540`, `this` = obj + 0x140, id, `$f12` blend, `$f13` start) switches
+it, as the script trap `0x001711B0` does. The current *action* (`+0x0C`, a
+state object from the table at `0x0034E9F8`) stays 0 ("normal") while
+walking, jumping and attacking.
+
+**Map jump.** `FUN_00104F58(const LOCATION*, int fade, int delay, u8, int
+callback)`: LOCATION is 10 bytes (world, room, door u16, map/battle/event u16;
+0xFFFF = the save's choice). Unless the byte at `0x003A7B00` is set (then it
+only stores the destination at `0x003A7B08` and starts the callback's fade),
+it creates `AREA::MapJumpTask` (`0x00104E98`) in the task manager at
+`*0x0032B96C`, stores it at `0x0032BB20`, locks the mutex at `0x00351EC8` and
+copies the destination to `0x0032BAF0`. The task waits while a menu or
+message window is open, then tears the area down (`FUN_00104E18`).
+`YS::TEST_MAPJUMP::Exec` (`0x002468E8`, debug) calls it with fade 1 and
+callback 0xC.

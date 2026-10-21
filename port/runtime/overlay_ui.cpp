@@ -221,9 +221,23 @@ void draw()
         {
             for (const kh2coop::RemotePlayer &r : kh2coop::remotes())
                 ImGui::BulletText("%s  %.0f ms", r.name.c_str(), r.rttMs);
+            if (!kh2coop::isHost())
+            {
+                if (ImGui::Button("Go to the host's room"))
+                    kh2coop::warpToHost();
+                ImGui::SameLine();
+                bool follow = kh2coop::followHost();
+                if (ImGui::Checkbox("Follow the host", &follow))
+                    kh2coop::setFollowHost(follow);
+                ImGui::SetItemTooltip("Go to the host's room whenever they change rooms (when you are free to move)");
+            }
             bool puppets = kh2puppets::enabled();
-            if (ImGui::Checkbox("Show other players (borrows an NPC in the room)", &puppets))
+            if (ImGui::Checkbox("Show other players", &puppets))
                 kh2puppets::setEnabled(puppets);
+            int pm = kh2puppets::mode() == kh2puppets::Mode::Spawn ? 1 : 0;
+            const char *modes[] = {"Borrow an NPC in the room", "Their character (experimental)"};
+            if (ImGui::Combo("Shown as", &pm, modes, 2))
+                kh2puppets::setMode(pm ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
             if (ImGui::Button("Leave session"))
                 kh2coop::leave();
         }

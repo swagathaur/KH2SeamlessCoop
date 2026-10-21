@@ -35,7 +35,12 @@ struct Traced
 
 std::unordered_map<uint32_t, Traced *> g_traced;
 std::vector<uint32_t> g_order;
-constexpr uint64_t kLogFirst = 8;
+// How many calls per function are logged in full (KH2_TRACE_LOG_FIRST, default 8).
+const uint64_t kLogFirst = [] {
+    const char *e = std::getenv("KH2_TRACE_LOG_FIRST");
+    const long long v = e ? std::atoll(e) : 0;
+    return v > 0 ? static_cast<uint64_t>(v) : 8ull;
+}();
 
 void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -53,9 +58,14 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         ++t.recentRa[getRegU32(ctx, 31)];
     }
     if (n <= kLogFirst)
-        std::printf("[trace] 0x%08X call #%llu a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X\n", address,
-                    (unsigned long long)n, getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6),
-                    getRegU32(ctx, 7), getRegU32(ctx, 31));
+    {
+        uint64_t a0, a1;
+        std::memcpy(&a0, &ctx->r[4], 8);
+        std::memcpy(&a1, &ctx->r[5], 8);
+        std::printf("[trace] 0x%08X call #%llu a0=%016llX a1=%016llX a2=%08X a3=%08X ra=%08X f12=%g f13=%g\n",
+                    address, (unsigned long long)n, (unsigned long long)a0, (unsigned long long)a1,
+                    getRegU32(ctx, 6), getRegU32(ctx, 7), getRegU32(ctx, 31), ctx->f[12], ctx->f[13]);
+    }
     if (n <= kLogFirst && t.dumpBytes)
     {
         const uint32_t base = getRegU32(ctx, 4);
@@ -72,6 +82,8 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     }
     kh2::callOriginal(t.original, rdram, ctx, runtime);
+    if (n <= kLogFirst)
+        std::printf("[trace] 0x%08X call #%llu -> v0=%08X\n", address, (unsigned long long)n, getRegU32(ctx, 2));
 }
 } // namespace
 

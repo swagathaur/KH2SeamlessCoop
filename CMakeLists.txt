@@ -240,6 +240,7 @@ add_executable(kh2recomp
     port/coop/game_state.cpp
     port/coop/coop.cpp
     port/coop/puppets.cpp
+    port/coop/guest_call.cpp
     port/coop/net/udp_socket.cpp
     port/coop/net/protocol.cpp
     port/coop/net/channel.cpp

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -52,8 +53,25 @@ bool setEnabled(PS2Runtime &runtime, const std::string &name, bool on)
     if (on == (it != g_enabled.end()))
         return true;
     bool ok = true;
-    for (const CodeVariant *c = p->code; c && c->address; ++c)
+    // Debugging: KH2_PATCH_SKIP_CODE / KH2_PATCH_SKIP_DATA leave out one half.
+    static const bool skipCode = std::getenv("KH2_PATCH_SKIP_CODE") != nullptr;
+    static const bool skipData = std::getenv("KH2_PATCH_SKIP_DATA") != nullptr;
+    // KH2_PATCH_ONLY_FN=addr,addr,...: swap in only these functions (hex).
+    static const std::vector<uint32_t> onlyFns = [] {
+        std::vector<uint32_t> v;
+        if (const char *e = std::getenv("KH2_PATCH_ONLY_FN"))
+        {
+            std::stringstream ss(e);
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty())
+                    v.push_back(static_cast<uint32_t>(std::stoul(t, nullptr, 16)));
+        }
+        return v;
+    }();
+    for (const CodeVariant *c = p->code; c && c->address && !skipCode; ++c)
     {
+        if (!onlyFns.empty() && std::find(onlyFns.begin(), onlyFns.end(), c->address) == onlyFns.end())
+            continue;
         if (on && !g_originalCode.count(c->address))
             g_originalCode[c->address] = runtime.lookupFunction(c->address);
         PS2Runtime::RecompiledFunction fn = on ? c->function : g_originalCode[c->address];
@@ -64,7 +82,7 @@ bool setEnabled(PS2Runtime &runtime, const std::string &name, bool on)
         }
     }
     uint8_t *rdram = runtime.memory().getRDRAM();
-    for (const DataWrite *d = p->data; d && d->address; ++d)
+    for (const DataWrite *d = p->data; d && d->address && !skipData; ++d)
     {
         uint8_t *dst = rdram + (d->address & PS2_RAM_MASK & ~3u);
         if (on && !g_originalData.count(d->address & ~3u))
@@ -121,6 +139,9 @@ bool enable(PS2Runtime &runtime, const std::string &names)
 
 void tick(uint8_t *rdram)
 {
+    static const bool skipData = std::getenv("KH2_PATCH_SKIP_DATA") != nullptr;
+    if (skipData)
+        return;
     std::lock_guard<std::mutex> lock(g_mutex);
     for (const GamePatch *p : g_enabled)
         for (const DataWrite *d = p->data; d && d->address; ++d)

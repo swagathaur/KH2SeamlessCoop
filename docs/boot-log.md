@@ -423,3 +423,45 @@ effects at normal levels, no clipping, no dropouts.
 Still open: the guest gets about 50 vsyncs a second in Roxas's room and Market
 Street rather than 60 (VBlanks wait for the EE to execute a frame's worth of
 cycles as well as for the host clock, so this is the EE falling behind).
+
+## 20. Speed in town; patches and tail calls
+
+Market Street ran at ~47 guest vsyncs a second with the host CPU mostly idle.
+Three things held the EE back, none of them CPU:
+
+- **The GS tap held the render lock** while handing packets to paraLLEl-GS,
+  and the render thread holds that lock through scanout and presentation
+  (which can wait for the display). GS data is now queued and fed to
+  paraLLEl-GS by the render thread (47 → 54 vsyncs/s, and the opening plays
+  through ~30 s sooner).
+- **Synchronous sound RPCs waited for the audio device.** The native IOP only
+  advanced when the device asked for its next 1024-sample buffer (21.3 ms,
+  i.e. 47 Hz). `patches/ps2recomp/0016` lets a waiting RPC step the IOP itself
+  in 1 ms slices; those samples are kept and played first, at most 50 ms
+  ahead of the device.
+- **The software GS kept working behind the GPU renderer.** Host stack
+  samples (`--stack-dump`) showed the EE thread itself doing VIF1, VU1, GIF
+  and the CPU GS backend's work: building draw batches nothing used and
+  copying every image upload into its VRAM. `patches/ps2recomp/0017` skips
+  both while an external renderer draws. KH2 does read GS memory back
+  (TRXDIR 1) now and then; that data was already stale (nothing is
+  rasterized into the CPU VRAM), so the copy stays off.
+
+Market Street now runs at 60 guest vsyncs a second.
+(`DQ8_EE_CYCLE_SCALE`, which raises the EE cycle charge that VBlanks also
+wait for, is not needed any more.)
+
+Game patches: functions reached by a tail call (`J`) are compiled as direct C++
+calls, so swapping in a patched variant through the function table missed
+those call sites (the widescreen patch's depth-of-field change was never
+active). `tools/game_patches.py` now gives every tail caller a variant too,
+with direct calls inside variants pointed at the patched versions.
+
+With `--widescreen` the script VM then jumped through a corrupted jump table
+(`0x0036D6A8`) around guest frame 3400. Bisecting with `KH2_PATCH_SKIP_DATA`,
+`KH2_PATCH_SKIP_CODE` and `KH2_PATCH_ONLY_FN` (debug switches in
+`port/runtime/game_patches.cpp`) pinned it on one instruction: the pnach's
+"lower subtitles" change (message window Y 365 → 400 in `FUN_001AC8B0`). The
+recompiled variant differs from the original only in that constant, so this
+is the game's own message code writing out of bounds with the lower window;
+the change is left out of our widescreen patch.

@@ -1,0 +1,58 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index c15d32d..187ea2d 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -21,6 +21,16 @@
+ #include <mutex>
+ #include <unordered_map>
+ 
++namespace
++{
++    // patch 0017: with an external renderer, guest images are not copied into
++    // the CPU backend's VRAM. Reads of GS memory by the guest (TRXDIR 1/2) get
++    // stale data either way (nothing is rasterized there); they are logged once.
++    // PS2X_GS_KEEP_VRAM=1 keeps the copy.
++    const bool g_vramMirror = std::getenv("PS2X_GS_KEEP_VRAM") != nullptr;
++    std::atomic<bool> g_readbackLogged{false};
++}
++
+ namespace
+ {
+     // GS CLUT buffer (patch 0008). The GS copies a palette into an internal
+@@ -1606,6 +1616,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+     case GS_REG_TRXDIR:
+     {
+         m_trxdir = static_cast<uint32_t>(value & 0x3);
++        if ((m_trxdir == 1u || m_trxdir == 2u) && !ps2SoftwareRasterEnabled() && !g_readbackLogged.exchange(true))
++            std::fprintf(stderr, "[gs] the guest reads GS memory back (TRXDIR %u); with the GPU renderer it gets "
++                                 "stale data (logged once)\n",
++                         m_trxdir);
+ 
+         if (m_backend)
+         {
+@@ -1795,12 +1809,13 @@ void GS::vertexKick(bool drawing)
+     if (m_vtxCount < needed)
+         return;
+ 
+-    if (drawing && m_backend)
++    // patch 0012/0017: with an external renderer drawing, the software path's
++    // batches (and its choice of display source) are not needed at all.
++    if (drawing && m_backend && ps2SoftwareRasterEnabled())
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
+         updatePreferredDisplaySourceForDraw(batch);
+-        if (ps2SoftwareRasterEnabled()) // patch 0012: an external renderer draws
+-            m_backend->Submit(batch);
++        m_backend->Submit(batch);
+         recordDrawDebugEventUnlocked(needed);
+     }
+ 
+@@ -1833,7 +1848,7 @@ void GS::vertexKick(bool drawing)
+ 
+ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ {
+-    if (m_backend)
++    if (m_backend && (ps2SoftwareRasterEnabled() || g_vramMirror))
+         m_backend->UploadImage(data, sizeBytes);
+ }
+ 

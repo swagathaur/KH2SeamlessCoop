@@ -20,7 +20,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 1;
+constexpr uint8_t kProtocolVersion = 2;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -55,9 +55,11 @@ struct PlayerState
     uint8_t origin = 0;   // player id
     uint32_t tick = 0;    // sender's frame counter
     uint8_t world = 0, room = 0;
+    uint16_t door = 0;  // the entrance they came in by
     float pos[3] = {0, 0, 0};
     float rotY = 0;
-    uint16_t anim = 0;
+    uint16_t model = 0; // objentry id of their character
+    uint16_t anim = 0;  // motion index
     float animTime = 0;
     int32_t hp = 0, maxHp = 0;
     uint8_t flags = 0;

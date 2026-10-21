@@ -1,0 +1,71 @@
+diff --git a/ps2xIOP/src/native_iop.cpp b/ps2xIOP/src/native_iop.cpp
+index 6325ee0..7e7a463 100644
+--- a/ps2xIOP/src/native_iop.cpp
++++ b/ps2xIOP/src/native_iop.cpp
+@@ -6,6 +6,7 @@
+ #include <cctype>
+ #include <chrono>
+ #include <condition_variable>
++#include <deque>
+ #include <mutex>
+ 
+ namespace ps2x::iop
+@@ -53,6 +54,26 @@ namespace ps2x::iop
+             return rendered && std::chrono::steady_clock::now() - lastRender < std::chrono::milliseconds(250);
+         }
+ 
++        // An RPC waiting for IOP time steps the IOP itself rather than waiting
++        // for the audio device's next buffer (~21 ms): a game that makes a
++        // synchronous sound call every frame would otherwise run at the
++        // device's buffer rate. The samples produced are kept and played
++        // first, so IOP time and the sound stay one continuous stream; it can
++        // run at most kMaxAhead ahead of the device.
++        static constexpr uint32_t kAheadStep = 48;    // 1 ms
++        static constexpr uint32_t kMaxAhead = 2400;   // 50 ms
++        void stepAhead(uint32_t frames)
++        {
++            for (uint32_t index = 0; index < frames; ++index)
++            {
++                int16_t left, right;
++                iop.step(left, right);
++                ahead.push_back(left);
++                ahead.push_back(right);
++            }
++        }
++        std::deque<int16_t> ahead; // interleaved stereo
++
+         IopHost &host;
+         lle::Iop iop;
+         mutable std::mutex mutex;
+@@ -151,7 +172,12 @@ namespace ps2x::iop
+         while (!request->done && std::chrono::steady_clock::now() < deadline)
+         {
+             if (m_impl->audioRunning())
+-                m_impl->progressed.wait_for(lock, std::chrono::milliseconds(20));
++            {
++                if (m_impl->ahead.size() / 2u < Impl::kMaxAhead)
++                    m_impl->stepAhead(Impl::kAheadStep);
++                else
++                    m_impl->progressed.wait_for(lock, std::chrono::milliseconds(5));
++            }
+             else
+                 m_impl->stepSilently(480u);
+             m_impl->iop.settle();
+@@ -191,7 +217,16 @@ namespace ps2x::iop
+     {
+         {
+             std::lock_guard lock(m_impl->mutex);
+-            for (uint32_t index = 0; index < count; ++index)
++            uint32_t index = 0;
++            // Samples already produced by RPCs that stepped ahead come first.
++            for (; index < count && m_impl->ahead.size() >= 2u; ++index)
++            {
++                frames[index * 2u] = m_impl->ahead.front();
++                m_impl->ahead.pop_front();
++                frames[index * 2u + 1u] = m_impl->ahead.front();
++                m_impl->ahead.pop_front();
++            }
++            for (; index < count; ++index)
+                 m_impl->iop.step(frames[index * 2u], frames[index * 2u + 1u]);
+             m_impl->rendered = true;
+             m_impl->lastRender = std::chrono::steady_clock::now();

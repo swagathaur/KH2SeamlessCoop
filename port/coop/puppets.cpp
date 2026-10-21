@@ -1,6 +1,7 @@
 #include "puppets.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -8,11 +9,13 @@
 #include <mutex>
 
 #include "game_state.h"
+#include "guest_call.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 
 namespace kh2puppets
 {
+void requestPreload(uint32_t entryId);
 namespace
 {
 constexpr size_t kMaxPuppets = 2;
@@ -20,7 +23,13 @@ constexpr size_t kMaxPuppets = 2;
 struct Slot
 {
     bool active = false;
+    bool spawned = false;  // we created the object (and must remove it)
+    bool pending = false;  // spawn job queued, object not known yet
+    bool spawnPosted = false;
+    uint32_t entry = 0;
+    double loadAt = 0;     // spawn mode: when the model load was requested
     uint8_t playerId = 0;
+    uint16_t motion = 0xFFFF; // last motion we started on it
     uint32_t object = 0;
     char name[33] = {};
     float pos[3] = {0, 0, 0};
@@ -29,57 +38,70 @@ struct Slot
 
 std::mutex g_mutex;
 Slot g_slots[kMaxPuppets];
+
+double now()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
-std::atomic<uint32_t> g_spawnEntry{0};
-std::atomic<float> g_spawnDistance{150.0f};
-
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
+constexpr uint32_t kEntryLoad = 0x0016EB48;    // (entry id, priority, 4, 7): queue loading its files
+constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
+constexpr uint32_t kObjMotion = 0x140;
+constexpr uint32_t kVtableLeave = 0x20; // obj->vtable[+0x20](obj): leave (what trap_obj_leave_force calls)
+std::atomic<Mode> g_mode{Mode::Borrow};
 
-// Calls a guest function from inside an override, on the EE thread: the
-// context is saved and restored around it, and the callee gets stack below
-// the scratch area used for pointer arguments.
-uint32_t callGuest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t address,
-                   std::initializer_list<uint32_t> args, std::initializer_list<float> fargs)
+// The object factory, keeping GetPlayer()'s static: object construction
+// stores the newest object there (the player is simply created last when a
+// room loads), so a spawned object would otherwise become "the player".
+uint32_t spawnObject(const kh2guest::Env &env, uint32_t entry, const float pos[3], float yaw)
 {
-    PS2Runtime::RecompiledFunction fn = runtime->lookupFunction(address);
-    if (!fn)
+    constexpr uint32_t kAreaAlloc = 0x001050D8; // AREA::Alloc(size): the room's heap, freed when it unloads
+    constexpr uint32_t kVtableSetup = 0x38;     // obj->vtable[+0x38](obj, UNIT_GROUP*, UNIT_DATA_OBJ*)
+    uint32_t player;
+    std::memcpy(&player, env.host(kh2state::addr::PlayerPtr), 4);
+    // A spawn record and an empty unit group, as a room's spawn list would
+    // give (YS::UNIT_DATA_OBJ::appear): entry id, position, yaw at +0x14.
+    const uint32_t unit = kh2guest::call(env, kAreaAlloc, {0x40u});
+    const uint32_t group = kh2guest::call(env, kAreaAlloc, {0x40u});
+    if (!unit || !group)
         return 0;
-    const R5900Context saved = *ctx;
-    int i = 4;
-    for (uint32_t a : args)
-        SET_GPR_U32(ctx, i++, a);
-    int f = 12;
-    for (float v : fargs)
-        ctx->f[f++] = v;
-    SET_GPR_U32(ctx, 31, 0u);
-    fn(rdram, ctx, runtime);
-    const uint32_t result = getRegU32(ctx, 2);
-    *ctx = saved;
-    return result;
+    std::memset(env.host(unit), 0, 0x40);
+    std::memset(env.host(group), 0, 0x40);
+    std::memcpy(env.host(unit), &entry, 4);
+    std::memcpy(env.host(unit + 4), pos, 12);
+    std::memcpy(env.host(unit + 0x14), &yaw, 4);
+    const float p[4] = {pos[0], pos[1], pos[2], 1.0f};
+    std::memcpy(env.host(env.scratch), p, 16);
+    const uint32_t obj = kh2guest::call(env, kObjFactory, {entry, env.scratch}, {yaw});
+    if (obj)
+    {
+        uint32_t vt = 0, setup = 0;
+        std::memcpy(&vt, env.host(obj), 4);
+        if (vt >= 0x00100000u && vt < 0x02000000u)
+            std::memcpy(&setup, env.host(vt + kVtableSetup), 4);
+        if (setup)
+            kh2guest::call(env, setup, {obj, group, unit});
+    }
+    std::memcpy(env.host(kh2state::addr::PlayerPtr), &player, 4);
+    return obj;
 }
 
-void spawnNow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t player, uint32_t entry)
+// The NPC-class entry that shows a player character (docs/findings.md).
+uint32_t puppetEntryFor(uint16_t model)
 {
-    float pos[4], dir[4];
-    std::memcpy(pos, rdram + ((player + kh2state::addr::ObjPos) & 0x01FFFFFFu), 16);
-    std::memcpy(dir, rdram + ((player + kh2state::addr::ObjDir) & 0x01FFFFFFu), 16);
-    const float d = g_spawnDistance.load();
-    pos[0] += dir[0] * d;
-    pos[2] += dir[2] * d;
-    pos[3] = 1.0f;
-    // Scratch for the FVector well below the caller's frame; the callee's
-    // frames go below that.
-    const uint32_t sp = getRegU32(ctx, 29);
-    const uint32_t vec = (sp - 0x100u) & ~15u;
-    std::memcpy(rdram + (vec & 0x01FFFFFFu), pos, 16);
-    const R5900Context saved = *ctx;
-    SET_GPR_U32(ctx, 29, vec - 0x40u);
-    const uint32_t obj = callGuest(rdram, ctx, runtime, kObjFactory, {entry, vec}, {dir[3]});
-    *ctx = saved;
-    std::printf("[puppets] spawned entry %04X at %.0f,%.0f,%.0f -> object %08X\n", entry, pos[0], pos[1], pos[2], obj);
-    std::fflush(stdout);
+    switch (model)
+    {
+    case 0x005A: case 0x0323: case 0x088E: // Roxas (P_EX110 and forms)
+        return 0x084C;                      // B_EX110_RTN
+    case 0x0054: case 0x0055: case 0x0056: case 0x0057: case 0x0058: case 0x0059: case 0x0236: case 0x02B5:
+        return 0x08D2; // Sora: P_EX100_LAST
+    default:
+        return 0;
+    }
 }
 
 void writeTransform(uint8_t *rdram, uint32_t obj, const float pos[3], float yaw)
@@ -93,19 +115,19 @@ void writeTransform(uint8_t *rdram, uint32_t obj, const float pos[3], float yaw)
 // FUN_00193608(obj) override; runs on the EE thread.
 void buildMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (const uint32_t entry = g_spawnEntry.load(std::memory_order_relaxed))
     {
+        // Once a frame, at the player: run queued guest-side jobs.
         uint32_t player;
         std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
-        if (player && getRegU32(ctx, 4) == player && g_spawnEntry.exchange(0) == entry)
-            spawnNow(rdram, ctx, runtime, player, entry);
+        if (player && getRegU32(ctx, 4) == player)
+            kh2guest::runPending(rdram, ctx, runtime);
     }
     if (g_any.load(std::memory_order_relaxed))
     {
         const uint32_t obj = getRegU32(ctx, 4);
         std::lock_guard<std::mutex> lock(g_mutex);
         for (const Slot &s : g_slots)
-            if (s.active && s.object == obj)
+            if (s.active && !s.pending && s.object == obj)
             {
                 writeTransform(rdram, obj, s.pos, s.yaw);
                 break;
@@ -136,8 +158,21 @@ bool install(PS2Runtime &runtime)
 void setEnabled(bool on) { g_enabled = on; }
 void requestSpawn(uint32_t entryId, float distance)
 {
-    g_spawnDistance = distance;
-    g_spawnEntry = entryId;
+    kh2guest::post([entryId, distance](const kh2guest::Env &env) {
+        uint32_t player;
+        std::memcpy(&player, env.host(kh2state::addr::PlayerPtr), 4);
+        if (!player)
+            return;
+        float pos[4], dir[4];
+        std::memcpy(pos, env.host(player + kh2state::addr::ObjPos), 16);
+        std::memcpy(dir, env.host(player + kh2state::addr::ObjDir), 16);
+        pos[0] += dir[0] * distance;
+        pos[2] += dir[2] * distance;
+        const uint32_t obj = spawnObject(env, entryId, pos, dir[3]);
+        std::printf("[puppets] spawned entry %04X at %.0f,%.0f,%.0f -> object %08X\n", entryId, pos[0], pos[1],
+                    pos[2], obj);
+        std::fflush(stdout);
+    });
 }
 bool enabled() { return g_enabled; }
 
@@ -147,37 +182,92 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
         return;
     const kh2state::State st = kh2state::read(rdram);
     std::vector<kh2state::ActorInfo> actors;
+    auto haveActors = [&]() -> const std::vector<kh2state::ActorInfo> & {
+        if (actors.empty())
+            actors = kh2state::actors(rdram);
+        return actors;
+    };
+    const double t = now();
     std::lock_guard<std::mutex> lock(g_mutex);
     bool any = false;
     for (Slot &s : g_slots)
     {
+        if (!s.active)
+            continue;
         // Still wanted? Same player, in our room, and the object still exists.
-        const Target *t = nullptr;
-        for (const Target &tg : targets)
-            if (s.active && tg.playerId == s.playerId)
-                t = &tg;
-        bool keep = g_enabled && t && t->world == st.now.world && t->room == st.now.room;
-        if (keep)
+        const Target *tg = nullptr;
+        for (const Target &x : targets)
+            if (x.playerId == s.playerId)
+                tg = &x;
+        const bool sameRoom = tg && tg->world == st.now.world && tg->room == st.now.room;
+        bool keep = g_enabled && sameRoom;
+        if (keep && !s.pending)
         {
-            if (actors.empty())
-                actors = kh2state::actors(rdram);
             keep = false;
-            for (const kh2state::ActorInfo &a : actors)
-                if (a.address == s.object)
-                    keep = true;
+            for (const kh2state::ActorInfo &a : haveActors())
+                keep = keep || a.address == s.object;
         }
         if (!keep)
         {
-            if (s.active)
-                std::printf("[puppets] player %u releases %s\n", s.playerId + 1, s.name);
+            std::printf("[puppets] player %u releases %s\n", s.playerId + 1, s.name);
+            if (s.spawned && s.object && (sameRoom || !tg))
+            {
+                // Ours and still in this room: make it leave.
+                const uint32_t obj = s.object;
+                kh2guest::post([obj](const kh2guest::Env &env) {
+                    uint32_t vt = 0, fn = 0;
+                    std::memcpy(&vt, env.host(obj), 4);
+                    if (vt >= 0x00100000u && vt < 0x02000000u)
+                        std::memcpy(&fn, env.host(vt + kVtableLeave), 4);
+                    if (fn)
+                        kh2guest::call(env, fn, {obj});
+                });
+            }
             s = Slot{};
             continue;
         }
-        std::memcpy(s.pos, t->pos, sizeof(s.pos));
-        s.yaw = t->yaw;
         any = true;
+        std::memcpy(s.pos, tg->pos, sizeof(s.pos));
+        s.yaw = tg->yaw;
+        if (s.pending)
+        {
+            // Spawn once its files have had time to load (the request is
+            // asynchronous; 1.5 s is plenty for a model and its motions).
+            if (!s.spawnPosted && t - s.loadAt > 1.5)
+            {
+                s.spawnPosted = true;
+                const uint8_t id = s.playerId;
+                const uint32_t entry = s.entry;
+                const Target where = *tg;
+                kh2guest::post([id, entry, where](const kh2guest::Env &env) {
+                    const uint32_t obj = spawnObject(env, entry, where.pos, where.yaw);
+                    std::printf("[puppets] player %u spawned as entry %04X -> %08X\n", id + 1, entry, obj);
+                    std::fflush(stdout);
+                    std::lock_guard<std::mutex> lock(g_mutex);
+                    for (Slot &x : g_slots)
+                        if (x.active && x.pending && x.playerId == id)
+                        {
+                            x.pending = false;
+                            x.object = obj;
+                            if (!obj)
+                                x = Slot{}; // failed; tried again next update
+                        }
+                });
+            }
+            continue;
+        }
+        // Our own puppets also play the player's motions.
+        if (s.spawned && tg->motion != s.motion)
+        {
+            s.motion = tg->motion;
+            const uint32_t obj = s.object;
+            const uint32_t motion = tg->motion;
+            kh2guest::post([obj, motion](const kh2guest::Env &env) {
+                kh2guest::call(env, kMotionChange, {obj + kh2state::addr::ObjMotion, motion}, {4.0f, 0.0f});
+            });
+        }
     }
-    // New players in our room borrow the first free usable NPC.
+    // New players in our room get a puppet.
     if (g_enabled)
         for (const Target &tg : targets)
         {
@@ -194,9 +284,24 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
                     free = &s;
             if (!free)
                 break;
-            if (actors.empty())
-                actors = kh2state::actors(rdram);
-            for (const kh2state::ActorInfo &a : actors)
+            const uint32_t entry = g_mode == Mode::Spawn ? puppetEntryFor(tg.model) : 0;
+            if (entry)
+            {
+                // Spawn mode: load the character's files first.
+                *free = Slot{};
+                free->active = free->spawned = free->pending = true;
+                free->playerId = tg.playerId;
+                free->entry = entry;
+                free->loadAt = t;
+                std::snprintf(free->name, sizeof(free->name), "puppet %04X", entry);
+                std::memcpy(free->pos, tg.pos, sizeof(free->pos));
+                free->yaw = tg.yaw;
+                requestPreload(entry);
+                any = true;
+                continue;
+            }
+            // Borrow mode: the first NPC in the room nobody uses.
+            for (const kh2state::ActorInfo &a : haveActors())
             {
                 if (!usable(a))
                     continue;
@@ -205,6 +310,7 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
                     taken = taken || (s.active && s.object == a.address);
                 if (taken)
                     continue;
+                *free = Slot{};
                 free->active = true;
                 free->playerId = tg.playerId;
                 free->object = a.address;
@@ -218,6 +324,18 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
         }
     g_any = any;
 }
+
+void requestPreload(uint32_t entryId)
+{
+    kh2guest::post([entryId](const kh2guest::Env &env) {
+        kh2guest::call(env, kEntryLoad, {entryId, 0x1388u, 4u, 7u});
+        std::printf("[puppets] requested loading entry %04X\n", entryId);
+        std::fflush(stdout);
+    });
+}
+
+void setMode(Mode mode) { g_mode = mode; }
+Mode mode() { return g_mode; }
 
 std::vector<Assignment> assignments()
 {

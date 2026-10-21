@@ -111,6 +111,7 @@ struct Options
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
+    std::set<uint64_t> actorsAt;       // --actors-at: print the object list
     std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
@@ -135,7 +136,10 @@ struct Options
     unsigned watchdog = 0;             // seconds without a host-loop iteration before dumping stacks
     bool listPatches = false;
     kh2coop::Options coop;             // --host / --join / --name
+    bool puppetSpawn = false;          // --puppet-mode=spawn
     std::vector<std::pair<uint64_t, uint32_t>> spawnTests; // --spawn-test=FRAME:ENTRY
+    std::vector<std::pair<uint64_t, uint32_t>> preloadTests; // --preload-test=FRAME:ENTRY
+    std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM (hex)
 };
 
 void usage()
@@ -149,7 +153,10 @@ void usage()
         "  --timeout=SEC           give up after SEC wall-clock seconds, exit 3\n"
         "  --screenshot-every=N    save shots/frame_XXXXXX.png every N guest frames\n"
         "  --screenshot-at=A,B,..  save shots at these guest frames\n"
+        "  --warp-test=F:WW:RR     experiment: map jump to world WW room RR (hex) at frame F\n"
+        "  --preload-test=FRAME:ID experiment: ask the game to load objentry ID's files (hex)\n"
         "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
+        "  --actors-at=A,B,..      print the live object list at these frames\n"
         "  --ram-dump=A,B,..       write the guest's 32 MB of RAM to SHOTS/ram_FRAME.bin at these frames\n"
         "  --shots=DIR             screenshot directory (default: shots)\n"
         "  --input=SCRIPT          pad script, file or inline: '<frame> <BTN>[+BTN] [hold];...'\n"
@@ -194,6 +201,9 @@ void usage()
         "  --host[=PORT]           host a co-op session (default port 27552)\n"
         "  --join=HOST[:PORT]      join a co-op session\n"
         "  --name=NAME             your name in co-op\n"
+        "  --puppet-mode=M         co-op: 'borrow' an NPC in the room (default) or 'spawn' a copy of\n"
+        "                          the player's character (experimental)\n"
+        "  --follow-host           co-op client: go to the host's room whenever it changes\n"
         "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
         "  --mash-until=FRAME      stop --mash at this guest frame\n"
         "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
@@ -251,6 +261,12 @@ bool parse(int argc, char **argv, Options &o)
             std::stringstream ss(value(a));
             for (std::string t; std::getline(ss, t, ',');)
                 if (!t.empty()) o.watch.push_back(static_cast<uint32_t>(std::stoul(t, nullptr, 16)));
+        }
+        else if (a.rfind("--actors-at=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.actorsAt.insert(std::stoull(t));
         }
         else if (a.rfind("--ram-dump=", 0) == 0)
         {
@@ -316,7 +332,26 @@ bool parse(int argc, char **argv, Options &o)
         else if (a.rfind("--host=", 0) == 0) { o.coop.host = true; o.coop.port = static_cast<uint16_t>(std::stoul(value(a))); }
         else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
+        else if (a == "--follow-host") o.coop.followHost = true;
+        else if (a.rfind("--puppet-mode=", 0) == 0) o.puppetSpawn = value(a) == "spawn";
         else if (a.rfind("--net-loss=", 0) == 0) o.coop.simulatedLoss = std::stof(value(a));
+        else if (a.rfind("--warp-test=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t c1 = v.find(':'), c2 = v.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) return false;
+            const uint32_t world = static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16));
+            const uint32_t room = static_cast<uint32_t>(std::stoul(v.substr(c2 + 1), nullptr, 16));
+            o.warpTests.emplace_back(std::stoull(v.substr(0, c1)), world << 8 | room);
+        }
+        else if (a.rfind("--preload-test=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos) return false;
+            o.preloadTests.emplace_back(std::stoull(v.substr(0, colon)),
+                                        static_cast<uint32_t>(std::stoul(v.substr(colon + 1), nullptr, 16)));
+        }
         else if (a.rfind("--spawn-test=", 0) == 0)
         {
             const std::string v = value(a);
@@ -383,12 +418,15 @@ struct Harness
     std::chrono::steady_clock::time_point start;
     std::chrono::steady_clock::time_point lastStatus;
     uint64_t lastShotFrame = UINT64_MAX;
+    uint64_t prevTickFrame = UINT64_MAX;
     uint64_t lastDumpFrame = UINT64_MAX;
     uint64_t lastGpuFrame = UINT64_MAX;
     uint64_t lastEeDumpFrame = UINT64_MAX;
     uint64_t lastStackDumpFrame = UINT64_MAX;
     uint64_t lastRamDumpFrame = UINT64_MAX;
     uint64_t lastSpawnFrame = UINT64_MAX;
+    uint64_t lastWarpFrame = UINT64_MAX;
+    uint64_t lastActorsFrame = UINT64_MAX;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
@@ -620,24 +658,55 @@ bool harnessTick(Harness &h, uint64_t frame)
 {
     const Options &o = *h.opt;
     kh2watch::beat();
+    // Frame-triggered actions fire when the guest frame passes their frame:
+    // the host loop can see the counter advance by more than one between ticks.
+    const uint64_t prev = h.prevTickFrame;
+    h.prevTickFrame = frame;
+    auto due = [&](uint64_t at) { return frame >= at && (prev < at || prev == UINT64_MAX); };
+    auto hit = [&](const std::set<uint64_t> &at) {
+        auto it = prev == UINT64_MAX ? at.begin() : at.upper_bound(prev);
+        return it != at.end() && *it <= frame;
+    };
     if (frame != h.lastShotFrame &&
-        ((o.screenshotEvery && frame % o.screenshotEvery == 0) || o.screenshotAt.count(frame)))
+        ((o.screenshotEvery && (prev == UINT64_MAX || frame / o.screenshotEvery != prev / o.screenshotEvery)) ||
+         hit(o.screenshotAt)))
     {
         h.lastShotFrame = frame;
         saveShot(h, frame);
     }
-    if (o.gsDumpAt.count(frame) && frame != h.lastDumpFrame)
+    if (hit(o.gsDumpAt) && frame != h.lastDumpFrame)
     {
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
     }
+    if (hit(o.actorsAt) && frame != h.lastActorsFrame)
+    {
+        h.lastActorsFrame = frame;
+        const uint8_t *ram = h.runtime->memory().getRDRAM();
+        uint32_t player;
+        std::memcpy(&player, ram + kh2state::addr::PlayerPtr, 4);
+        std::printf("[actors] frame %llu, player %08X:\n", (unsigned long long)frame, player);
+        for (const kh2state::ActorInfo &a : kh2state::actors(ram))
+            std::printf("[actors]   %08X %04X %-24s %-18s %.0f,%.0f,%.0f\n", a.address, a.entryId, a.name,
+                        kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2]);
+        std::fflush(stdout);
+    }
+    for (const auto &[at, where] : o.warpTests)
+        if (due(at) && frame != h.lastWarpFrame)
+        {
+            h.lastWarpFrame = frame;
+            kh2coop::requestWarp(uint8_t(where >> 8), uint8_t(where & 0xFF));
+        }
+    for (const auto &[at, entry] : o.preloadTests)
+        if (due(at))
+            kh2puppets::requestPreload(entry);
     for (const auto &[at, entry] : o.spawnTests)
-        if (frame == at && frame != h.lastSpawnFrame)
+        if (due(at) && frame != h.lastSpawnFrame)
         {
             h.lastSpawnFrame = frame;
             kh2puppets::requestSpawn(entry);
         }
-    if (o.ramDumpAt.count(frame) && frame != h.lastRamDumpFrame)
+    if (hit(o.ramDumpAt) && frame != h.lastRamDumpFrame)
     {
         h.lastRamDumpFrame = frame;
         char name[64];
@@ -652,13 +721,13 @@ bool harnessTick(Harness &h, uint64_t frame)
             std::printf("[harness] wrote %s\n", path.string().c_str());
         }
     }
-    if (o.stackDumpAt.count(frame) && frame != h.lastStackDumpFrame)
+    if (hit(o.stackDumpAt) && frame != h.lastStackDumpFrame)
     {
         h.lastStackDumpFrame = frame;
         std::printf("[harness] host stacks at guest frame %llu\n", (unsigned long long)frame);
         kh2watch::dumpNow();
     }
-    if (o.eeDumpAt.count(frame) && frame != h.lastEeDumpFrame)
+    if (hit(o.eeDumpAt) && frame != h.lastEeDumpFrame)
     {
         h.lastEeDumpFrame = frame;
         const EeKernelSnapshot k = h.runtime->eeScheduler().snapshot();
@@ -1008,6 +1077,7 @@ int main(int argc, char **argv)
     std::fflush(stdout);
     kh2movie::setSkip(opt.skipMovies);
     kh2puppets::install(runtime);
+    kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
     kh2coop::init(opt.coop);
     if (opt.speed != 1.0)
     {

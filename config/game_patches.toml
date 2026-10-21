@@ -26,8 +26,9 @@ code = [
     [0x00106e74, 0xe61f004c],
     # Depth of field off: its cutscene scaling breaks at 16:9.
     [0x00166db6, 0xef, 8],
-    # Subtitles lower on the screen.
-    [0x001ac8d8, 0x240a0190],
+    # Subtitles lower on the screen (0x001ac8d8 = 0x240a0190) is left out: it
+    # moves the message window's Y to 400, and the opening then corrupts the
+    # script VM's jump table at 0x0036D6A8 and crashes (docs/boot-log.md 20).
 ]
 data = [
     # Cutscene zoom (hides sudden pop-in at the screen edges).

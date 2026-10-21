@@ -48,9 +48,17 @@ constexpr uint32_t ObjNext = 0x8B4;
 constexpr uint32_t ObjEntry = 0x8;
 constexpr uint32_t ObjPos = 0x540;      // x, y, z, 1: what the world matrix is built from
 constexpr uint32_t ObjDir = 0x550;      // sin(yaw), 0, cos(yaw), yaw
+constexpr uint32_t ObjMotion = 0x140;   // YS::MOTION; its +0x14 (obj +0x154) is the motion index
+constexpr uint32_t ObjMotionIndex = 0x154; // 0 idle, 2 run, 3 jump, 5 attack, ...
 // FUN_00193608(obj): rebuild the object's world matrix from ObjPos/ObjDir;
 // YS::OBJ::calc_motion calls it every frame before posing the skeleton.
 constexpr uint32_t ObjBuildMatrix = 0x00193608;
+// FUN_00104F58(const LOCATION* to, int fade, int, u8, callback): the game's map
+// jump (YS::TEST_MAPJUMP and the script traps call it). LOCATION is world u8,
+// room u8, door u16, map/battle/event u16; 0xFFFF there means "what the save
+// says for that room". 0x0032BB20 is non-zero while a jump is under way.
+constexpr uint32_t MapJump = 0x00104F58;
+constexpr uint32_t MapJumpTask = 0x0032BB20;
 constexpr uint32_t ActorMatrix = 0x40;  // 4x4 floats, rows; translation row at +0x70
 constexpr uint32_t ActorPos = 0x70;     // x, y, z, 1 (y up, the floor at the feet)
 constexpr uint32_t ActorFacing = 0x55C; // radians; matrix yaw + pi (mirrored at +0x66C)
@@ -77,6 +85,8 @@ struct Actor
     uint32_t address = 0;
     float pos[3] = {0, 0, 0};
     float facing = 0;
+    uint32_t entryId = 0; // objentry id (0x5A = Roxas)
+    uint32_t motion = 0;  // motion index
 };
 
 struct ActorInfo

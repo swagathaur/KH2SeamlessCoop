@@ -43,6 +43,10 @@ State read(const uint8_t *ram)
         for (int i = 0; i < 3; ++i)
             s.player.pos[i] = rd<float>(ram, actor + addr::ActorPos + 4u * uint32_t(i));
         s.player.facing = rd<float>(ram, actor + addr::ActorFacing);
+        s.player.motion = rd<uint32_t>(ram, actor + addr::ObjMotionIndex);
+        const uint32_t entry = rd<uint32_t>(ram, actor + addr::ObjEntry);
+        if (entry >= 0x00100000u && entry < 0x02000000u)
+            s.player.entryId = rd<uint32_t>(ram, entry);
     }
     s.control = rd<uint32_t>(ram, addr::Cntrl);
     s.battle = rd<uint32_t>(ram, addr::BtlTyp);

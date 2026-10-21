@@ -115,5 +115,10 @@ puppets with the right model and animations come next.
 - **Join**: menu → Co-op → type the host's address → **Join**, or
   `--join=1.2.3.4` (`:PORT` if not the default). `--name=Riku` sets your name.
 - Everyone must run the same game build; the host checks.
+- Clients can jump to the host's room (**Go to the host's room** in the menu)
+  or follow them automatically (**Follow the host**, or `--follow-host`): when
+  the host has been in another room for a second and you are free to move,
+  the game's own map jump takes you there. Story progress is still each
+  player's own, so rooms your save has not reached yet may misbehave.
 
 Two instances on one PC work too (`--join=127.0.0.1`).

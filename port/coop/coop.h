@@ -18,6 +18,7 @@ struct Options
     std::string join;          // host address ("1.2.3.4" or "1.2.3.4:27552")
     uint16_t port = kh2net::kDefaultPort;
     float simulatedLoss = 0;
+    bool followHost = false;    // clients warp to the host's room when it changes
 };
 
 struct RemotePlayer
@@ -41,6 +42,14 @@ void shutdown();
 bool host(const std::string &name, uint16_t port);
 bool join(const std::string &name, const std::string &address);
 void leave();
+
+// Clients: go to the room the host is in (now), and keep doing so when they
+// move (follow).
+void warpToHost();
+// The game's own map jump to a room (next frame).
+void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0);
+void setFollowHost(bool on);
+bool followHost();
 
 // For display.
 bool active();

@@ -10,6 +10,7 @@
 
 #include "game_state.h"
 #include "puppets.h"
+#include "guest_call.h"
 #include "net/interpolation.h"
 #include "net/session.h"
 
@@ -32,6 +33,10 @@ std::unique_ptr<kh2net::Session> g_session;
 std::map<uint8_t, Remote> g_remotes;
 std::deque<std::string> g_log;
 uint64_t g_lastSentFrame = UINT64_MAX;
+double g_lastWarp = -100.0;
+double g_hostRoomSince = 0.0;
+uint16_t g_hostRoomSeen = 0xFFFF;
+
 
 double now()
 {
@@ -47,6 +52,39 @@ void addLog(const std::string &line)
     g_log.push_back(line);
     while (g_log.size() > 8)
         g_log.pop_front();
+}
+
+// Queue the game's own map jump (runs on the EE thread next frame).
+void warpLocked(uint8_t world, uint8_t room, uint16_t door)
+{
+    addLog("going to " + kh2state::describe({world, room}));
+    kh2guest::post([world, room, door](const kh2guest::Env &env) {
+        uint8_t loc[10];
+        loc[0] = world;
+        loc[1] = room;
+        std::memcpy(loc + 2, &door, 2);
+        const uint16_t keep = 0xFFFF;
+        for (int i = 0; i < 3; ++i)
+            std::memcpy(loc + 4 + 2 * i, &keep, 2);
+        std::memcpy(env.host(env.scratch), loc, sizeof(loc));
+        kh2guest::call(env, kh2state::addr::MapJump, {env.scratch, 1u, 0u, 0u, 0u});
+        uint32_t task;
+        std::memcpy(&task, env.host(kh2state::addr::MapJumpTask), 4);
+        uint8_t next[10];
+        std::memcpy(next, env.host(0x0032BAF0), sizeof(next));
+        std::printf("[coop] map jump queued: task %08X, next %02X-%02X door %02X%02X\n", task, next[0], next[1],
+                    next[3], next[2]);
+        std::fflush(stdout);
+    });
+}
+
+// The host's last known state, if we are a client.
+bool hostState(kh2net::PlayerState &out)
+{
+    auto it = g_remotes.find(0);
+    if (it == g_remotes.end() || it->second.interp.empty())
+        return false;
+    return it->second.interp.sample(now(), out);
 }
 
 void makeSession()
@@ -162,9 +200,35 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             tg.yaw = ps.rotY;
             tg.world = ps.world;
             tg.room = ps.room;
+            tg.model = ps.model;
+            tg.motion = ps.anim;
             targets.push_back(tg);
         }
         kh2puppets::update(rdram, targets);
+    }
+    // Clients following the host: once the host has been in another room for
+    // a moment and we are in free control, go there too.
+    if (g_opt.followHost && !g_session->isHost())
+    {
+        kh2net::PlayerState host;
+        const kh2state::State me = kh2state::read(rdram);
+        uint32_t jumping;
+        std::memcpy(&jumping, rdram + kh2state::addr::MapJumpTask, 4);
+        if (hostState(host) && host.world != 0)
+        {
+            const uint16_t key = uint16_t(host.world << 8 | host.room);
+            if (key != g_hostRoomSeen)
+            {
+                g_hostRoomSeen = key;
+                g_hostRoomSince = now();
+            }
+            const bool elsewhere = host.world != me.now.world || host.room != me.now.room;
+            if (elsewhere && me.control == 0 && !jumping && now() - g_hostRoomSince > 1.0 && now() - g_lastWarp > 5.0)
+            {
+                g_lastWarp = now();
+                warpLocked(host.world, host.room, host.door);
+            }
+        }
     }
     // 30 updates a second: every other guest frame.
     if (guestFrame / 2 == g_lastSentFrame / 2)
@@ -175,11 +239,14 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     ps.tick = static_cast<uint32_t>(guestFrame);
     ps.world = st.now.world;
     ps.room = st.now.room;
+    ps.door = st.now.door;
     if (st.player.valid)
     {
         for (int i = 0; i < 3; ++i)
             ps.pos[i] = st.player.pos[i];
         ps.rotY = st.player.facing;
+        ps.model = static_cast<uint16_t>(st.player.entryId);
+        ps.anim = static_cast<uint16_t>(st.player.motion);
         ps.flags |= 1; // has a body in the world
     }
     ps.hp = st.party[0].hp;
@@ -255,4 +322,26 @@ std::vector<std::string> recentLog()
 }
 
 const Options &options() { return g_opt; }
+
+void warpToHost()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    kh2net::PlayerState host;
+    if (!g_session || g_session->isHost() || !hostState(host) || host.world == 0)
+    {
+        addLog("no host location yet");
+        return;
+    }
+    g_lastWarp = now();
+    warpLocked(host.world, host.room, host.door);
+}
+
+void requestWarp(uint8_t world, uint8_t room, uint16_t door)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    warpLocked(world, room, door);
+}
+
+void setFollowHost(bool on) { g_opt.followHost = on; }
+bool followHost() { return g_opt.followHost; }
 } // namespace kh2coop

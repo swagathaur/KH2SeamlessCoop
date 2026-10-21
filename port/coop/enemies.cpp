@@ -179,10 +179,14 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         if (!h)
         {
             // Gone on the host (dead and removed) after we had seen it there.
-            if (f.placed && !f.killed && e.hp > 0)
+            // add_hp ending at 0 runs BTLOBJ::dead, also for an amount of 0
+            // (our copy can already be at 0 without having died).
+            if (f.placed && !f.killed)
             {
                 f.killed = true;
-                postAddHp(e.object, -e.hp);
+                std::printf("[enemies] %04X #%d is gone on the host\n", e.entry, e.serial);
+                std::fflush(stdout);
+                postAddHp(e.object, -(e.hp > 0 ? e.hp : 0));
             }
             continue;
         }
@@ -194,23 +198,20 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             std::fflush(stdout);
         }
         int32_t hp = e.hp;
-        if (h->hp < hp)
+        if (h->hp <= 0)
         {
-            if (h->hp <= 0)
+            if (!f.killed)
             {
-                if (!f.killed)
-                {
-                    f.killed = true;
-                    std::printf("[enemies] %04X #%d died on the host\n", e.entry, e.serial);
-                    std::fflush(stdout);
-                    postAddHp(e.object, -hp); // dies the game's way
-                }
+                f.killed = true;
+                std::printf("[enemies] %04X #%d died on the host\n", e.entry, e.serial);
+                std::fflush(stdout);
+                postAddHp(e.object, -(hp > 0 ? hp : 0)); // dies the game's way
             }
-            else
-            {
-                std::memcpy(rdram + (e.sheet & 0x01FFFFFFu), &h->hp, 4);
-                hp = h->hp;
-            }
+        }
+        else if (h->hp < hp)
+        {
+            std::memcpy(rdram + (e.sheet & 0x01FFFFFFu), &h->hp, 4);
+            hp = h->hp;
         }
         f.expectedHp = hp;
         // Position: ease toward the host's (20 updates a second; smooth the steps).

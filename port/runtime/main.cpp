@@ -151,6 +151,7 @@ struct Options
     struct PreloadTest { uint64_t frame; uint32_t entry, look; };
     std::vector<PreloadTest> preloadTests; // --preload-test=FRAME:ENTRY[:LOOK]
     std::vector<std::pair<uint64_t, uint32_t>> warpTests;  // --warp-test=FRAME:WORLD:ROOM[:BTL] (hex; world<<24|room<<16|btl)
+    std::vector<std::pair<uint64_t, int32_t>> hurtEnemies; // --hurt-enemies=FRAME:AMOUNT
     struct Teleport { uint64_t frame; float pos[3]; };
     std::vector<Teleport> teleports; // --teleport=FRAME:X,Y,Z
 };
@@ -224,6 +225,7 @@ void usage()
         "  --menu-at=F,..:S        testing (windowed): open the settings menu at these frames for S seconds\n"
         "  --ff-at=A-B,..          testing (windowed): fast-forward from frame A to B\n"
         "  --skip-cutscenes        skip every in-engine cutscene (hold B to skip one)\n"
+        "  --hurt-enemies=F:N      testing: take N HP off every enemy at frame F (as if hit)\n"
         "  --no-settings           don't read kh2recomp.ini\n"
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
@@ -382,6 +384,13 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
         else if (a == "--mark-actors") o.markActors = true;
         else if (a == "--no-settings") {} // handled before parsing
+        else if (a.rfind("--hurt-enemies=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t colon = v.find(':');
+            if (colon == std::string::npos) return false;
+            o.hurtEnemies.emplace_back(std::stoull(v.substr(0, colon)), std::stoi(v.substr(colon + 1)));
+        }
         else if (a == "--skip-cutscenes") kh2skip::setAutoSkip(true);
         else if (a.rfind("--menu-at=", 0) == 0)
         {
@@ -842,6 +851,26 @@ bool harnessTick(Harness &h, uint64_t frame)
         }
         std::fflush(stdout);
     }
+    for (const auto &[at, amount] : o.hurtEnemies)
+        if (due(at))
+        {
+            uint8_t *ram = h.runtime->memory().getRDRAM();
+            for (const kh2state::ActorInfo &a : kh2state::actors(ram))
+            {
+                if (a.type != 3 && a.type != 4)
+                    continue;
+                uint32_t sheet = 0;
+                std::memcpy(&sheet, ram + ((a.address + 0x48C) & 0x01FFFFFFu), 4);
+                if (sheet < 0x00100000u || sheet >= 0x02000000u)
+                    continue;
+                int32_t hp;
+                std::memcpy(&hp, ram + sheet, 4);
+                const int32_t to = hp - amount > 0 ? hp - amount : 0;
+                std::memcpy(ram + sheet, &to, 4);
+                std::printf("[harness] hurt %04X %08X: hp %d -> %d\n", a.entryId, a.address, hp, to);
+            }
+            std::fflush(stdout);
+        }
     for (const auto &t : o.teleports)
         if (due(t.frame))
         {

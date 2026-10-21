@@ -1,0 +1,4 @@
+# Title menu: LOAD (memory card listing). Run with --mash=CIRCLE:40 --mash-until=900.
+1360  6   DOWN
+1420  6   CIRCLE
+1600  6   CIRCLE

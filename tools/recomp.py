@@ -7,9 +7,13 @@ Steps (run from the repository root after tools/extract_game.py):
   3. ps2_recomp config/overlays/<name>.toml   -> generated/ovl_<name>/
   4. tools/gen_overlay_tables.py              -> overlay dispatch tables
 
+After each ps2_recomp run the output is post-processed (slim_includes,
+forward_replaced) in a staging directory and only changed files are copied.
+
 Usage: recomp.py --recompiler PATH [--only main|overlays]
 """
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +33,87 @@ def run(cmd, log=None):
     else:
         code = subprocess.run(cmd, cwd=ROOT).returncode
     return code, time.time() - t
+
+
+DECL_RE = re.compile(r"^void (\w+)\(uint8_t\* ?rdram, R5900Context\* ?ctx, PS2Runtime ?\* ?runtime\);$", re.M)
+NAME_RE = re.compile(r"\b(\w+_0x[0-9a-f]+)\b")
+GLOBAL_INCLUDES = ('#include "ps2_recompiled_functions.h"\n', '#include "ps2_recompiled_stubs.h"\n')
+
+
+def slim_includes(tree: Path):
+    """Replace the all-functions headers in each generated file with
+    declarations of just the functions that file names.
+
+    ps2_recomp has every file include headers declaring every function, so
+    adding one function changed every file's dependencies and forced a full
+    rebuild (~18k objects). Calls mostly go through the runtime by address;
+    a typical file names no other function at all.
+    """
+    decls = {}
+    for header in ("ps2_recompiled_functions.h", "ps2_recompiled_stubs.h"):
+        h = tree / header
+        if h.exists():
+            for name in DECL_RE.findall(h.read_text(encoding="utf-8")):
+                decls[name] = f"void {name}(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);"
+    for cpp in tree.glob("*.cpp"):
+        if cpp.name == "register_functions.cpp" or cpp.name.startswith("overlay_table_"):
+            continue
+        text = cpp.read_text(encoding="utf-8")
+        if GLOBAL_INCLUDES[0] not in text:
+            continue
+        used = sorted(set(NAME_RE.findall(text)) & decls.keys())
+        block = "".join(f"{decls[n]}\n" for n in used)
+        text = text.replace(GLOBAL_INCLUDES[0], "// declarations (tools/recomp.py slim_includes)\n" + block, 1)
+        text = text.replace(GLOBAL_INCLUDES[1], "", 1)
+        cpp.write_text(text, encoding="utf-8")
+
+
+SIG_RE = re.compile(r"^void (\w+_0x([0-9a-f]+))\(uint8_t\* ?rdram, R5900Context\* ?ctx, PS2Runtime ?\* ?runtime\) \{$", re.M)
+STUB_CALL_RE = re.compile(r"^    ps2_(stubs|syscalls)::\w+\(rdram, ctx, runtime\);", re.M)
+FORWARD = """    {{ // tools/recomp.py: a tail jump (J) calls this directly; honour PS2Runtime::replaceFunction
+        static thread_local bool s_inReplacement = false;
+        const PS2Runtime::RecompiledFunction replacement =
+            g_ps2RecompiledFunctionTable[(0x{addr}u - g_ps2RecompiledFunctionTableBase) >> 2];
+        if (!s_inReplacement && replacement && replacement != &{name})
+        {{
+            s_inReplacement = true;
+            ctx->pc = 0x{addr}u;
+            replacement(rdram, ctx, runtime);
+            s_inReplacement = false;
+            return;
+        }}
+    }}
+"""
+
+
+def hle_addresses():
+    path = ROOT / "config" / "hle_functions.txt"
+    out = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            out.add(int(line.split()[0], 16))
+    return out
+
+
+def forward_replaced(tree: Path, hle: set):
+    """Make stub wrappers and HLE-replaced functions defer to the runtime's
+    function table, so a replacement installed at run time is reached even
+    through a tail jump, which the recompiler emits as a direct call."""
+    count = 0
+    for cpp in tree.glob("*.cpp"):
+        text = cpp.read_text(encoding="utf-8")
+        m = SIG_RE.search(text)
+        if not m:
+            continue
+        name, addr = m.group(1), int(m.group(2), 16)
+        if addr not in hle and not STUB_CALL_RE.search(text):
+            continue
+        insert = FORWARD.format(addr=f"{addr:x}", name=name)
+        text = text[:m.end()] + "\n" + insert.rstrip("\n") + text[m.end():]
+        cpp.write_text(text, encoding="utf-8")
+        count += 1
+    return count
 
 
 def sync_tree(src: Path, dst: Path):
@@ -66,6 +151,9 @@ def recompile(recompiler, config, outdir, label):
     code, secs = run([recompiler, str(staged_config.relative_to(ROOT))], log)
     files = list(staging.glob("*.cpp")) if staging.exists() else []
     if code == 0 and files:
+        slim_includes(staging)
+        if label == "main":
+            print(f"{label:11} {forward_replaced(staging, hle_addresses())} functions forward to replacements")
         changed, removed = sync_tree(staging, ROOT / outdir)
         print(f"{label:11} {changed} files changed, {removed} removed")
     summary = [l.strip() for l in log.read_text(encoding="utf-8", errors="replace").splitlines()

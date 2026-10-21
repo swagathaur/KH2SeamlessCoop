@@ -32,6 +32,11 @@ extra arguments.
 | `--shots=DIR` | Screenshot directory (default `shots`) |
 | `--input=SCRIPT` | Scripted controller input (file path or inline text, below) |
 | `--status-every=SEC` | Status line interval, 0 to disable (default 2) |
+| `--sound=native\|off` | Run the disc's sound driver (`LIBSD`, `LIBSSL`) on the emulated IOP, or stub it |
+| `--mute` | Keep the sound driver running but play nothing |
+| `--trace=ADDR[,ADDR...]` | Log the first 8 calls to each guest function (args, return address) and add per-function call counts to the status line |
+| `--gs-dump=A,B,...` | At these guest frames write `gs_XXXXXX.txt` (GS registers, draw contexts, display source, draws grouped by target, then the last 512 GS events in order: GIFtags, register writes, draws, transfers, presents) and `vram_XXXXXX.png` (all 4 MB of GS memory as a 1024×1024 32-bit image) |
+| `--dma-log=FRAME,COUNT` | From guest frame FRAME, decode the next COUNT GIF-channel `sceDmaSend` chains: every DMAtag, GIFtag and A+D register write |
 | `--missing=stop\|continue` | On a call into untranslated code: stop (default) or keep going |
 
 Guest frames are counted in vsyncs, so a script replays identically however fast

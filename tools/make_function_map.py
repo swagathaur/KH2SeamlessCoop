@@ -21,10 +21,13 @@ that lands in the main ELF must also be a function start there.
 Usage: make_function_map.py <decomp_dir> <out_csv> [analyzer_toml] [elf] [overlay ...]
        (overlay names read game/overlays/ovl_<name>.x and config/functions_<name>.csv)
 """
-import struct
 import re
+import struct
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from branchlib import extend_into_gaps  # noqa: E402
 
 IDENT = re.compile(r"[^A-Za-z0-9_]")
 
@@ -83,6 +86,10 @@ def read_analyzer_names(path: Path):
 
 
 ELF_TEXT_VA, ELF_TEXT_OFF, ELF_TEXT_SIZE = 0x00100000, 0x1000, 0x27A4B4
+# The decomp's map is dense up to the end of the SDK libraries; past that the
+# section is data with ten scattered functions (crt/end-of-image code), and
+# data there can look like code. Nothing is seeded past this address.
+SEED_LIMIT = 0x00325BCC  # end of the last decomp function before the data area
 CTORS_OFF, CTORS_SIZE = 0x27B4B4, 0x234
 
 
@@ -142,14 +149,14 @@ def fill_gaps(layout, elf_path: Path, entry_points=None):
             w = word(va)
             if w >> 26 in (2, 3):
                 t = (va & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
-                if ELF_TEXT_VA <= t < ELF_TEXT_VA + ELF_TEXT_SIZE and t not in layout and not in_function(t):
+                if ELF_TEXT_VA <= t < SEED_LIMIT and t not in layout and not in_function(t):
                     seeds.add(t)
     named = {}
     for t, n in (entry_points or {}).items():
-        if ELF_TEXT_VA <= t < ELF_TEXT_VA + ELF_TEXT_SIZE and t not in layout and not in_function(t):
+        if ELF_TEXT_VA <= t < SEED_LIMIT and t not in layout and not in_function(t):
             seeds.add(t)
             named[t] = f"{n}_{t:08x}"
-    code_end = max(covered_end.values())
+    code_end = min(max(covered_end.values()), SEED_LIMIT)
     for a, b in zip(starts, starts[1:]):
         va = covered_end[a]
         while va < b and va < code_end:
@@ -191,6 +198,16 @@ def overlay_targets(names):
     return out
 
 
+def extend_main_gaps(layout, elf_path: Path) -> int:
+    text = elf_path.read_bytes()[ELF_TEXT_OFF:ELF_TEXT_OFF + ELF_TEXT_SIZE]
+    word = lambda va: struct.unpack_from("<I", text, va - ELF_TEXT_VA)[0]
+    funcs = {s: [v["name"], v["end"]] for s, v in layout.items()}
+    n = extend_into_gaps(funcs, word, ELF_TEXT_VA, SEED_LIMIT)
+    for s, (_, e) in funcs.items():
+        layout[s]["end"] = e
+    return n
+
+
 def split_at_calls(layout, elf_path: Path, external=frozenset()):
     """JAL targets (and any branch from another binary) must be function starts:
     split a function such a branch lands inside, or seed one in a gap."""
@@ -206,7 +223,7 @@ def split_at_calls(layout, elf_path: Path, external=frozenset()):
                 targets.add((va & 0xF0000000) | ((w & 0x03FFFFFF) << 2))
     split = 0
     for t in sorted(targets):
-        if t in layout or not (ELF_TEXT_VA <= t < ELF_TEXT_VA + ELF_TEXT_SIZE):
+        if t in layout or not (ELF_TEXT_VA <= t < SEED_LIMIT):
             continue
         i = bisect.bisect_right(starts, t) - 1
         if i < 0:
@@ -228,6 +245,78 @@ def split_at_calls(layout, elf_path: Path, external=frozenset()):
     return split
 
 
+def pointer_targets(layout, elf_path: Path):
+    """Code addresses stored in data (vtables, callback tables, function pointers).
+
+    Scans every word of the loaded image that lies outside known function
+    bodies. A target in an unmapped gap is taken; a target inside a function is
+    taken only if it starts a stack frame, because switch jump tables also live
+    in data and point into the middle of functions.
+    """
+    import bisect
+    elf = elf_path.read_bytes()
+    text = elf[ELF_TEXT_OFF:ELF_TEXT_OFF + ELF_TEXT_SIZE]
+    starts = sorted(layout)
+    ends = [layout[s]["end"] for s in starts]
+    code_end = min(max(ends), SEED_LIMIT)
+
+    def owner(a):
+        i = bisect.bisect_right(starts, a) - 1
+        return i if i >= 0 and a < ends[i] else None
+
+    candidates = set()
+    for off in range(0, ELF_TEXT_SIZE - 3, 4):
+        va = ELF_TEXT_VA + off
+        if va < code_end and owner(va) is not None:
+            continue  # inside code
+        candidates.add(struct.unpack_from("<I", text, off)[0])
+    # Addresses built in code with lui + addiu/ori (callbacks passed as
+    # arguments, e.g. qsort comparators at 0x00320448).
+    for s0 in starts:
+        e0 = layout[s0]["end"]
+        for va in range(s0, e0, 4):
+            w = struct.unpack_from("<I", text, va - ELF_TEXT_VA)[0]
+            if w >> 26 != 0x0F:
+                continue
+            rt, hi = (w >> 16) & 31, w & 0xFFFF
+            for k in range(1, 9):
+                if va + 4 * k >= e0:
+                    break
+                w2 = struct.unpack_from("<I", text, va + 4 * k - ELF_TEXT_VA)[0]
+                op2 = w2 >> 26
+                if op2 in (0x09, 0x0D) and (w2 >> 21) & 31 == rt:
+                    lo = w2 & 0xFFFF
+                    if op2 == 0x09 and lo & 0x8000:
+                        lo -= 0x10000
+                    candidates.add(((hi << 16) + lo) & 0xFFFFFFFF)
+                    break
+    found = set()
+    for t in candidates:
+        if not (ELF_TEXT_VA <= t < code_end) or t & 3 or t in layout:
+            continue
+        w = struct.unpack_from("<I", text, t - ELF_TEXT_VA)[0]
+        if w == 0:
+            continue
+        i = owner(t)
+        after_return = t - 8 >= ELF_TEXT_VA and \
+            struct.unpack_from("<I", text, t - 8 - ELF_TEXT_VA)[0] == 0x03E00008  # jr $ra; delay
+        if w >> 16 == 0x27BD and (w & 0xFFFF) >= 0x8000:
+            found.add(t)            # stack-frame prologue: a real function start
+        elif after_return:
+            found.add(t)            # nothing falls through into it
+        elif i is None:
+            # In a gap: only if it directly follows a known function (after zero
+            # padding), as compiled functions are packed; data blobs that merely
+            # contain code-like values are not.
+            p = t - 4
+            while p >= ELF_TEXT_VA and owner(p) is None and \
+                    struct.unpack_from("<I", text, p - ELF_TEXT_VA)[0] == 0:
+                p -= 4
+            if owner(p) is not None:
+                found.add(t)
+    return found
+
+
 def main():
     decomp = Path(sys.argv[1])
     out = Path(sys.argv[2])
@@ -237,10 +326,14 @@ def main():
 
     layout = read_layout(decomp / "layout.tsv")
     if elf:
+        ptrs = pointer_targets(layout, elf)
+        print(f"code pointers in data: {len(ptrs)}")
+        external |= ptrs
         eps = read_analyzer_entry_points(analyzer)
         total, rounds = 0, 0
         while True:   # seeded functions can reveal further targets
             added = fill_gaps(layout, elf, eps) + split_at_calls(layout, elf, external)
+            added += extend_main_gaps(layout, elf)
             total, rounds = total + added, rounds + 1
             if added == 0 or rounds > 20:
                 break

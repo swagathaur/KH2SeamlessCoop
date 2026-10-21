@@ -45,6 +45,9 @@ MANUAL_STUBS = [
     # boot path by FUN_001AE590. Unbound, the guest runs the real async CD
     # command and waits forever (DQ8Recomp hit the same).
     ("sceCdSearchFile", "0x002F6FA0"),
+    # Interrupt-context cache flush (syscall -0x68), called from KH2's vsync
+    # handler every frame; unbound it logs an unimplemented-syscall warning.
+    ("iFlushCache", "0x003058D0"),
 ]
 
 

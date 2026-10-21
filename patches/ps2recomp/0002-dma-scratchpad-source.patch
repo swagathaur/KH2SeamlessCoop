@@ -1,0 +1,35 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 583cc81..39f3abe 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1244,6 +1244,14 @@ namespace
+ 
+     uint32_t toDmaPhys(uint32_t addr)
+     {
++        // A tag or payload pointer into the scratchpad as a program sees it
++        // (0x70000000-0x70003FFF). libdma converts these to the SPR form
++        // itself; without this the mask below turned them into 0x10000000,
++        // the I/O register area, and the transfer read garbage.
++        if (addr >= PS2_SCRATCHPAD_BASE && addr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
++        {
++            return addr;
++        }
+         if ((addr & 0x80000000u) != 0)
+         {
+             uint32_t lower = addr & 0x7FFFFFFFu;
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index bf0c884..54b95ec 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1462,6 +1462,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
+                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
+                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
++                        // Bit 63 of a DMAtag (bit 31 of ADDR's word) selects the
++                        // scratchpad; keep it as a 0x7000xxxx address so the
++                        // payload is read from SPR rather than low RDRAM.
++                        if ((tag >> 63) & 0x1ull)
++                            addr = PS2_SCRATCHPAD_BASE | (addr & (PS2_SCRATCHPAD_SIZE - 1u));
+                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+ 
+                         uint32_t dataAddr = 0;

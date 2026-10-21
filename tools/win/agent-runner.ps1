@@ -1,6 +1,7 @@
 # KH2 Co-op agent runner
 # Runs PowerShell job scripts that appear in <project>\.agent\jobs, natively on this PC.
 # For each job NAME.ps1 it writes NAME.started, NAME.out.log, NAME.err.log and NAME.exit.
+# Creating NAME.cancel while a job runs kills its whole process tree (exit -2).
 # Only runs while this window is open. Close the window to stop it.
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -28,8 +29,16 @@ while ($true) {
             -WorkingDirectory $root -NoNewWindow -PassThru `
             -RedirectStandardOutput "$base.out.log" -RedirectStandardError "$base.err.log"
         $null = $p.Handle   # keep a handle so ExitCode is available after exit
-        $p.WaitForExit()
-        $code = $p.ExitCode
+        $cancelled = $false
+        while (-not $p.WaitForExit(1000)) {
+            if (Test-Path "$base.cancel") {
+                & taskkill.exe /PID $p.Id /T /F | Out-Null
+                $p.WaitForExit()
+                $cancelled = $true
+                break
+            }
+        }
+        $code = if ($cancelled) { -2 } else { $p.ExitCode }
         "$code" | Set-Content -Path "$base.exit" -Encoding ASCII
         Write-Host ("[{0}] finished {1} (exit {2})" -f (Get-Date -Format 'HH:mm:ss'), $job.Name, $code)
     }

@@ -12,6 +12,9 @@ import struct
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from branchlib import extend_into_gaps  # noqa: E402
+
 BASE, ARENA_END = 0x01F18000, 0x01FC0000
 
 for name in sys.argv[1:]:
@@ -24,7 +27,65 @@ for name in sys.argv[1:]:
         funcs[int(a, 16)] = [n, int(b, 16)]
     limit = BASE + len(image)
     word = lambda va: struct.unpack_from("<I", image, va - BASE)[0]
-    total = 0
+    # Code pointers stored in the overlay's own data (vtables, callbacks): a
+    # target in a gap counts if it starts a stack frame or directly follows a
+    # function after zero padding (see make_function_map.py).
+    starts = sorted(funcs)
+    code_end = max(e for _, e in funcs.values())
+    def owner(a):
+        i = bisect.bisect_right(starts, a) - 1
+        return starts[i] if i >= 0 and a < funcs[starts[i]][1] else None
+    candidates = set()
+    for va in range(BASE, limit - 3, 4):
+        if not (va < code_end and owner(va) is not None):
+            candidates.add(word(va))
+    for s0 in list(starts):   # lui + addiu/ori address constants in code
+        e0 = funcs[s0][1]
+        for va in range(s0, e0, 4):
+            w = word(va)
+            if w >> 26 != 0x0F:
+                continue
+            rt, hi = (w >> 16) & 31, w & 0xFFFF
+            for k in range(1, 9):
+                if va + 4 * k >= e0:
+                    break
+                w2 = word(va + 4 * k)
+                if w2 >> 26 in (0x09, 0x0D) and (w2 >> 21) & 31 == rt:
+                    lo = w2 & 0xFFFF
+                    if w2 >> 26 == 0x09 and lo & 0x8000:
+                        lo -= 0x10000
+                    candidates.add(((hi << 16) + lo) & 0xFFFFFFFF)
+                    break
+    ptr_added = 0
+    for t in sorted(candidates):
+        if not (BASE <= t < code_end) or t & 3 or t in funcs:
+            continue
+        w = word(t)
+        if not w:
+            continue
+        prologue = w >> 16 == 0x27BD and (w & 0xFFFF) >= 0x8000
+        after_return = t - 8 >= BASE and word(t - 8) == 0x03E00008
+        own = owner(t)
+        if own is not None:
+            if not (prologue or after_return):
+                continue
+            funcs[t] = [f"{name}_FUN_{t:08x}", funcs[own][1]]
+            funcs[own][1] = t
+        else:
+            p = t - 4
+            while p >= BASE and owner(p) is None and word(p) == 0:
+                p -= 4
+            if not (prologue or owner(p) is not None):
+                continue
+            i = bisect.bisect_right(starts, t)
+            nxt = starts[i] if i < len(starts) else limit
+            end = nxt
+            while end > t + 4 and word(end - 4) == 0:
+                end -= 4
+            funcs[t] = [f"{name}_FUN_{t:08x}", end]
+        starts = sorted(funcs)
+        ptr_added += 1
+    total = ptr_added + extend_into_gaps(funcs, word, BASE, limit)
     for _ in range(20):
         starts = sorted(funcs)
         added = 0

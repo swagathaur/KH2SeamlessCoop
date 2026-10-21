@@ -85,10 +85,11 @@ function(kh2_generated_library target dir)
     add_library(${target} STATIC ${sources})
     target_include_directories(${target} PRIVATE "${dir}" ${KH2_RUNTIME_INCLUDES})
     target_compile_options(${target} PRIVATE ${KH2_GENERATED_FLAGS})
+    # Generated files declare only the functions they name (tools/recomp.py
+    # slim_includes), so the all-functions headers stay out of the PCH: adding
+    # a function no longer forces every object to rebuild.
     target_precompile_headers(${target} PRIVATE
-        <ps2_runtime_macros.h> <ps2_runtime.h>
-        <ps2_recompiled_functions.h> <ps2_recompiled_stubs.h>
-        <ps2_syscalls.h> <ps2_stubs.h>)
+        <ps2_runtime_macros.h> <ps2_runtime.h> <ps2_syscalls.h> <ps2_stubs.h>)
     message(STATUS "kh2: ${target}: ${count} translation units")
 endfunction()
 
@@ -108,6 +109,10 @@ add_executable(kh2recomp
     port/runtime/main.cpp
     port/runtime/overlay_manager.cpp
     port/runtime/pad2_hle.cpp
+    port/runtime/cd_iso.cpp
+    port/runtime/trace.cpp
+    port/runtime/dma_log.cpp
+    port/runtime/gs_image.cpp
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ps2_runtime)

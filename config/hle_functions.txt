@@ -1,0 +1,25 @@
+# Guest functions that port/runtime replaces with PS2Runtime::replaceFunction.
+#
+# A JAL goes through the runtime's function table and reaches a replacement,
+# but the recompiler turns a tail jump (J) into a direct C++ call to the
+# translated function, which bypasses it. tools/recomp.py gives every function
+# listed here (and every generated stub wrapper) a forwarder to whatever the
+# table holds. Add an address here when port code starts replacing it.
+#
+# address     what                      replaced in
+0x002F6FA0    sceCdSearchFile           cd_iso.cpp
+0x002F28B8    sceGsSetDefLoadImage      gs_image.cpp
+0x002F2BE0    sceGsExecLoadImage        gs_image.cpp
+0x002F3918    sceDmaSend                dma_log.cpp (--dma-log)
+0x002F5C70    scePad2Init               pad2_hle.cpp
+0x002F5CB0    scePad2End                pad2_hle.cpp
+0x002F5D18    scePad2CreateSocket       pad2_hle.cpp
+0x002F5E20    scePad2DeleteSocket       pad2_hle.cpp
+0x002F5E78    scePad2Read               pad2_hle.cpp
+0x002F5F50    scePad2GetButtonProfile   pad2_hle.cpp
+0x002F6020    scePad2GetState           pad2_hle.cpp
+0x002F6160    scePad2GetButtonInfo      pad2_hle.cpp
+0x002F6440    scePad2SetButtonOrder     pad2_hle.cpp
+0x002F4A78    sceDbcInit                pad2_hle.cpp
+0x002F6528    sceVibGetProfile          pad2_hle.cpp
+0x002F65A8    sceVibSetActParam         pad2_hle.cpp

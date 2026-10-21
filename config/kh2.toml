@@ -180,6 +180,7 @@ stubs = [
     "sceSifLoadModuleBuffer@0x0030E508",
     "sceSifCallRpc@0x003094B8",
     "sceCdSearchFile@0x002F6FA0",
+    "iFlushCache@0x003058D0",
 ]
 skip = []
 

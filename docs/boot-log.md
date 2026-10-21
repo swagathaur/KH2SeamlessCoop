@@ -1,0 +1,150 @@
+# Boot log
+
+Each blocker hit on the way to the title screen, how it showed up in the
+headless harness, and the fix. Newest last.
+
+## 1. Spinning in `InitSystemCallTableAddress` (crt0 → `_InitSys`)
+
+**Symptom:** 600 vsyncs, no display, no overlay. With `PS2X_KERNEL_TRACE_MS`,
+the only thread sat at `0x0030EFE0` forever.
+
+**Cause:** Sony's `_InitSys` installs two kernel-mode helpers with
+`SetSyscall` (`kFindAddress` at `0x0030EED0` as syscall 0x83, `kCopy` at
+`0x0030EE98` as 0x5A), then calls them to locate the kernel syscall table.
+Both sat in a gap of the decomp's function map (leaf functions, no stack
+prologue), and the runtime fails a redirected syscall whose handler has no
+translated function. The search then never terminates.
+
+**Fix:** `make_function_map.py` seeds every analyzer signature match
+(`untracked_stubs`) that falls in an unmapped gap.
+
+## 2. Jump to `0x002F1268` with no translated function
+
+**Symptom:** exit 1 at guest frame 11:
+`[guest-branch:missing-target] kind=DirectJump op=J source=0x2f1284 target=0x2f1268`.
+
+**Cause:** an empty `jr $ra` function reached only by a tail jump; no prologue,
+so neither Ghidra nor prologue seeding found it. A static check found 79 more
+branches like it in the main ELF and ~100 from the overlays into the main ELF.
+
+**Fix:** `make_function_map.py` now iterates to a fixpoint: every J/JAL target
+outside known functions becomes a function, a call landing inside a function
+splits it, and branches from the overlays into the main ELF count too (they
+must land on function starts). Seeded functions keep their branch delay slot.
+`fix_overlay_maps.py` does the same within each overlay; `check_function_map.py`
+reports what is left (8 tail jumps into shared epilogues, which the recompiler
+handles as internal entry points).
+
+## 3. SDK wrappers the analyzer does not recognise (pre-emptive)
+
+Found by reading the boot path rather than by a failed run:
+
+| Wrapper | Address | Why it matters |
+|---|---|---|
+| `sceSifLoadModule` | `0x0030E770` | KH2 retries a module load forever until it succeeds |
+| `sceSifLoadModuleBuffer` | `0x0030E508` | IRX images loaded from memory |
+| `sceSifCallRpc` | `0x003094B8` | RPCs should go through the runtime's IOP model (DQ8Recomp does the same) |
+| `sceCdSearchFile` | `0x002F6FA0` | Called during startup (`FUN_001AE590`); unbound, the real async CD path waits forever (DQ8Recomp hit this) |
+
+All four are bound by hand in `tools/gen_stubs.py` (`MANUAL_STUBS`).
+
+## 4. Indirect call to `0x001061D0` with no translated function
+
+**Symptom:** exit 1 at guest frame 11:
+`[guest-branch:missing-target] kind=IndirectCall op=JALR source=0x1024cc target=0x1061d0`
+(the main thread creating its memory allocator).
+
+**Cause:** a leaf virtual method (`kn::MemoryAllocator` allocation) reached only
+through a vtable; no direct branch or prologue points at it.
+
+**Fix:** `make_function_map.py` scans data for code pointers (833 found). A
+target counts if it starts a stack frame, or if it sits in an unmapped gap
+directly after a known function (zero padding allowed). The second condition
+and a seeding limit at the end of dense code (`0x00325BCC`, past which the
+section is data with ten scattered functions) keep data that merely looks like
+code from becoming functions. `fix_overlay_maps.py` applies the same rule to the
+overlays.
+
+## 5. Sound driver up; archive lookup fails (`\OVL.IMG;1`)
+
+**Symptom:** the run reached its 1,200-frame target (no crash) but nothing was
+drawn and no overlay loaded. The log showed the emulated IOP starting Sony's
+`LIBSD` and Square Enix's sound driver ("Square-Enix SoundDriver … by Hitoshi
+Ohori", RPC server 17), then `sceCdSearchFile failed: \OVL.IMG;1` repeating
+forever with the main thread waiting at `0x001AE5F8`.
+
+**Cause:** the runtime's `sceCdSearchFile` only finds loose files under the CD
+root and assigns them pseudo sector numbers from `0x100000`. `KH2.IMG` and
+`OVL.IMG` exist only inside the ISO, and `KH2.IMG` itself extends past sector
+`0x100000` on this disc, so loose copies would collide with real sectors.
+
+**Fix:** `port/runtime/cd_iso.cpp` indexes the ISO9660 directory at start-up
+and replaces `sceCdSearchFile` (`0x002F6FA0`) to return each file's real LSN
+and size. Sector reads outside registered loose files already go straight to
+the ISO, so the archives are read in place.
+
+Also: `iFlushCache` (syscall -0x68), called by KH2's vsync handler every frame,
+is now bound to the runtime's handler instead of logging an unimplemented
+syscall each time.
+
+## Build-time note: incremental rebuilds
+
+`ps2_recomp` makes every generated file include headers that declare every
+function, so adding one function to the map forced a full ~15-minute rebuild.
+`tools/recomp.py` now rewrites each file to declare only the functions it
+names (most name none; calls go through the runtime by address), and those
+headers are out of the precompiled header.
+
+## 6. Title overlay running, screen black: GIF DMA from scratchpad
+
+**Symptom:** the title overlay was resident and the main loop ran every frame,
+but every screenshot was black. `--gs-dump` showed zero draw events; GS memory
+held only texture uploads (`sceGsExecLoadImage`). `--trace` showed
+`sceDmaSend(0x1000A000, 0x70000000)` (GIF channel, source in scratchpad)
+thousands of times per second.
+
+**Cause:** KH2 builds its GIF packets in scratchpad and sends them from there.
+The runtime's `toDmaPhys` only recognised the bit-31 SPR form
+(`0x8000xxxx`) and masked `0x70000000` down to `0x10000000`, the I/O register
+area, so every packet the GS should have drawn was read from the wrong place.
+Separately, a chain DMAtag with bit 63 set (payload in SPR) lost that bit when
+the tag's ADDR field was masked.
+
+**Fix:** `patches/ps2recomp/0002-dma-scratchpad-source.patch` keeps
+`0x70000000`–`0x70003FFF` as scratchpad addresses in `toDmaPhys`, and maps a
+tag's SPR bit to a scratchpad address in the chain walker.
+
+Two more things kept the screen black after that, found with the GS dump
+(which had been reporting "0 events" only because the GS frontend's history
+recorder starts paused; `--gs-dump` now unpauses it):
+
+## 7. Textures uploaded 8x too far into GS memory
+
+**Symptom:** draws reached the GS (logo triangles into an off-screen buffer at
+FBP 216, then a strip copy to the display buffer), but sampled empty VRAM.
+
+**Cause:** the runtime's `sceGsSetDefLoadImage`/`sceGsExecLoadImage` read the
+`dbp` argument as a 2 KB-unit address and multiplied it by 8. In libgraph it is
+already BITBLTBUF.DBP (64-word units). Texture 13824 went to
+13824 × 8 mod 16384 = 12288, its CLUT 13568 to 10240.
+
+**Fix:** `port/runtime/gs_image.cpp` replaces both with libgraph's real
+96-byte `sceGsLoadImage` packet (GIFtag, BITBLTBUF, TRXPOS, TRXREG, TRXDIR,
+IMAGE GIFtag) and sends header plus image as one PATH3 packet.
+
+## 8. Tail jumps bypass replaced functions
+
+**Symptom:** with the fix above the texture arrived but its CLUT never did.
+
+**Cause:** KH2 uploads the CLUT with a tail jump (`j sceGsExecLoadImage`).
+The recompiler emits a JAL as a dispatch through the runtime's function table,
+where `replaceFunction` takes effect, but a J as a direct C++ call to the
+translated function or stub wrapper, which skips any replacement.
+
+**Fix:** `tools/recomp.py` (`forward_replaced`) gives every generated stub
+wrapper, and every function listed in `config/hle_functions.txt`, a forwarder
+to whatever the function table holds for its address (guarded so a wrapper can
+still call the original). Port code that replaces a non-stub function must add
+it to that list.
+
+**Result:** the boot logos and the copyright screen render.

@@ -250,12 +250,33 @@ void dumpGs(Harness &h, uint64_t frame)
         std::fprintf(f, "native image uploads %llu, native packed GIF packets %llu\n",
                      (unsigned long long)gs.nativeImageUploadCount(),
                      (unsigned long long)gs.nativePackedGIFPacketCount());
-        // Recent GS events (the frontend keeps the last 512), grouped by draw target.
+        // The last complete frame: events between the last two presents
+        // (the frontend keeps the most recent 32k events, patch 0006).
         const auto history = gs.getDebugHistory();
-        std::map<std::string, std::pair<int, std::string>> groups;
-        int kinds[5] = {};
-        for (const GSDebugHistoryEntry &e : history)
+        size_t frameEnd = history.size(), frameBegin = 0;
+        for (size_t i = history.size(); i-- > 0;)
+            if (history[i].kind == GSDebugEventKind::Present)
+            {
+                if (frameEnd == history.size())
+                    frameEnd = i;
+                else
+                {
+                    frameBegin = i + 1;
+                    break;
+                }
+            }
+        struct Group
         {
+            int draws = 0;
+            double area = 0;
+            std::string example;
+        };
+        std::map<std::string, Group> groups;
+        int kinds[5] = {};
+        double totalArea = 0;
+        for (size_t i = frameBegin; i < frameEnd; ++i)
+        {
+            const GSDebugHistoryEntry &e = history[i];
             kinds[std::min<int>(4, (int)e.kind)]++;
             if (e.kind != GSDebugEventKind::Draw)
                 continue;
@@ -267,18 +288,30 @@ void dumpGs(Harness &h, uint64_t frame)
             std::snprintf(eg, sizeof(eg), "verts=%u x %.0f..%.0f y %.0f..%.0f a %u..%u test=%llx alpha=%llx",
                           e.vertexCount, e.xMin, e.xMax, e.yMin, e.yMax, e.aMin, e.aMax,
                           (unsigned long long)e.test, (unsigned long long)e.alpha);
-            auto &g = groups[key];
-            g.first++;
-            g.second = eg;
+            Group &g = groups[key];
+            g.draws++;
+            const double area = std::max(0.0, (double)(e.xMax - e.xMin)) * std::max(0.0, (double)(e.yMax - e.yMin));
+            g.area += area;
+            totalArea += area;
+            g.example = eg;
         }
-        std::fprintf(f, "history: %zu events (giftag %d, register %d, draw %d, transfer %d, present %d)\n",
-                     history.size(), kinds[0], kinds[1], kinds[2], kinds[3], kinds[4]);
+        std::fprintf(f, "last frame: events %zu..%zu of %zu (giftag %d, register %d, draw %d, transfer %d, present %d), "
+                        "draw bounding boxes %.0f px\n",
+                     frameBegin, frameEnd, history.size(), kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], totalArea);
+        std::vector<std::pair<double, std::string>> order;
         for (const auto &[key, g] : groups)
-            std::fprintf(f, "  draws x%-4d %s | e.g. %s\n", g.first, key.c_str(), g.second.c_str());
-        // Then every recorded event in order, for following one frame's packets.
-        static const char *kKinds[] = {"giftag", "reg", "draw", "xfer", "present"};
-        for (const GSDebugHistoryEntry &e : history)
+            order.push_back({g.area, key});
+        std::sort(order.rbegin(), order.rend());
+        for (const auto &[area, key] : order)
         {
+            const Group &g = groups[key];
+            std::fprintf(f, "  draws x%-5d area %9.0f  %s | e.g. %s\n", g.draws, area, key.c_str(), g.example.c_str());
+        }
+        // Then every event of that frame in order.
+        static const char *kKinds[] = {"giftag", "reg", "draw", "xfer", "present"};
+        for (size_t i = frameBegin; i <= frameEnd && i < history.size(); ++i)
+        {
+            const GSDebugHistoryEntry &e = history[i];
             const int k = std::min<int>(4, (int)e.kind);
             std::fprintf(f, "%6llu v%-5llu %-7s ", (unsigned long long)e.seq, (unsigned long long)e.vsyncTick,
                          kKinds[k]);

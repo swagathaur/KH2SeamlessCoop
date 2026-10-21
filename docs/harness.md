@@ -80,3 +80,16 @@ The input facility is PS2Recomp's `DQ8_PAD_SCRIPT` (from DQ8Recomp's fork);
 - `[status]` lines: wall time, guest frame, resident overlay, overlay switches
 - `[kh2-overlay]` lines: each time a different overlay becomes resident
 - `[harness]` lines: screenshots, frame target, timeout, final exit code
+
+## Debugging the 3D path
+
+| Tool | Use |
+|---|---|
+| `PS2X_KERNEL_TRACE_MS=N` (env) | Every N ms, print each guest thread's state, PC, RA and wait object, and semaphores with waiters, to stderr |
+| `PS2_VU_CAPTURE_DIR=DIR` (env) | Write VU1 program starts (`.code` microcode, `.data` VU memory, `.state` registers incl. TOP/ITOP) to DIR, for calls 1, 2, 4, 8, … per program |
+| `python tools/vudis.py X.code [start] [count]` | Disassemble captured VU microcode (upper/lower pairs; addresses are pair indices) |
+| `--gs-dump=F` | The dump covers the last complete frame (up to 32k GS events, patch 0006): draws grouped by target and texture with their total bounding-box area (largest first), then every event in order |
+
+Changing a runtime header that `ps2_runtime.h` includes rebuilds all ~20k
+generated objects (they share it through the precompiled header); prefer
+changes in `.cpp` files.

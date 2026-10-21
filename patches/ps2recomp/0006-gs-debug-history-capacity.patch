@@ -1,0 +1,18 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index b754133..893d8ea 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -233,8 +233,11 @@ private:
+     uint64_t m_nativeImageUploadCount = 0;
+     uint64_t m_nativePackedGIFPacketCount = 0;
+ 
+-    static constexpr size_t kDebugHistoryCapacity = 512;
+-    std::array<GSDebugHistoryEntry, kDebugHistoryCapacity> m_debugHistory{};
++    // Large enough for a whole 3D frame's events (a frame is thousands of
++    // register writes and draws); heap-allocated, as the GS lives inside
++    // PS2Runtime, which embedders may put on the stack.
++    static constexpr size_t kDebugHistoryCapacity = 32768;
++    std::vector<GSDebugHistoryEntry> m_debugHistory = std::vector<GSDebugHistoryEntry>(kDebugHistoryCapacity);
+     size_t m_debugHistoryWrite = 0;
+     size_t m_debugHistoryCount = 0;
+     uint64_t m_debugNextSeq = 1;

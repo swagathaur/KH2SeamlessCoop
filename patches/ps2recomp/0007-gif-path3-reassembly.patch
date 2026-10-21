@@ -1,0 +1,82 @@
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index c289ba0..fb2317c 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,6 +1,47 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include <algorithm>
+ #include <cstring>
++#include <mutex>
++#include <unordered_map>
++
++namespace
++{
++    // PATH3 reassembly. The GIF keeps its place in a packet across DMA
++    // transfers: a game may send an IMAGE GIFtag (or a PACKED one) in one
++    // transfer and its payload in the next. GS::processGIFPacket parses every
++    // submission as starting with a GIFtag, so a split payload was read as new
++    // tags (random TEX0 writes, phantom primitives). Each arbiter keeps the
++    // unfinished tail of its PATH3 stream here and forwards only whole tags.
++    // Kept out of the class so the header (in every generated file's
++    // precompiled header) stays unchanged.
++    struct Path3Partial
++    {
++        std::vector<uint8_t> bytes;
++    };
++    std::mutex g_partialMutex;
++    std::unordered_map<const GifArbiter *, Path3Partial> g_partial;
++
++    // Bytes taken by the GIFtag at data[0] and its payload, or 0 if unknown.
++    uint64_t gifTagSpan(const uint8_t *data)
++    {
++        uint64_t tagLo = 0;
++        std::memcpy(&tagLo, data, sizeof(tagLo));
++        const uint64_t nloop = tagLo & 0x7FFFu;
++        const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
++        uint64_t nreg = (tagLo >> 60) & 0xFu;
++        if (nreg == 0u)
++            nreg = 16u;
++        switch (flg)
++        {
++        case 0u:
++            return 16u + nloop * nreg * 16u;
++        case 1u:
++            return 16u + ((nloop * nreg + 1u) & ~1ull) * 8u;
++        default: // IMAGE, and 3 which behaves as IMAGE
++            return 16u + nloop * 16u;
++        }
++    }
++}
+ 
+ GifArbiter::GifArbiter(ProcessPacketFn processFn)
+     : m_processFn(std::move(processFn))
+@@ -23,6 +64,29 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
+     if (!data || sizeBytes < 16 || !m_processFn)
+         return;
+ 
++    std::vector<uint8_t> assembled;
++    if (pathId == GifPathId::Path3)
++    {
++        std::lock_guard<std::mutex> lock(g_partialMutex);
++        std::vector<uint8_t> &tail = g_partial[this].bytes;
++        tail.insert(tail.end(), data, data + (sizeBytes & ~15u));
++        // Forward everything up to the end of the last complete GIFtag.
++        size_t offset = 0;
++        while (offset + 16u <= tail.size())
++        {
++            const uint64_t span = gifTagSpan(tail.data() + offset);
++            if (offset + span > tail.size())
++                break;
++            offset += static_cast<size_t>(span);
++        }
++        if (offset == 0u)
++            return;
++        assembled.assign(tail.begin(), tail.begin() + static_cast<std::ptrdiff_t>(offset));
++        tail.erase(tail.begin(), tail.begin() + static_cast<std::ptrdiff_t>(offset));
++        data = assembled.data();
++        sizeBytes = static_cast<uint32_t>(assembled.size());
++    }
++
+     GifArbiterPacket pkt;
+     pkt.pathId = pathId;
+     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;

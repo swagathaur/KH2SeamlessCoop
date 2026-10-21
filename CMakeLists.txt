@@ -129,3 +129,11 @@ if(MSVC)
     target_link_options(kh2recomp PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
 ps2x_stage_ffmpeg_runtime_dlls(kh2recomp)
+
+# --- Tools linked against the runtime --------------------------------------
+# kh2vureplay: run a captured VU1 program (PS2_VU_CAPTURE_DIR) and decode its
+# XGKICK packets. Built on request: cmake --build build\win --target kh2vureplay
+add_executable(kh2vureplay EXCLUDE_FROM_ALL tools/vureplay/vureplay.cpp)
+target_include_directories(kh2vureplay PRIVATE ${KH2_RUNTIME_INCLUDES})
+target_link_libraries(kh2vureplay PRIVATE ps2_runtime)
+ps2x_stage_ffmpeg_runtime_dlls(kh2vureplay)

@@ -9,8 +9,13 @@
 // ovl_movie keeps the bytes still to read in a u64 at 0x01F294E0 and a
 // "read in flight" byte at 0x01F294E8. Polled once per frame while the movie
 // overlay is resident: 0 -> nonzero starts a stream, nonzero -> 0 with no read
-// in flight is the end of it. With --skip-movies the remaining count is
-// zeroed as soon as a stream starts, which ends the movie almost at once.
+// in flight is the end of it.
+//
+// --skip-movies does what the player's own skip does: ovl_movie keeps its
+// playback state in a word at 0x01F29470; setting it to 1 (0x01F1B5F0 is the
+// game's setter) makes the decoder thread stop, which then sets 3 (finished)
+// and the player shuts its threads down. Zeroing the bytes-remaining count instead left the
+// decoder waiting for pictures forever after the opening.
 
 #include "movie_eof.h"
 
@@ -32,6 +37,7 @@ namespace
 {
 constexpr uint32_t kRemainingBytes = 0x01F294E0u; // u64
 constexpr uint32_t kReadBusy = 0x01F294E8u;       // u8
+constexpr uint32_t kPlayState = 0x01F29470u;      // u32: 1 = stop requested, 3 = decoder finished
 bool g_streaming = false;
 bool g_skip = false;
 unsigned g_streams = 0;
@@ -52,13 +58,22 @@ void poll(PS2Runtime &runtime)
     const bool busy = rdram[kReadBusy] != 0;
     static unsigned s_polls = 0;
     if (g_streaming && (++s_polls % 2000u) == 0u)
-        std::printf("[kh2-movie] streaming: remaining=%lld busy=%d\n", (long long)remaining, (int)busy);
-    if (g_skip && g_streaming && !busy && remaining != 0)
+        std::printf("[kh2-movie] streaming: remaining=%lld busy=%d state=%u\n", (long long)remaining, (int)busy,
+                    *reinterpret_cast<const uint32_t *>(rdram + kPlayState));
+    static bool s_stopSent = false;
+    if (!g_streaming)
+        s_stopSent = false;
+    if (g_skip && g_streaming && !s_stopSent)
     {
-        // A read that was in flight when the count was zeroed subtracts from it
-        // on completion (leaving it negative); zero it again once it lands.
-        remaining = 0;
-        std::memcpy(runtime.memory().getRDRAM() + kRemainingBytes, &remaining, sizeof(remaining));
+        uint32_t state;
+        std::memcpy(&state, rdram + kPlayState, sizeof(state));
+        if (state != 1u && state != 3u)
+        {
+            s_stopSent = true;
+            const uint32_t stop = 1u;
+            std::memcpy(runtime.memory().getRDRAM() + kPlayState, &stop, sizeof(stop));
+            std::printf("[kh2-movie] stream %u: stop requested (--skip-movies)\n", g_streams);
+        }
     }
     if (!g_streaming && remaining != 0)
     {
@@ -66,13 +81,6 @@ void poll(PS2Runtime &runtime)
         ps2_stubs::notifyMpegCdStreamStart(&runtime);
         std::printf("[kh2-movie] stream %u started, %llu bytes%s\n", ++g_streams, (unsigned long long)remaining,
                     g_skip ? " (skipping)" : "");
-        if (g_skip)
-        {
-            // --skip-movies: pretend the file has been read; the player ends
-            // the movie once the runtime's libmpeg reports the stream over.
-            const uint64_t zero = 0;
-            std::memcpy(runtime.memory().getRDRAM() + kRemainingBytes, &zero, sizeof(zero));
-        }
     }
     else if (g_streaming && remaining == 0 && !busy)
     {

@@ -1,0 +1,163 @@
+diff --git a/ps2xIOP/src/lle/iop.h b/ps2xIOP/src/lle/iop.h
+index e580688..d6430e7 100644
+--- a/ps2xIOP/src/lle/iop.h
++++ b/ps2xIOP/src/lle/iop.h
+@@ -122,6 +122,13 @@ namespace ps2x::iop::lle
+             std::deque<uint32_t> messages;
+         };
+ 
++        // thvpool variable-length memory pools (patch 0014).
++        struct VariablePool
++        {
++            uint32_t attr = 0, option = 0, base = 0, size = 0;
++            std::map<uint32_t, uint32_t> used; // address -> size
++        };
++
+         struct Alarm
+         {
+             uint64_t cycle = 0;
+@@ -200,6 +207,7 @@ namespace ps2x::iop::lle
+         std::map<int32_t, Semaphore> m_semaphores;
+         std::map<int32_t, EventFlag> m_eventFlags;
+         std::map<int32_t, Mailbox> m_mailboxes;
++        std::map<int32_t, VariablePool> m_vpools;
+         std::multimap<uint32_t, Alarm> m_alarms; // keyed by handler
+         std::array<HardTimer, 6> m_timers{};
+         std::map<uint32_t, Interrupt> m_interrupts;
+diff --git a/ps2xIOP/src/lle/kernel.cpp b/ps2xIOP/src/lle/kernel.cpp
+index 0ff8fa1..514efdb 100644
+--- a/ps2xIOP/src/lle/kernel.cpp
++++ b/ps2xIOP/src/lle/kernel.cpp
+@@ -64,6 +64,14 @@ namespace ps2x::iop::lle
+             {"sifcmd", 16, "sifCallRpc"}, {"sifcmd", 17, "sifRegisterRpc"}, {"sifcmd", 19, "sifSetRpcQueue"},
+             {"sifcmd", 22, "sifRpcLoop"}, {"sifcmd", 23, "sifGetOtherData"}, {"sifcmd", 24, "sifRemoveRpc"},
+             {"sifcmd", 25, "noop"},
++            // thvpool (patch 0014): 4 CreateVpl, 5 DeleteVpl, 6 AllocateVpl,
++            // 7 pAllocateVpl, 8 ipAllocateVpl, 9 FreeVpl, 11/12 (i)ReferVplStatus.
++            // Square Enix's sound driver (LIBSSL) keeps its buffers in one.
++            {"thvpool", 4, "createVpl"}, {"thvpool", 5, "deleteVpl"}, {"thvpool", 6, "allocateVpl"},
++            {"thvpool", 7, "allocateVpl"}, {"thvpool", 8, "allocateVpl"}, {"thvpool", 9, "freeVpl"},
++            {"thvpool", 11, "referVplStatus"}, {"thvpool", 12, "referVplStatus"},
++            // cdvdman 28 sceCdStatus: the drive is idle (LIBSSL only polls it).
++            {"cdvdman", 28, "cdStatus"},
+             {"timrman", 4, "allocHardTimer"}, {"timrman", 6, "freeHardTimer"},
+             {"timrman", 10, "getTimerCounter"}, {"timrman", 20, "setTimerHandler"},
+             {"timrman", 22, "setupHardTimer"}, {"timrman", 23, "startHardTimer"},
+@@ -771,6 +779,103 @@ namespace ps2x::iop::lle
+         ret(c, 0);
+     }
+ 
++    // ---------------------------------------------------------------- variable-length pools
++
++    void Iop::createVpl(CpuContext &c)
++    {
++        // iop_vpl_param_t: attr, option, size.
++        VariablePool pool;
++        const uint32_t param = arg(c, 0);
++        pool.attr = m_bus.read32(param);
++        pool.option = m_bus.read32(param + 4u);
++        pool.size = (m_bus.read32(param + 8u) + 15u) & ~15u;
++        pool.base = allocate(pool.size);
++        if (pool.base == 0u)
++        {
++            ret(c, static_cast<uint32_t>(-400)); // KE_NO_MEMORY
++            return;
++        }
++        const int32_t id = m_nextId++;
++        m_vpools[id] = std::move(pool);
++        ret(c, static_cast<uint32_t>(id));
++    }
++
++    void Iop::deleteVpl(CpuContext &c)
++    {
++        const auto found = m_vpools.find(static_cast<int32_t>(arg(c, 0)));
++        if (found == m_vpools.end())
++        {
++            ret(c, static_cast<uint32_t>(-415)); // KE_UNKNOWN_VPLID
++            return;
++        }
++        release(found->second.base);
++        m_vpools.erase(found);
++        ret(c, 0);
++    }
++
++    void Iop::allocateVpl(CpuContext &c)
++    {
++        // First fit; never blocks (a blocking AllocateVpl that cannot be served
++        // returns 0 like the polling variants rather than sleeping).
++        const auto found = m_vpools.find(static_cast<int32_t>(arg(c, 0)));
++        const uint32_t size = (arg(c, 1) + 15u) & ~15u;
++        if (found == m_vpools.end() || size == 0u || size > found->second.size)
++        {
++            ret(c, 0);
++            return;
++        }
++        VariablePool &pool = found->second;
++        uint32_t cursor = pool.base;
++        for (const auto &[address, length] : pool.used)
++        {
++            if (address >= cursor + size)
++                break;
++            cursor = address + length;
++        }
++        if (cursor + size > pool.base + pool.size)
++        {
++            ret(c, 0);
++            return;
++        }
++        pool.used[cursor] = size;
++        ret(c, cursor);
++    }
++
++    void Iop::freeVpl(CpuContext &c)
++    {
++        const auto found = m_vpools.find(static_cast<int32_t>(arg(c, 0)));
++        if (found == m_vpools.end() || found->second.used.erase(arg(c, 1)) == 0u)
++        {
++            ret(c, static_cast<uint32_t>(-424)); // KE_ILLEGAL_MEMBLOCK
++            return;
++        }
++        ret(c, 0);
++    }
++
++    void Iop::referVplStatus(CpuContext &c)
++    {
++        // iop_vpl_info_t: attr, option, size, freeSize, numWaitThreads, reserved[3].
++        const auto found = m_vpools.find(static_cast<int32_t>(arg(c, 0)));
++        if (found == m_vpools.end())
++        {
++            ret(c, static_cast<uint32_t>(-415));
++            return;
++        }
++        const VariablePool &pool = found->second;
++        uint32_t used = 0;
++        for (const auto &[address, length] : pool.used)
++            used += length;
++        const uint32_t info = arg(c, 1);
++        m_bus.write32(info, pool.attr);
++        m_bus.write32(info + 4u, pool.option);
++        m_bus.write32(info + 8u, pool.size);
++        m_bus.write32(info + 12u, pool.size - used);
++        m_bus.write32(info + 16u, 0u);
++        ret(c, 0);
++    }
++
++    void Iop::cdStatus(CpuContext &c) { ret(c, 0); }
++
+     // ---------------------------------------------------------------- message boxes
+ 
+     void Iop::createMbx(CpuContext &c)
+diff --git a/ps2xIOP/src/lle/kernel_handlers.inc b/ps2xIOP/src/lle/kernel_handlers.inc
+index ac90ed2..cc00614 100644
+--- a/ps2xIOP/src/lle/kernel_handlers.inc
++++ b/ps2xIOP/src/lle/kernel_handlers.inc
+@@ -82,3 +82,9 @@ PS2X_IOP_HANDLER(setupHardTimer)
+ PS2X_IOP_HANDLER(startHardTimer)
+ PS2X_IOP_HANDLER(stopHardTimer)
+ PS2X_IOP_HANDLER(getTimerCounter)
++PS2X_IOP_HANDLER(createVpl)
++PS2X_IOP_HANDLER(deleteVpl)
++PS2X_IOP_HANDLER(allocateVpl)
++PS2X_IOP_HANDLER(freeVpl)
++PS2X_IOP_HANDLER(referVplStatus)
++PS2X_IOP_HANDLER(cdStatus)

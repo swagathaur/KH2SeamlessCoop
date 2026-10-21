@@ -16,6 +16,7 @@
 #include "cd_callback.h"
 
 #include <cstdio>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,8 @@ constexpr uint32_t kSceCdFuncRead = 1u;
 PS2Runtime::RecompiledFunction g_read = nullptr;
 uint32_t g_callback = 0;
 uint64_t g_fired = 0;
+uint64_t g_reads = 0;
+uint64_t g_failed = 0;
 
 void cdCallback(uint8_t *, R5900Context *ctx, PS2Runtime *)
 {
@@ -47,7 +50,11 @@ void cdCallback(uint8_t *, R5900Context *ctx, PS2Runtime *)
 
 void cdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t lsn = getRegU32(ctx, 4), sectors = getRegU32(ctx, 5), buf = getRegU32(ctx, 6);
     kh2::callOriginal(g_read, rdram, ctx, runtime); // reads synchronously, sets v0 and pc = ra
+    ++g_reads;
+    if (getRegU32(ctx, 2) == 0 && g_failed++ < 16)
+        std::printf("[kh2-cd] sceCdRead(lsn %u, %u sectors, buf 0x%08X) failed\n", lsn, sectors, buf);
     const uint32_t callback = g_callback;
     if (callback == 0 || getRegU32(ctx, 2) == 0 || !runtime->hasFunction(callback))
         return;
@@ -79,6 +86,14 @@ void cdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 } // namespace
+
+std::string stats()
+{
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), " cd: reads=%llu failed=%llu", (unsigned long long)g_reads,
+                  (unsigned long long)g_failed);
+    return buf;
+}
 
 bool installCallbacks(PS2Runtime &runtime)
 {

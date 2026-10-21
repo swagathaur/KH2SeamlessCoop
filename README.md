@@ -60,7 +60,7 @@ see [docs/harness.md](docs/harness.md).
 |---|---|---|
 | 0 | Toolchain | Function maps, configs, full recompile and a linked native build ✅ |
 | 1 | Boot | Native build reaches the title screen with sound ✅ (New Game and the opening movie run too) |
-| 2 | Playable | Twilight Town playable end to end at full speed (in progress: first in-engine scenes render on the GPU at full speed; widescreen, controller and rumble support) |
+| 2 | Playable | Twilight Town playable end to end at full speed (in progress: the opening plays through to the Usual Spot on the GPU renderer at full speed; settings menu, widescreen, controller and rumble support) |
 | 3 | Hook layer | ImGui overlay listing live actors; first function override working |
 | 4 | Ghost | Two instances on a LAN; one player's Sora shown as a puppet in the other's party |
 | 5+ | Co-op | Enemy sync, combat events, room transitions, cutscenes |

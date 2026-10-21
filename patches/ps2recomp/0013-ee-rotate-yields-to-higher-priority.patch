@@ -1,0 +1,22 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 0387318..83f50ed 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1092,6 +1092,17 @@ int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
+             queue.pop_front();
+             queue.push_back(head);
+         }
++        // patch 0013: the EE always runs its highest-priority ready thread. A
++        // thread that became ready without preempting the caller (KH2's movie
++        // player lowers its own priority and then spins on
++        // RotateThreadReadyQueue of the worker threads' priority, waiting for
++        // them to exit) must get the CPU here, or the caller spins forever.
++        if (self)
++        {
++            const int first = firstReadyPriority();
++            if (first >= 0 && first < self->currentPriority)
++                m_rescheduleRequested = true;
++        }
+     }
+     (void)interruptSafe;
+     publishSnapshot();

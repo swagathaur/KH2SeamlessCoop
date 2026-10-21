@@ -172,6 +172,15 @@ void stopAndReport()
                 (unsigned long long)active);
     std::printf("[profile] top functions by active samples, all threads (%% of active):\n");
     printTop(overall, active ? active : 1, 40, "[profile]   ");
+    // Translated guest functions only, further down the list.
+    {
+        std::map<std::string, uint64_t> guest;
+        for (const auto &[fn, n] : overall)
+            if (fn.find("_0x") != std::string::npos)
+                guest[fn] = n;
+        std::printf("[profile] top translated guest functions:\n");
+        printTop(guest, active ? active : 1, 60, "[profile]   guest ");
+    }
     for (size_t t = 0; t < perThread.size() && t < 6; ++t)
     {
         const DWORD tid = perThread[t].second;

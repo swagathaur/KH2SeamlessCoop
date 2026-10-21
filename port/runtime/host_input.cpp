@@ -38,6 +38,10 @@ int g_pad = -1; // XInput user index in use
 unsigned g_scanTick = 0;
 std::atomic<uint16_t> g_rumbleSmall{0}, g_rumbleLarge{0};
 uint16_t g_rumbleSentSmall = 0, g_rumbleSentLarge = 0;
+std::atomic<bool> g_rumbleOn{true};
+std::atomic<bool> g_suppressed{false};
+void (*g_comboFn)() = nullptr;
+bool g_comboHeld = false;
 
 uint8_t axisByte(int v, bool invert)
 {
@@ -62,6 +66,13 @@ uint8_t keyAxis(int lowKey, int highKey, uint8_t fallback)
 } // namespace
 
 void init(const Options &options) { g_opt = options; }
+void setRumbleEnabled(bool on) { g_rumbleOn = on; }
+bool rumbleEnabled() { return g_rumbleOn; }
+void setConfirmOnBottom(bool on) { g_opt.confirmOnBottom = on; }
+bool confirmOnBottom() { return g_opt.confirmOnBottom; }
+void setSuppressed(bool on) { g_suppressed = on; }
+void setMenuComboCallback(void (*fn)()) { g_comboFn = fn; }
+bool controllerConnected() { return g_pad >= 0; }
 
 void setRumble(float small, float large)
 {
@@ -119,7 +130,8 @@ void poll(bool keyboardFocus)
             rx = axisByte(st.Gamepad.sThumbRX, false);
             ry = axisByte(st.Gamepad.sThumbRY, true);
 
-            const uint16_t s = g_rumbleSmall, l = g_rumbleLarge;
+            const bool rumble = g_rumbleOn && !g_suppressed;
+            const uint16_t s = rumble ? g_rumbleSmall.load() : 0, l = rumble ? g_rumbleLarge.load() : 0;
             if (s != g_rumbleSentSmall || l != g_rumbleSentLarge)
             {
                 XINPUT_VIBRATION vib{l, s}; // left motor = low frequency (large)
@@ -154,6 +166,16 @@ void poll(bool keyboardFocus)
 #else
     (void)keyboardFocus;
 #endif
+    // Select+Start: settings menu.
+    const bool combo = (held & (PAD_SELECT | PAD_START)) == (PAD_SELECT | PAD_START);
+    if (combo && !g_comboHeld && g_comboFn)
+        g_comboFn();
+    g_comboHeld = combo;
+    if (g_suppressed || combo)
+    {
+        held = 0;
+        lx = ly = rx = ry = 0x80;
+    }
     const uint32_t pressed = held & ~g_prevHeld;
     g_prevHeld = held;
     const uint32_t sticks = (uint32_t(rx) << 24) | (uint32_t(ry) << 16) | (uint32_t(lx) << 8) | ly;

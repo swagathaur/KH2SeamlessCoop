@@ -27,6 +27,8 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <chrono>
+#include <functional>
 #include <mutex>
 
 #include "context.hpp"
@@ -35,6 +37,12 @@
 #include "shaders/slangmosh.hpp"
 #include "thread_id.hpp"
 #include "wsi.hpp"
+
+#include "imgui.h"
+#if defined(_WIN32)
+#include "backends/imgui_impl_win32.h"
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
 
 #include "runtime/gs/gs_gif_tap.h"
 #include "runtime/ps2_memory.h"
@@ -60,6 +68,15 @@ ScanoutResult g_last;
 VkImageLayout g_lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 Program *g_blitProgram = nullptr;
+Program *g_uiProgram[2] = {nullptr, nullptr}; // [textured]
+
+// On-screen UI (Dear ImGui): F1 toggles the settings menu, F2 the frame-rate
+// display. The menu itself is drawn by a callback (overlay_ui.cpp).
+std::function<void()> g_uiCallback;
+std::atomic<bool> g_menuOpen{false};
+std::atomic<bool> g_showFps{false};
+bool g_imguiReady = false;
+double g_toastUntil = 0.0;
 Program *g_upscaleProgram = nullptr;
 Program *g_sharpenProgram = nullptr;
 ImageHandle g_fsrTarget;
@@ -144,6 +161,8 @@ void toggleFullscreen()
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (g_imguiReady && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+        return 1;
     switch (msg)
     {
     case WM_CLOSE:
@@ -167,6 +186,16 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == VK_F11)
         {
             toggleFullscreen();
+            return 0;
+        }
+        if (wp == VK_F1)
+        {
+            g_menuOpen = !g_menuOpen;
+            return 0;
+        }
+        if (wp == VK_F2)
+        {
+            g_showFps = !g_showFps;
             return 0;
         }
         break;
@@ -403,7 +432,160 @@ void copyPrivRegisters(const GSRegisters &src)
         dst.qwords_lo[2 * 2] = 1ull;
 }
 
+double nowSeconds()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Frame rates: guest frames (vsyncs) and presented frames, over ~0.5 s.
+struct RateCounter
+{
+    double start = 0.0;
+    unsigned count = 0;
+    float rate = 0.0f;
+    void tick(double now)
+    {
+        if (start == 0.0)
+            start = now;
+        ++count;
+        if (now - start >= 0.5)
+        {
+            rate = float(count / (now - start));
+            start = now;
+            count = 0;
+        }
+    }
+};
+RateCounter g_guestRate, g_presentRate;
+
+// ImGui 1.92 texture requests (the font atlas), as Granite images.
+void uiUpdateTextures(CommandBuffer &cmd)
+{
+    for (ImTextureData *tex : ImGui::GetPlatformIO().Textures)
+    {
+        switch (tex->Status)
+        {
+        case ImTextureStatus_WantCreate:
+        {
+            ImageCreateInfo info = ImageCreateInfo::immutable_2d_image(tex->Width, tex->Height, VK_FORMAT_R8G8B8A8_UNORM);
+            info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            info.initial_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            ImageInitialData init = {tex->GetPixels()};
+            ImageHandle img = g_device->create_image(info, &init);
+            tex->SetTexID(reinterpret_cast<ImTextureID>(img.get()));
+            tex->BackendUserData = img.release();
+            tex->Status = ImTextureStatus_OK;
+            break;
+        }
+        case ImTextureStatus_WantUpdates:
+        {
+            auto *img = static_cast<Image *>(tex->BackendUserData);
+            const int x = tex->UpdateRect.x, y = tex->UpdateRect.y, w = tex->UpdateRect.w, h = tex->UpdateRect.h;
+            const int pitch = w * tex->BytesPerPixel;
+            cmd.image_barrier(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT,
+                              VK_ACCESS_TRANSFER_WRITE_BIT);
+            auto *dst = static_cast<uint8_t *>(cmd.update_image(*img, {x, y, 0}, {uint32_t(w), uint32_t(h), 1}, w, h,
+                                                                  {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}));
+            for (int row = 0; row < h; ++row)
+                std::memcpy(dst + size_t(pitch) * row, tex->GetPixelsAt(x, y + row), size_t(pitch));
+            cmd.image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            tex->Status = ImTextureStatus_OK;
+            break;
+        }
+        case ImTextureStatus_WantDestroy:
+            if (auto *img = static_cast<Image *>(tex->BackendUserData))
+                img->release_reference();
+            tex->SetTexID(ImTextureID_Invalid);
+            tex->BackendUserData = nullptr;
+            tex->Status = ImTextureStatus_Destroyed;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void uiDraw(CommandBuffer &cmd, uint32_t width, uint32_t height)
+{
+    const ImDrawData *data = ImGui::GetDrawData();
+    if (!data || data->CmdListsCount == 0)
+        return;
+    cmd.set_viewport({0, 0, float(width), float(height), 0, 1});
+    const float invSize[2] = {1.0f / float(width), 1.0f / float(height)};
+    for (int n = 0; n < data->CmdListsCount; ++n)
+    {
+        const ImDrawList *list = data->CmdLists[n];
+        std::memcpy(cmd.allocate_vertex_data(0, list->VtxBuffer.Size * sizeof(ImDrawVert), sizeof(ImDrawVert)),
+                    list->VtxBuffer.Data, list->VtxBuffer.Size * sizeof(ImDrawVert));
+        std::memcpy(cmd.allocate_index_data(list->IdxBuffer.Size * sizeof(ImDrawIdx), VK_INDEX_TYPE_UINT16),
+                    list->IdxBuffer.Data, list->IdxBuffer.Size * sizeof(ImDrawIdx));
+        cmd.set_vertex_attrib(0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ImDrawVert, pos));
+        cmd.set_vertex_attrib(1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(ImDrawVert, uv));
+        cmd.set_vertex_attrib(2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ImDrawVert, col));
+        for (int i = 0; i < list->CmdBuffer.Size; ++i)
+        {
+            const ImDrawCmd &dc = list->CmdBuffer[i];
+            const int x0 = int(std::max(0.0f, dc.ClipRect.x)), y0 = int(std::max(0.0f, dc.ClipRect.y));
+            const int x1 = int(std::min(float(width), dc.ClipRect.z)), y1 = int(std::min(float(height), dc.ClipRect.w));
+            if (x1 <= x0 || y1 <= y0)
+                continue;
+            cmd.set_scissor({{x0, y0}, {uint32_t(x1 - x0), uint32_t(y1 - y0)}});
+            auto *img = reinterpret_cast<Image *>(dc.GetTexID());
+            if (img)
+                cmd.set_texture(0, 0, img->get_view(), StockSampler::LinearClamp);
+            cmd.push_constants(invSize, 0, sizeof(invSize));
+            cmd.set_program(g_uiProgram[img ? 1 : 0]);
+            cmd.set_transparent_sprite_state();
+            cmd.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+            cmd.set_depth_test(false, false);
+            cmd.set_cull_mode(VK_CULL_MODE_NONE);
+            cmd.draw_indexed(dc.ElemCount, 1, dc.IdxOffset, int32_t(dc.VtxOffset), 0);
+        }
+    }
+}
+
 #if defined(_WIN32)
+// Builds this frame's UI; false when nothing is on screen.
+bool uiBuild()
+{
+    if (!g_imguiReady)
+        return false;
+    const double now = nowSeconds();
+    const bool toast = now < g_toastUntil;
+    if (!g_menuOpen && !g_showFps && !toast)
+        return false;
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    if (g_showFps)
+    {
+        ImGui::SetNextWindowPos(ImVec2(10, 10));
+        ImGui::SetNextWindowBgAlpha(0.45f);
+        ImGui::Begin("##fps", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::Text("game %.1f fps  |  display %.1f fps", g_guestRate.rate, g_presentRate.rate);
+        ImGui::End();
+    }
+    if (toast && !g_menuOpen)
+    {
+        const ImVec2 size = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(size.x - 10, size.y - 10), 0, ImVec2(1, 1));
+        ImGui::SetNextWindowBgAlpha(0.45f);
+        ImGui::Begin("##toast", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::TextUnformatted("F1 or Select+Start: settings   F2: frame rate   Alt+Enter: fullscreen");
+        ImGui::End();
+    }
+    if (g_menuOpen && g_uiCallback)
+        g_uiCallback();
+    ImGui::Render();
+    return true;
+}
+
 void present()
 {
     if (!g_platform->g_inFrame)
@@ -440,6 +622,9 @@ void present()
         }
     }
     auto cmd = dev.request_command_buffer();
+    const bool ui = uiBuild();
+    if (ui)
+        uiUpdateTextures(*cmd);
     const bool useFsr = g_opt.fsr && g_last.image && g_fsrTarget;
     if (useFsr)
         renderFsr(*cmd, g_last.image->get_view());
@@ -451,9 +636,12 @@ void present()
         else
             renderBlit(*cmd, g_last.image->get_view(), vpX, vpY, vpW, vpH);
     }
+    if (ui)
+        uiDraw(*cmd, dev.get_swapchain_view().get_view_width(), dev.get_swapchain_view().get_view_height());
     cmd->end_render_pass();
     dev.submit(cmd);
     g_wsi->end_frame();
+    g_presentRate.tick(nowSeconds());
     // Begin the next frame right away, for pacing (as the PCSX2 integration does).
     g_platform->g_inFrame = g_wsi->begin_frame();
 }
@@ -511,6 +699,9 @@ bool init(const Options &options)
     g_blitProgram = g_device->request_program(suite.quad, suite.blit);
     g_upscaleProgram = g_device->request_program(suite.upscale_vert, suite.upscale_frag);
     g_sharpenProgram = g_device->request_program(suite.sharpen_vert, suite.sharpen_frag);
+    // ui_frag[textured][sRGB backbuffer]; ours is UNORM.
+    g_uiProgram[0] = g_device->request_program(suite.ui_vert, suite.ui_frag[0][0]);
+    g_uiProgram[1] = g_device->request_program(suite.ui_vert, suite.ui_frag[1][0]);
 
     g_gs = std::make_unique<GSInterface>();
     GSOptions gsOpt = {};
@@ -527,6 +718,26 @@ bool init(const Options &options)
     std::printf("[pgs] paraLLEl-GS on %s, %ux super-sampling%s\n", props.deviceName, g_opt.superSampling,
                 g_opt.windowed ? ", windowed" : "");
 
+#if defined(_WIN32)
+    if (g_opt.windowed)
+    {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO &io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+        io.BackendRendererName = "kh2recomp-granite";
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
+        ImGui::StyleColorsDark();
+        const float dpi = ImGui_ImplWin32_GetDpiScaleForHwnd(g_hwnd);
+        const float scale = std::max(1.0f, dpi) * 1.25f;
+        ImGui::GetStyle().ScaleAllSizes(scale);
+        ImGui::GetStyle().FontScaleDpi = scale;
+        ImGui_ImplWin32_Init(g_hwnd);
+        g_imguiReady = true;
+        g_toastUntil = nowSeconds() + 8.0;
+    }
+#endif
     ps2SetGifTap(&tapPacket, &tapRegister, nullptr);
     ps2SetSoftwareRasterEnabled(g_opt.keepSoftwareRaster);
     g_active = true;
@@ -544,6 +755,20 @@ void shutdown()
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     g_device->wait_idle();
+#if defined(_WIN32)
+    if (g_imguiReady)
+    {
+        for (ImTextureData *tex : ImGui::GetPlatformIO().Textures)
+            if (auto *img = static_cast<Image *>(tex->BackendUserData))
+            {
+                img->release_reference();
+                tex->BackendUserData = nullptr;
+            }
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        g_imguiReady = false;
+    }
+#endif
     g_last = {};
     g_fsrTarget.reset();
     g_gs.reset();
@@ -587,6 +812,7 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
         info.dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT;
         info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
         g_last = g_gs->vsync(info);
+        g_guestRate.tick(nowSeconds());
         g_lastLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 #if defined(_WIN32)
         if (g_opt.windowed)
@@ -603,6 +829,55 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 }
 
 void setAspect(float aspect) { g_opt.aspect = aspect; }
+
+void setUiCallback(std::function<void()> draw) { g_uiCallback = std::move(draw); }
+bool menuOpen() { return g_menuOpen; }
+void setMenuOpen(bool open) { g_menuOpen = open; }
+void toggleMenu() { g_menuOpen = !g_menuOpen; }
+bool showFps() { return g_showFps; }
+void setShowFps(bool show) { g_showFps = show; }
+
+unsigned superSampling() { return g_opt.superSampling; }
+void setSuperSampling(unsigned n)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    registerThread();
+    if (!g_gs || n == g_opt.superSampling)
+        return;
+    g_opt.superSampling = n;
+    g_gs->set_super_sampling_rate(toSuperSampling(n), true, false);
+}
+bool fsr() { return g_opt.fsr; }
+void setFsr(bool on) { g_opt.fsr = on; }
+bool vsync() { return g_opt.vsync; }
+void setVsync(bool on)
+{
+#if defined(_WIN32)
+    g_opt.vsync = on;
+    if (g_wsi)
+        g_wsi->set_present_mode(on ? PresentMode::SyncToVBlank : PresentMode::UnlockedNoTearing);
+#else
+    (void)on;
+#endif
+}
+bool fullscreen()
+{
+#if defined(_WIN32)
+    return g_fullscreen;
+#else
+    return false;
+#endif
+}
+void setFullscreen(bool on)
+{
+#if defined(_WIN32)
+    if (g_hwnd && on != g_fullscreen)
+        toggleFullscreen();
+#else
+    (void)on;
+#endif
+}
+void requestClose() { g_closed = true; }
 
 bool pumpWindow()
 {

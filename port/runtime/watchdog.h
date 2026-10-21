@@ -7,4 +7,6 @@ namespace kh2watch
 void start(unsigned seconds);
 void beat();
 void stop();
+// Print every other thread's stack now (e.g. at a chosen guest frame).
+void dumpNow();
 } // namespace kh2watch

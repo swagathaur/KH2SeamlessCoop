@@ -16,4 +16,15 @@ void init(const Options &options);
 void poll(bool keyboardFocus);
 // Rumble, 0..1 for the small (high-frequency) and large (low-frequency) motor.
 void setRumble(float small, float large);
+void setRumbleEnabled(bool on);
+bool rumbleEnabled();
+// Confirm on the bottom face button (default) or the right one (Japanese layout).
+void setConfirmOnBottom(bool on);
+bool confirmOnBottom();
+// While suppressed (the settings menu is open) the game sees an idle pad.
+void setSuppressed(bool on);
+// Called when Select+Start are pressed together (opens the settings menu).
+void setMenuComboCallback(void (*fn)());
+// A pad is connected.
+bool controllerConnected();
 } // namespace kh2input

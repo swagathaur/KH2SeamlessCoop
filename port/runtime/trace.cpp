@@ -6,6 +6,7 @@
 
 #include "trace.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +29,8 @@ struct Traced
     uint32_t dumpBytes = 0; // ADDR:N hex-dumps N bytes at a0 for each logged call
     std::atomic<uint64_t> calls{0};
     uint64_t reported = 0;
+    std::mutex raMutex;
+    std::unordered_map<uint32_t, uint64_t> recentRa; // callers since the last summary
 };
 
 std::unordered_map<uint32_t, Traced *> g_traced;
@@ -45,6 +48,10 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     Traced &t = *it->second;
     const uint64_t n = t.calls.fetch_add(1) + 1;
+    {
+        std::lock_guard<std::mutex> lock(t.raMutex);
+        ++t.recentRa[getRegU32(ctx, 31)];
+    }
     if (n <= kLogFirst)
         std::printf("[trace] 0x%08X call #%llu a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X\n", address,
                     (unsigned long long)n, getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6),
@@ -105,6 +112,23 @@ std::string summary()
                       (unsigned long long)(now - t.reported));
         out << buf;
         t.reported = now;
+        // The busiest callers since the last line.
+        std::vector<std::pair<uint64_t, uint32_t>> callers;
+        {
+            std::lock_guard<std::mutex> lock(t.raMutex);
+            for (const auto &[ra, count] : t.recentRa)
+                callers.push_back({count, ra});
+            t.recentRa.clear();
+        }
+        std::sort(callers.rbegin(), callers.rend());
+        for (size_t i = 0; i < callers.size() && i < 4; ++i)
+        {
+            std::snprintf(buf, sizeof(buf), "%s%08X*%llu", i ? "," : "[", callers[i].second,
+                          (unsigned long long)callers[i].first);
+            out << buf;
+        }
+        if (!callers.empty())
+            out << "]";
     }
     return out.str();
 }

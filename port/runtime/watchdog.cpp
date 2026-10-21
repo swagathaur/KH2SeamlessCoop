@@ -135,7 +135,7 @@ void dumpAll(DWORD self)
         }
         CloseHandle(h);
     }
-    std::fprintf(stdout, "[watchdog] host loop stalled for %u s; %zu threads:\n", g_seconds, stacks.size());
+    std::fprintf(stdout, "[watchdog] stacks of %zu threads:\n", stacks.size());
     for (const Stack &s : stacks)
     {
         std::fprintf(stdout, "[watchdog] thread %lu\n", s.tid);
@@ -178,6 +178,8 @@ void start(unsigned seconds)
 
 void beat() { g_lastBeat.store(nowMs(), std::memory_order_relaxed); }
 
+void dumpNow() { dumpAll(GetCurrentThreadId()); }
+
 void stop()
 {
     if (!g_running.exchange(false))
@@ -193,6 +195,7 @@ namespace kh2watch
 void start(unsigned) {}
 void beat() {}
 void stop() {}
+void dumpNow() {}
 } // namespace kh2watch
 
 #endif

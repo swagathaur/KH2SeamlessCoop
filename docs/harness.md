@@ -43,6 +43,15 @@ extra arguments.
 | `--dma-log=FRAME,COUNT` | From guest frame FRAME, decode the next COUNT GIF-channel `sceDmaSend` chains: every DMAtag, GIFtag and A+D register write |
 | `--missing=stop\|continue` | On a call into untranslated code: stop (default) or keep going |
 | `--patch=NAME[,...]`, `--list-patches` | Enable switchable game patches ([playing.md](playing.md)) |
+| `--mash=BTN[+BTN]:N` | Tap these buttons every N guest frames: gets through menus and dialogue whatever the load times (frame-numbered `--input` scripts drift when loading takes real time) |
+| `--ee-dump=A,B,...` | Print the EE threads (priority, status, wait object, pc/ra/sp), semaphores and event flags at these frames. The snapshot is built lazily: ask for two consecutive frames and read the second |
+| `--stack-dump=A,B,...` | Print every host thread's stack at these frames, with symbols; the EE thread's shows the translated guest functions it is in |
+| `--watch=ADDR[,ADDR...]` | Print these guest words (hex and as float) on every status line |
+| `--watchdog=SEC` | Print every thread's stack when the host loop stalls this long (default 20 s headless) |
+
+`--trace` status entries also list the busiest callers since the last line,
+e.g. `00102448:11785(+1167)[00228344*234,...]`. Status lines carry CD read
+counts (`cd: reads=N failed=N`).
 
 Environment: `PS2X_GS_PIXSTATS=1` makes the software rasteriser print, every
 16M pixels, how many failed the alpha, destination-alpha and depth tests.

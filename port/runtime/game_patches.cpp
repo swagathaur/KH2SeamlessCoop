@@ -9,10 +9,13 @@
 
 #include "game_patches.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <vector>
+#include <map>
+#include <mutex>
 
 #include "game_patch_table.h"
 #include "ps2_runtime.h"
@@ -22,6 +25,9 @@ namespace kh2patches
 namespace
 {
 std::vector<const GamePatch *> g_enabled;
+std::mutex g_mutex; // enable/disable (presenter thread) vs tick
+std::map<uint32_t, PS2Runtime::RecompiledFunction> g_originalCode; // address -> translated original
+std::map<uint32_t, uint32_t> g_originalData;                       // address -> word before the first write
 
 const GamePatch *find(const std::string &name)
 {
@@ -32,38 +38,90 @@ const GamePatch *find(const std::string &name)
 }
 } // namespace
 
+bool setEnabled(PS2Runtime &runtime, const std::string &name, bool on)
+{
+    const GamePatch *p = find(name);
+    if (!p)
+    {
+        std::fprintf(stderr, "[patches] unknown patch '%s'%s\n", name.c_str(),
+                     kGamePatches[0].name ? "" : " (run tools/game_patches.py to build them)");
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const auto it = std::find(g_enabled.begin(), g_enabled.end(), p);
+    if (on == (it != g_enabled.end()))
+        return true;
+    bool ok = true;
+    for (const CodeVariant *c = p->code; c && c->address; ++c)
+    {
+        if (on && !g_originalCode.count(c->address))
+            g_originalCode[c->address] = runtime.lookupFunction(c->address);
+        PS2Runtime::RecompiledFunction fn = on ? c->function : g_originalCode[c->address];
+        if (!fn || !runtime.replaceFunction(c->address, fn))
+        {
+            std::fprintf(stderr, "[patches] %s: could not replace 0x%08X\n", p->name, c->address);
+            ok = false;
+        }
+    }
+    uint8_t *rdram = runtime.memory().getRDRAM();
+    for (const DataWrite *d = p->data; d && d->address; ++d)
+    {
+        uint8_t *dst = rdram + (d->address & PS2_RAM_MASK & ~3u);
+        if (on && !g_originalData.count(d->address & ~3u))
+        {
+            uint32_t word;
+            std::memcpy(&word, dst, 4);
+            g_originalData[d->address & ~3u] = word;
+        }
+        if (!on)
+        {
+            const uint32_t word = g_originalData[d->address & ~3u];
+            std::memcpy(dst, &word, 4);
+        }
+    }
+    if (on)
+    {
+        g_enabled.push_back(p);
+        std::printf("[patches] %s: %s (by %s)\n", p->name, p->description, p->author);
+    }
+    else
+    {
+        g_enabled.erase(it);
+        std::printf("[patches] %s off\n", p->name);
+    }
+    return ok;
+}
+
+bool isEnabled(const std::string &name)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (const GamePatch *p : g_enabled)
+        if (name == p->name)
+            return true;
+    return false;
+}
+
+std::vector<Info> available()
+{
+    std::vector<Info> out;
+    for (const GamePatch *p = kGamePatches; p->name; ++p)
+        out.push_back({p->name, p->description});
+    return out;
+}
+
 bool enable(PS2Runtime &runtime, const std::string &names)
 {
     bool ok = true;
     std::stringstream ss(names);
     for (std::string name; std::getline(ss, name, ',');)
-    {
-        if (name.empty())
-            continue;
-        const GamePatch *p = find(name);
-        if (!p)
-        {
-            std::fprintf(stderr, "[patches] unknown patch '%s'%s\n", name.c_str(),
-                         kGamePatches[0].name ? "" : " (run tools/game_patches.py to build them)");
-            ok = false;
-            continue;
-        }
-        for (const CodeVariant *c = p->code; c && c->address; ++c)
-        {
-            if (!runtime.replaceFunction(c->address, c->function))
-            {
-                std::fprintf(stderr, "[patches] %s: could not replace 0x%08X\n", p->name, c->address);
-                ok = false;
-            }
-        }
-        g_enabled.push_back(p);
-        std::printf("[patches] %s: %s (by %s)\n", p->name, p->description, p->author);
-    }
+        if (!name.empty())
+            ok &= setEnabled(runtime, name, true);
     return ok;
 }
 
 void tick(uint8_t *rdram)
 {
+    std::lock_guard<std::mutex> lock(g_mutex);
     for (const GamePatch *p : g_enabled)
         for (const DataWrite *d = p->data; d && d->address; ++d)
         {
@@ -82,6 +140,7 @@ void tick(uint8_t *rdram)
 
 float aspect()
 {
+    std::lock_guard<std::mutex> lock(g_mutex);
     float a = 0.0f;
     for (const GamePatch *p : g_enabled)
         if (p->aspect > a)

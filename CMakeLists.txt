@@ -203,6 +203,23 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 set(PARALLEL_GS_STANDALONE ON CACHE BOOL "" FORCE)
 add_subdirectory(third_party/parallel-gs EXCLUDE_FROM_ALL)
 
+# --- Dear ImGui (MIT): the in-game settings menu ---------------------------
+include(FetchContent)
+FetchContent_Declare(kh2_imgui_src
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.92.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(kh2_imgui_src)
+add_library(kh2_imgui STATIC
+    ${kh2_imgui_src_SOURCE_DIR}/imgui.cpp
+    ${kh2_imgui_src_SOURCE_DIR}/imgui_draw.cpp
+    ${kh2_imgui_src_SOURCE_DIR}/imgui_tables.cpp
+    ${kh2_imgui_src_SOURCE_DIR}/imgui_widgets.cpp)
+if(WIN32)
+    target_sources(kh2_imgui PRIVATE ${kh2_imgui_src_SOURCE_DIR}/backends/imgui_impl_win32.cpp)
+endif()
+target_include_directories(kh2_imgui PUBLIC ${kh2_imgui_src_SOURCE_DIR})
+
 add_executable(kh2recomp
     port/runtime/main.cpp
     port/runtime/overlay_manager.cpp
@@ -219,10 +236,11 @@ add_executable(kh2recomp
     port/runtime/host_input.cpp
     port/runtime/game_patches.cpp
     port/runtime/watchdog.cpp
+    port/runtime/overlay_ui.cpp
     ${KH2_PATCH_SOURCES}
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime ${KH2_RUNTIME_INCLUDES})
-target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs)
+target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs kh2_imgui)
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)
     # A PDB for --profile and debuggers: full debug info for the runner and the

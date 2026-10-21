@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,26 @@ bool pumpWindow();
 
 // Read back the last scanned-out frame as RGBA8 (for screenshots).
 bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height);
+
+// On-screen UI. The callback draws the settings menu with Dear ImGui while it
+// is open (F1, or Select+Start through toggleMenu()); F2 shows frame rates.
+void setUiCallback(std::function<void()> draw);
+bool menuOpen();
+void setMenuOpen(bool open);
+void toggleMenu();
+bool showFps();
+void setShowFps(bool show);
+
+// Live settings.
+unsigned superSampling();
+void setSuperSampling(unsigned n);
+bool fsr();
+void setFsr(bool on);
+bool vsync();
+void setVsync(bool on);
+bool fullscreen();
+void setFullscreen(bool on);
+void requestClose();
 
 // Window events since the last call (for the input layer).
 bool windowFocused();

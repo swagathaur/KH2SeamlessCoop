@@ -31,6 +31,16 @@ much slower.
 The picture keeps the game's aspect ratio (4:3, or 16:9 with `--widescreen`),
 letterboxed to the window.
 
+## In-game menu
+
+**F1** (or **Select+Start** on a controller) opens the settings menu:
+super-sampling, sharp upscaling, fullscreen, VSync, the frame-rate display,
+the game patches, button layout and vibration all change immediately, and
+**Save settings** writes them to `kh2recomp.ini` next to the executable. The
+menu works with the mouse, keyboard or controller; the game is paused for
+input while it is open. **F2** toggles the frame-rate display, **Alt+Enter** or
+**F11** fullscreen.
+
 ## Speed: compiled VU1 programs
 
 KH2 does its 3D transforms in VU1 microprograms. Interpreted, they cap 3D

@@ -373,3 +373,37 @@ game holds full speed at `--speed=1`.
 Alongside: our own window means our own input (`host_input.cpp`: XInput with
 rumble through libvib, keyboard), and `--patch` game patches built by
 `tools/game_patches.py` (widescreen and others from PCSX2's patch database).
+
+## 18. Stuck after Roxas opens the window
+
+**Symptom:** every run stopped on the shot of Roxas at the window: the image
+stayed up, the guest kept presenting frames, but nothing else happened, with
+the movie skipped or played to the end.
+
+Three separate causes turned up on the way:
+
+- **Priority starvation** (`patches/ps2recomp/0013`). ovl_movie's player lowers
+  its own priority and then spins on `RotateThreadReadyQueue` of the worker
+  threads' priority, waiting for them to exit. The worker was ready at a higher
+  priority but the scheduler never switched to it, so the caller spun for
+  ever. Rotating a queue now also requests a reschedule when a ready thread
+  outranks the caller.
+- **`--skip-movies`** now asks the player to stop the way its own skip does
+  (state word `0x01F29470` = 1, the game's setter is `0x01F1B5F0`) instead of
+  pretending the file had been read, which left the decoder thread waiting for
+  pictures.
+- **The actual hang: a 64-bit multiply** (`patches/ps2recomp/0015`). With
+  `--ee-dump`, `--trace` (now with caller histograms) and `--stack-dump`, the
+  main thread turned out to be inside `0x00313F98`, libgcc's soft-float
+  multiply core, on its very first call (from `0x0021F7D8`, scaling by 0.75)
+  — and never coming back. gcc computes a 64-bit product on the EE with `MULTU`
+  and `PMFHL.LW`, which packs `{LO.w0, HI.w0, LO.w2, HI.w2}` from the 128-bit
+  HI/LO registers. The recompiler's `PMFHL` macros treated HI and LO as
+  scalars and returned LO's sign extension where HI's word belongs, so the
+  product was wrong and the normalisation loop never terminated. `PMFHL.*`,
+  `PMTHL.LW`, `PMFHI`/`PMFLO` and `PMTHI`/`PMTLO` now use all 128 bits.
+  (A runtime header change and regenerated code: one full rebuild.)
+
+Also fixed while looking: the IOP lacked `thvpool` (variable-length memory
+pools) and `cdvdman` `sceCdStatus`, which Square Enix's sound driver imports
+(`patches/ps2recomp/0014`).

@@ -41,6 +41,7 @@
 #include "host_input.h"
 #include "game_patches.h"
 #include "watchdog.h"
+#include "overlay_ui.h"
 
 namespace ps2_stubs
 {
@@ -101,6 +102,9 @@ struct Options
     unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
+    std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
+    std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
+    std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
     unsigned ssaa = 1;                 // GPU renderer super-sampling: 1, 2, 4, 8, 16
     bool fullscreen = false;
@@ -108,6 +112,8 @@ struct Options
     bool vsync = false;
     bool fsr = true;
     bool swapConfirm = false;          // controller: confirm on the right button instead of the bottom
+    bool noRumble = false;
+    bool showFps = false;
     std::string patches;               // game patches to enable, comma-separated
     uint32_t mashMask = 0;             // --mash: press these buttons every mashEvery frames
     uint64_t mashEvery = 0;
@@ -139,6 +145,10 @@ void usage()
         "  --speed=X               run guest time X times real time (0 = unpaced, as fast as possible)\n"
         "  --profile[=MS]          sample host threads every MS ms (default 1) and print hot functions\n"
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
+        "  --ee-dump=A,B,..        at these guest frames print EE threads, semaphores and event flags\n"
+        "  --watch=ADDR[,ADDR..]   print these guest words (hex and as float) on every status line\n"
+        "  --stack-dump=A,B,..     at these guest frames print every host thread's stack (the EE\n"
+        "                          thread's shows the translated guest call chain)\n"
         "  --gs-dump=A,B,..        at these guest frames write GS registers and all of GS memory\n"
         "                          (as a 1024x1024 32-bit image) into the screenshot directory\n"
         "  --renderer=gpu|soft     GS renderer: gpu = paraLLEl-GS on Vulkan (default when windowed),\n"
@@ -149,6 +159,8 @@ void usage()
         "  --vsync                 present in sync with the display's refresh\n"
         "  --no-fsr                bilinear upscale to the window instead of FSR 1 + sharpening\n"
         "  --swap-confirm          controller: right face button confirms (default: bottom button)\n"
+        "  --no-rumble             controller vibration off\n"
+        "  --show-fps              show frame rates (F2 toggles; F1 or Select+Start opens settings)\n"
         "  --patch=NAME[,NAME..]   enable game patches (see --list-patches); --widescreen = --patch=widescreen\n"
         "  --list-patches          list the available game patches and exit\n"
         "  --watchdog=SEC          print every thread's stack if the host loop stalls this long\n"
@@ -202,6 +214,24 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--skip-movies") o.skipMovies = true;
         else if (a.rfind("--speed=", 0) == 0) o.speed = std::stod(value(a));
         else if (a.rfind("--profile=", 0) == 0) o.profileMs = std::max(1, std::stoi(value(a)));
+        else if (a.rfind("--watch=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.watch.push_back(static_cast<uint32_t>(std::stoul(t, nullptr, 16)));
+        }
+        else if (a.rfind("--stack-dump=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.stackDumpAt.insert(std::stoull(t));
+        }
+        else if (a.rfind("--ee-dump=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.eeDumpAt.insert(std::stoull(t));
+        }
         else if (a.rfind("--gs-dump=", 0) == 0)
         {
             std::stringstream ss(value(a));
@@ -222,6 +252,8 @@ bool parse(int argc, char **argv, Options &o)
         else if (a == "--vsync") o.vsync = true;
         else if (a == "--no-fsr") o.fsr = false;
         else if (a == "--swap-confirm") o.swapConfirm = true;
+        else if (a == "--no-rumble") o.noRumble = true;
+        else if (a == "--show-fps") o.showFps = true;
         else if (a.rfind("--patch=", 0) == 0) o.patches += (o.patches.empty() ? "" : ",") + value(a);
         else if (a == "--widescreen") o.patches += o.patches.empty() ? "widescreen" : ",widescreen";
         else if (a.rfind("--mash=", 0) == 0)
@@ -260,6 +292,8 @@ struct Harness
     uint64_t lastShotFrame = UINT64_MAX;
     uint64_t lastDumpFrame = UINT64_MAX;
     uint64_t lastGpuFrame = UINT64_MAX;
+    uint64_t lastEeDumpFrame = UINT64_MAX;
+    uint64_t lastStackDumpFrame = UINT64_MAX;
     uint64_t presented = 0;
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
@@ -469,6 +503,30 @@ bool harnessTick(Harness &h, uint64_t frame)
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
     }
+    if (o.stackDumpAt.count(frame) && frame != h.lastStackDumpFrame)
+    {
+        h.lastStackDumpFrame = frame;
+        std::printf("[harness] host stacks at guest frame %llu\n", (unsigned long long)frame);
+        kh2watch::dumpNow();
+    }
+    if (o.eeDumpAt.count(frame) && frame != h.lastEeDumpFrame)
+    {
+        h.lastEeDumpFrame = frame;
+        const EeKernelSnapshot k = h.runtime->eeScheduler().snapshot();
+        std::printf("[ee] frame %llu: running thread %d, %zu threads\n", (unsigned long long)frame,
+                    k.runningThreadId, k.threads.size());
+        for (const EeThreadSnapshot &t : k.threads)
+            std::printf("[ee]   thread %2d prio %2d/%2d status %d wait %d id %d pc %08X ra %08X sp %08X entry %08X "
+                        "suspend %d wakeups %u\n",
+                        t.id, t.currentPriority, t.initialPriority, (int)t.status, (int)t.waitReason, t.waitId, t.pc,
+                        t.ra, t.sp, t.entry, t.suspendCount, t.wakeupCount);
+        for (const EeSemaphoreSnapshot &sem : k.semaphores)
+            std::printf("[ee]   sema %2d count %d/%d waiters %u\n", sem.id, sem.count, sem.maxCount, sem.waiters);
+        for (const EeEventFlagSnapshot &ef : k.eventFlags)
+            std::printf("[ee]   eventflag %2d bits %08X init %08X attr %X waiters %u\n", ef.id, ef.bits, ef.initBits,
+                        ef.attr, ef.waiters);
+        std::fflush(stdout);
+    }
 
     const auto now = std::chrono::steady_clock::now();
     if (o.statusEvery > 0 && std::chrono::duration<double>(now - h.lastStatus).count() >= o.statusEvery)
@@ -480,9 +538,21 @@ bool harnessTick(Harness &h, uint64_t frame)
                           (unsigned long long)g_mpegDemuxCount.load(), (unsigned long long)g_mpegDemuxRefusedCount.load(),
                           (unsigned long long)g_mpegGetPictureCount.load(),
                           (unsigned long long)g_mpegWriteFrameCount.load());
-        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s%s\n", elapsed(h),
+        std::string watched;
+        for (uint32_t addr : o.watch)
+        {
+            uint32_t v;
+            std::memcpy(&v, h.runtime->memory().getRDRAM() + (addr & 0x01FFFFFFu), 4);
+            float f;
+            std::memcpy(&f, &v, 4);
+            char w[64];
+            std::snprintf(w, sizeof(w), " [%08X]=%08X(%g)", addr, v, f);
+            watched += w;
+        }
+        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s%s%s%s\n", elapsed(h),
                     (unsigned long long)frame, kh2ovl::activeName(), kh2ovl::switchCount(), mpeg,
-                    o.trace.empty() ? "" : " calls:", kh2trace::summary().c_str());
+                    kh2cd::stats().c_str(), watched.c_str(), o.trace.empty() ? "" : " calls:",
+                    kh2trace::summary().c_str());
         std::fflush(stdout);
     }
 
@@ -531,6 +601,7 @@ bool playPump(void *userData)
 {
     Harness &h = *static_cast<Harness *>(userData);
     const uint64_t frame = ps2PadCurrentGuestFrame();
+    kh2ui::tick();
     kh2input::poll(kh2pgs::windowFocused());
     kh2movie::poll(*h.runtime);
     kh2patches::tick(h.runtime->memory().getRDRAM());
@@ -664,6 +735,9 @@ int main(int argc, char **argv)
     kh2input::Options inputOpt;
     inputOpt.confirmOnBottom = !opt.swapConfirm;
     kh2input::init(inputOpt);
+    kh2input::setRumbleEnabled(!opt.noRumble);
+    if (gpu)
+        kh2pgs::setShowFps(opt.showFps);
     // Both must precede initialize().
     if (opt.headless)
         runtime.setExternalPresenter(&headlessPump, &harness);
@@ -727,6 +801,12 @@ int main(int argc, char **argv)
             return kExitUsage;
         if (kh2patches::aspect() > 0.0f)
             kh2pgs::setAspect(kh2patches::aspect());
+    }
+    if (gpu && !opt.headless)
+    {
+        std::error_code ec;
+        const auto exeDir = std::filesystem::absolute(argv[0], ec).parent_path();
+        kh2ui::install(runtime, (exeDir / "kh2recomp.ini").string());
     }
     if (!opt.trace.empty())
         kh2trace::install(runtime, opt.trace); // last, so it wraps the final implementations

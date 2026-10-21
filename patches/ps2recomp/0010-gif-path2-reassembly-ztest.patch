@@ -1,0 +1,80 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index a0788a3..d839723 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -933,9 +933,17 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+         return;
+     }
+ 
++    // ZTE=0 is documented as prohibited; the GS then behaves as if the depth
++    // test passes (and still writes Z unless ZMSK).
++    const bool zteEnabled = ((ctx.test >> 16) & 0x1u) != 0u;
++    // Depth values saturate to the Z buffer format.
++    if (zpsm == GS_PSM_Z24 && static_cast<uint32_t>(z) > 0xFFFFFFu)
++        z = 0xFFFFFF;
++    else if ((zpsm == GS_PSM_Z16 || zpsm == GS_PSM_Z16S) && static_cast<uint32_t>(z) > 0xFFFFu)
++        z = 0xFFFF;
+     bool zpass = false;
+     uint32_t storedZ = 0u;
+-    switch (ztestMethod)
++    switch (zteEnabled ? ztestMethod : 1u)
+     {
+     case 0:
+         zpass = false;
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index fb2317c..6f30c6a 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -6,17 +6,19 @@
+ 
+ namespace
+ {
+-    // PATH3 reassembly. The GIF keeps its place in a packet across DMA
++    // PATH2/PATH3 reassembly. The GIF keeps its place in a packet across DMA
+     // transfers: a game may send an IMAGE GIFtag (or a PACKED one) in one
+     // transfer and its payload in the next. GS::processGIFPacket parses every
+     // submission as starting with a GIFtag, so a split payload was read as new
+     // tags (random TEX0 writes, phantom primitives). Each arbiter keeps the
+-    // unfinished tail of its PATH3 stream here and forwards only whole tags.
++    // unfinished tail of each path's stream here and forwards only whole tags.
++    // PATH2 needs it too: KH2 sends BITBLTBUF..TRXDIR plus an IMAGE GIFtag in
++    // one VIF DIRECT and the texels in the next (patch 0010).
+     // Kept out of the class so the header (in every generated file's
+     // precompiled header) stays unchanged.
+     struct Path3Partial
+     {
+-        std::vector<uint8_t> bytes;
++        std::vector<uint8_t> bytes[4]; // indexed by GifPathId
+     };
+     std::mutex g_partialMutex;
+     std::unordered_map<const GifArbiter *, Path3Partial> g_partial;
+@@ -65,10 +67,10 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
+         return;
+ 
+     std::vector<uint8_t> assembled;
+-    if (pathId == GifPathId::Path3)
++    if (pathId == GifPathId::Path3 || pathId == GifPathId::Path2)
+     {
+         std::lock_guard<std::mutex> lock(g_partialMutex);
+-        std::vector<uint8_t> &tail = g_partial[this].bytes;
++        std::vector<uint8_t> &tail = g_partial[this].bytes[static_cast<size_t>(pathId) & 3u];
+         tail.insert(tail.end(), data, data + (sizeBytes & ~15u));
+         // Forward everything up to the end of the last complete GIFtag.
+         size_t offset = 0;
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 555ba52..56b7560 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -466,7 +466,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                 const uint8_t *remainingData = data + pos + consumedQw * 16u;
+                 if (remainingQw != 0u)
+                     submitGifPacket(GifPathId::Path2, remainingData, remainingQw * 16u, true, directHl);
+-                const uint32_t imageQw = gifImageQwcFromTag(remainingData, remainingQw * 16u);
++                // The GIF arbiter now reassembles PATH2 GIF packets split across
++                // DIRECT commands (patch 0010), so the payload of an IMAGE tag
++                // is not re-wrapped here; that only handled a tag at the start.
++                const uint32_t imageQw = 0u;
++                (void)gifImageQwcFromTag;
+                 if (imageQw != 0u)
+                 {
+                     const uint32_t inlineImageQw = remainingQw - 1u;

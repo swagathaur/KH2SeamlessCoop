@@ -301,3 +301,44 @@ The harness gained `--skip-movies` (end each movie as soon as it starts) and
 to the first in-engine scene, Roxas's sepia dream. That scene renders its
 background but the 3D geometry only as scattered points, at ~3 fps: next is
 the VIF1/VU1 path, which KH2 uses for all 3D.
+
+## 16. First 3D scene: GIF packets split across transfers, and palettes
+
+**Symptom:** in the dream scene the geometry showed as dotted outlines and
+diagonal hatching over a flat sepia fill, at 2–3 fps. VU1 output, replayed
+from captures with `tools/vureplay`, was correct.
+
+**Causes and fixes** (all in `patches/ps2recomp/`):
+
+- **GIF packets split across transfers** (0007 for PATH3, 0010 for PATH2).
+  The GIF keeps its place in a packet between DMA transfers, but the runtime
+  parsed every submission as starting with a GIFtag. KH2 sends `BITBLTBUF`…
+  `TRXDIR` and an IMAGE GIFtag in one VIF `DIRECT` and the texels in the next,
+  so texel data was read as tags: random register writes and hundreds of
+  screen-sized sprites and triangles a frame (16 billion pixels processed by
+  frame 4500, most of them garbage). The GIF arbiter now keeps each path's
+  unfinished tail and forwards only whole tags; the VIF's own IMAGE
+  continuation special case (which only worked for a tag at the start of the
+  payload) is turned off.
+- **CLUT buffer** (0008). The GS copies a palette into an internal buffer when
+  `TEX0`/`TEX2` is written with a `CLD` that asks for it; KH2 re-uploads its
+  palette area several times a frame, so reading palettes from VRAM at draw
+  time used the wrong ones and the alpha test (`ATST=GREATER 16`) discarded
+  most texels. The frontend now issues an ordered palette-load command at
+  `TEX0` time and the CPU backend samples from the buffer.
+- **Depth test details** (0010): `ZTE=0` behaves as "pass", and depth
+  saturates to the Z buffer format.
+
+`PS2X_GS_PIXSTATS=1` (0009) prints, every 16M pixels, how many failed the
+alpha, destination-alpha and depth tests, with sample depth values.
+
+**Result:** Roxas's room in Twilight Town renders correctly, and the scene
+runs several times faster.
+
+Note on applying patches: CMake used to skip a patch when `git apply
+--reverse --check` succeeded, which breaks when a later patch edits nearby
+lines (0008 next to 0003's includes). It now records applied patches with
+their hashes in `third_party/PS2Recomp/.kh2-applied-patches` (copies in
+`.kh2-applied/`), reverses from the first changed one and applies the rest,
+so only files those patches touch get new timestamps. Deleting the stamp
+resets the fork and applies everything again (full rebuild).

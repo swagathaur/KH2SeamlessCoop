@@ -1,0 +1,77 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index ef98cd4..a0788a3 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -840,6 +840,30 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
+     }
+ }
+ 
++namespace
++{
++    // PS2X_GS_PIXSTATS=1: count why pixels are rejected (patch 0009 debug aid).
++    struct PixStats
++    {
++        std::atomic<uint64_t> total{0}, alphaFail{0}, dateFail{0}, zFail{0}, zNever{0}, written{0};
++        std::atomic<uint32_t> samples{0};
++    };
++    PixStats g_pixStats;
++    const bool g_pixStatsOn = [] {
++        const char *e = std::getenv("PS2X_GS_PIXSTATS");
++        return e && *e && *e != '0';
++    }();
++    void pixStatsTick()
++    {
++        const uint64_t n = g_pixStats.total.fetch_add(1, std::memory_order_relaxed) + 1;
++        if ((n & ((1ull << 24) - 1)) == 0)
++            std::fprintf(stderr, "[gs:pixstats] total=%llu alphaFail=%llu dateFail=%llu zFail=%llu zNever=%llu written=%llu\n",
++                         (unsigned long long)n, (unsigned long long)g_pixStats.alphaFail.load(),
++                         (unsigned long long)g_pixStats.dateFail.load(), (unsigned long long)g_pixStats.zFail.load(),
++                         (unsigned long long)g_pixStats.zNever.load(), (unsigned long long)g_pixStats.written.load());
++    }
++}
++
+ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
+ {
+     const auto &ctx = state.context;
+@@ -865,9 +889,13 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+     const u32 zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+     const u32 zpsm = ctx.zbuf.psm;
+ 
++    if (g_pixStatsOn)
++        pixStatsTick();
+     const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
+     if (!writeMask.writesAnything())
+     {
++        if (g_pixStatsOn)
++            g_pixStats.alphaFail.fetch_add(1, std::memory_order_relaxed);
+         return;
+     }
+ 
+@@ -900,6 +928,8 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+ 
+     if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
+     {
++        if (g_pixStatsOn)
++            g_pixStats.dateFail.fetch_add(1, std::memory_order_relaxed);
+         return;
+     }
+ 
+@@ -925,8 +955,18 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+ 
+     if (!zpass)
+     {
++        if (g_pixStatsOn)
++        {
++            (ztestMethod == 0 ? g_pixStats.zNever : g_pixStats.zFail).fetch_add(1, std::memory_order_relaxed);
++            if (ztestMethod >= 2 && g_pixStats.samples.fetch_add(1, std::memory_order_relaxed) % 200000u == 0u)
++                std::fprintf(stderr, "[gs:pixstats] zfail z=%08x stored=%08x zpsm=%02x zbp=%u ztst=%u test=%llx\n",
++                             static_cast<uint32_t>(z), storedZ, zpsm, zbp, ztestMethod,
++                             (unsigned long long)ctx.test);
++        }
+         return;
+     }
++    if (g_pixStatsOn)
++        g_pixStats.written.fetch_add(1, std::memory_order_relaxed);
+ 
+     if (writeMask.writesFramebuffer())
+     {

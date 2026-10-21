@@ -1,0 +1,71 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+index 77b3ff1..d570734 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -63,6 +63,14 @@ namespace
+ 
+ namespace ps2_stubs
+ {
++    // This HLE was written against Dragon Quest VIII, whose libmpeg keeps its
++    // globals at fixed addresses (0x1717BC, 0x171800.., 0x171904) and whose
++    // callbacks live at 0x1209F8/0x120A08. Other games link libmpeg elsewhere,
++    // so those writes would land on unrelated memory; a game that binds every
++    // libmpeg entry it uses to these stubs can turn them off.
++    static std::atomic<bool> g_mpegLegacyGuestGlobals{true};
++    void setMpegLegacyGuestGlobals(bool enabled) { g_mpegLegacyGuestGlobals = enabled; }
++
+     namespace
+     {
+         struct MpegDecodedFrame
+@@ -2185,6 +2193,7 @@ namespace ps2_stubs
+         (void)runtime;
+         static const uint32_t kRefGlobalAddrs[] = {
+             0x171800u, 0x17180Cu, 0x171818u, 0x171804u, 0x171810u, 0x17181Cu};
++        if (g_mpegLegacyGuestGlobals)
+         for (uint32_t addr : kRefGlobalAddrs)
+         {
+             uint8_t *p = getMemPtr(rdram, addr);
+@@ -2270,21 +2279,25 @@ namespace ps2_stubs
+         mpegGuestWrite64(rdram, uVar3 + 0x88, 0);
+ 
+         mpegGuestWrite64(rdram, uVar3 + 0xF0, 0xFFFFFFFFFFFFFFFFULL);
+-        mpegGuestWrite32(rdram, uVar3 + 0x1C, 0x1209F8u);
+-        mpegGuestWrite32(rdram, uVar3 + 0x24, 0x120A08u);
++        const bool legacy = g_mpegLegacyGuestGlobals;
++        mpegGuestWrite32(rdram, uVar3 + 0x1C, legacy ? 0x1209F8u : 0u);
++        mpegGuestWrite32(rdram, uVar3 + 0x24, legacy ? 0x120A08u : 0u);
+         mpegGuestWrite32(rdram, uVar3 + 0xB0, 1u);
+         mpegGuestWrite32(rdram, uVar3 + 0x9C, 0xFFFFFFFFu);
+         mpegGuestWrite32(rdram, uVar3 + 0x80, 0xFFFFFFFFu);
+         mpegGuestWrite32(rdram, uVar3 + 0x94, 0xFFFFFFFFu);
+         mpegGuestWrite32(rdram, uVar3 + 0x98, 0xFFFFFFFFu);
+ 
+-        mpegGuestWrite32(rdram, 0x1717BCu, param_1);
++        if (legacy)
++        {
++            mpegGuestWrite32(rdram, 0x1717BCu, param_1);
+ 
+-        static const uint32_t s_refValues[] = {
+-            0x171A50u, 0x171C58u, 0x171CC0u, 0x171D28u, 0x171D90u,
+-            0x171AB8u, 0x171B20u, 0x171B88u, 0x171BF0u};
+-        for (unsigned i = 0; i < 9u; ++i)
+-            mpegGuestWrite32(rdram, 0x171800u + i * 4u, s_refValues[i]);
++            static const uint32_t s_refValues[] = {
++                0x171A50u, 0x171C58u, 0x171CC0u, 0x171D28u, 0x171D90u,
++                0x171AB8u, 0x171B20u, 0x171B88u, 0x171BF0u};
++            for (unsigned i = 0; i < 9u; ++i)
++                mpegGuestWrite32(rdram, 0x171800u + i * 4u, s_refValues[i]);
++        }
+ 
+         uint32_t setDynamicRet = a1_init;
+         if (uint8_t *p = getMemPtr(rdram, puVar4 + 8))
+@@ -2848,7 +2861,8 @@ namespace ps2_stubs
+         mpegGuestWrite32(rdram, param_1 + 0x08, 0u);
+         mpegGuestWrite32(rdram, inner + 0x80, 0xFFFFFFFFu);
+         mpegGuestWrite32(rdram, inner + 0xAC, 0u);
+-        mpegGuestWrite32(rdram, 0x171904u, 0u);
++        if (g_mpegLegacyGuestGlobals)
++            mpegGuestWrite32(rdram, 0x171904u, 0u);
+     }
+ 
+     void sceMpegResetDefaultPtsGap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

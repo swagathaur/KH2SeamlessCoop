@@ -99,8 +99,13 @@ def main():
     outdir.mkdir(exist_ok=True)
     for name in OVERLAYS:
         cfg = HEADER + "# Overlay: calls into the main executable resolve through its table.\n"
+        # Overlays link their own copies of some SDK libraries (libmpeg in
+        # ovl_movie); config/overlays/<name>.stubs.toml binds those to the
+        # runtime's implementations (gen_stubs.py --overlay).
+        frag = outdir / f"{name}.stubs.toml"
+        ovl_stubs = frag.read_text(encoding="utf-8").strip() if frag.exists() else "stubs = []"
         cfg += general(f"build/overlays/{name}.elf", f"config/functions_{name}.csv",
-                       f"generated/ovl_{name}", "stubs = []")
+                       f"generated/ovl_{name}", ovl_stubs)
         (outdir / f"{name}.toml").write_text(cfg, encoding="utf-8", newline="\n")
     print(f"config/overlays/: {len(OVERLAYS)} overlay configs")
 

@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "ps2_runtime.h"
+#include "hle_call.h"
 
 namespace kh2gs
 {
@@ -40,7 +41,7 @@ void resetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const int16_t inter = static_cast<int16_t>(getRegU32(ctx, 5));
     const int16_t omode = static_cast<int16_t>(getRegU32(ctx, 6));
     const int16_t ffmode = static_cast<int16_t>(getRegU32(ctx, 7));
-    g_resetGraph(rdram, ctx, runtime);
+    kh2::callOriginal(g_resetGraph, rdram, ctx, runtime);
     if ((mode == 0 || mode == 5) && g_gparam)
     {
         const int16_t gp[4] = {inter, omode, static_cast<int16_t>(ffmode != 0), static_cast<int16_t>(kGsRevision)};

@@ -110,6 +110,7 @@ add_executable(kh2recomp
     port/runtime/overlay_manager.cpp
     port/runtime/pad2_hle.cpp
     port/runtime/cd_iso.cpp
+    port/runtime/cd_callback.cpp
     port/runtime/trace.cpp
     port/runtime/dma_log.cpp
     port/runtime/gs_image.cpp

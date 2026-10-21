@@ -108,6 +108,19 @@ def read_analyzer_entry_points(path: Path):
     return out
 
 
+def read_runtime_stub_names(path: Path):
+    """Names in the runtime's PS2_STUB_LIST (ps2_recomp stubs these by name)."""
+    if not path.exists():
+        return set()
+    m = re.search(r"#define PS2_STUB_LIST\(X\)(.*?)(?:\n\s*\n|#define)", path.read_text(encoding="utf-8"), re.S)
+    return set(re.findall(r"X\((\w+)\)", m.group(1))) if m else set()
+
+
+def is_runtime_stub_name(name: str, stub_names) -> bool:
+    # ps2_recomp also matches with one leading underscore stripped
+    return name in stub_names or (name.startswith("_") and name[1:] in stub_names)
+
+
 def is_branch(w: int) -> bool:
     """MIPS instructions with a delay slot: J/JAL, JR/JALR, branches (incl. likely)."""
     op = w >> 26
@@ -363,6 +376,8 @@ def main():
                 break
         print(f"gap filling added {total} functions in {rounds} rounds ({len(external)} external/pointer targets)")
     decomp_names = read_decomp_names(decomp / "functions.tsv")
+    stub_names = read_runtime_stub_names(
+        Path(__file__).resolve().parent.parent / "third_party/PS2Recomp/ps2xRuntime/include/ps2_call_list.h")
     sdk_names = read_analyzer_names(analyzer)
 
     used = {}
@@ -376,6 +391,12 @@ def main():
             name, src = clean(f["name"]), "layout"
         elif start in decomp_names:
             name, src = clean(decomp_names[start]), "decomp"
+            if is_runtime_stub_name(name, stub_names):
+                # ps2_recomp binds any function with a runtime stub's name to
+                # that stub. The decomp's recovered names are guesses: it calls
+                # the two-instruction task-retire helper at 0x001024A8
+                # "printf", which made KH2 run AREA::start twice.
+                name = f"{name}_{start:08x}"
         else:
             name, src = f"FUN_{start:08x}", "auto"
         if name in used and src != "auto":

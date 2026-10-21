@@ -9,12 +9,14 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
 
 #include "ps2_runtime.h"
+#include "hle_call.h"
 
 namespace kh2trace
 {
@@ -23,6 +25,7 @@ namespace
 struct Traced
 {
     PS2Runtime::RecompiledFunction original = nullptr;
+    uint32_t dumpBytes = 0; // ADDR:N hex-dumps N bytes at a0 for each logged call
     std::atomic<uint64_t> calls{0};
     uint64_t reported = 0;
 };
@@ -46,7 +49,22 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         std::printf("[trace] 0x%08X call #%llu a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X\n", address,
                     (unsigned long long)n, getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6),
                     getRegU32(ctx, 7), getRegU32(ctx, 31));
-    t.original(rdram, ctx, runtime);
+    if (n <= kLogFirst && t.dumpBytes)
+    {
+        const uint32_t base = getRegU32(ctx, 4);
+        for (uint32_t off = 0; off < t.dumpBytes; off += 16)
+        {
+            std::printf("[trace]   a0+%03x:", off);
+            for (uint32_t i = 0; i < 16 && off + i < t.dumpBytes; i += 4)
+            {
+                uint32_t w;
+                std::memcpy(&w, rdram + ((base + off + i) & PS2_RAM_MASK), 4);
+                std::printf(" %08X", w);
+            }
+            std::printf("\n");
+        }
+    }
+    kh2::callOriginal(t.original, rdram, ctx, runtime);
 }
 } // namespace
 
@@ -57,7 +75,9 @@ void install(PS2Runtime &runtime, const std::string &spec)
     {
         if (item.empty())
             continue;
-        const uint32_t address = static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 0));
+        char *rest = nullptr;
+        const uint32_t address = static_cast<uint32_t>(std::strtoul(item.c_str(), &rest, 0));
+        const uint32_t dump = (rest && *rest == ':') ? static_cast<uint32_t>(std::strtoul(rest + 1, nullptr, 0)) : 0;
         PS2Runtime::RecompiledFunction original = runtime.lookupFunction(address);
         if (!runtime.hasFunction(address) || !runtime.replaceFunction(address, &wrapper))
         {
@@ -66,6 +86,7 @@ void install(PS2Runtime &runtime, const std::string &spec)
         }
         auto *t = new Traced;
         t->original = original;
+        t->dumpBytes = dump;
         g_traced[address] = t;
         g_order.push_back(address);
         std::printf("[trace] tracing 0x%08X\n", address);

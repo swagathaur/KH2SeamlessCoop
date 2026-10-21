@@ -12,6 +12,7 @@ files are scripts, configs and function maps (addresses and names only).
 | 5. Stub list | `python tools/gen_stubs.py config/analyzer/analyzer.toml third_party/PS2Recomp/ps2xRuntime/include/ps2_call_list.h > config/stubs.fragment.toml` | vetted SDK bindings |
 | 6. Overlay maps | `GHIDRA_HOME=... tools/ghidra/run_overlays.sh` (needs `build/overlays/*.elf` from `tools/overlay_to_elf.py`) | `config/functions_<overlay>.csv` |
 | 6b. Check maps | `python tools/check_function_map.py config/functions.csv game/SLPM_666.75` | branches that would fail at runtime |
+| 6c. Overlay SDK bindings | `ps2_analyzer build/overlays/movie.elf config/analyzer/movie.toml`, then `python tools/gen_stubs.py config/analyzer/movie.toml third_party/PS2Recomp/ps2xRuntime/include/ps2_call_list.h --overlay sceMpeg,sceIpu --extra sceMpegDelete@0x01F1F1F8,sceMpegIsEnd@0x01F1F360,sceMpegIsRefBuffEmpty@0x01F1F370 > config/overlays/movie.stubs.toml` | ovl_movie's libmpeg bound to the runtime's ffmpeg decoder |
 | 7. Configs | `python tools/make_config.py` | `config/kh2.toml`, `config/overlays/*.toml` |
 | 8. Translate | `tools/win/recomp.ps1` (`tools/recomp.py`) | `generated/main`, `generated/ovl_*`, overlay tables |
 | 9. Build | `tools/win/build.ps1` | `build/win/kh2recomp.exe` |

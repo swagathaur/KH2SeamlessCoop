@@ -215,3 +215,69 @@ still check clean.
 
 **Result:** the new-game flow runs through difficulty, vibration and sound
 selection and the confirmation, to the white "KINGDOM HEARTS" fade.
+
+## 12. Spinning on VIF1_STAT after the new-game fade
+
+**Symptom:** after the white "KINGDOM HEARTS" fade the screen stayed black.
+The kernel trace (`PS2X_KERNEL_TRACE_MS`) showed the main thread running
+without yielding at `0x00134080`, libvu1 code polling `VIF1_STAT` until the
+VIF1 FIFO and VU1 are idle.
+
+**Cause:** the generated code read `0x10000000` (TIMER0) there, not
+`0x10003C00`. ps2_analyzer's `[mmio]` table records each I/O access's address
+from the nearest `lui` only, ignoring the `ori`/`addiu` that completes it, and
+ps2_recomp substitutes the table's address for the computed one: 130 of 142
+sites said `0x10000000`.
+
+**Fix:** `tools/make_config.py` no longer passes the table. Every load and store
+then checks its computed address at run time (the generic `READ32`/`WRITE32`
+path routes I/O and scratchpad to the runtime).
+
+## 13. AREA::start ran twice and loaded the map over itself
+
+**Symptom:** a call through a null pointer at `0x00142D5C` while entering
+Twilight Town (`map/jp/tt01.map`).
+
+**Cause:** the area start runs as a field task (`FIELD::CreateTask`), and its
+callback ends with a tail jump to `0x001024A8`, a two-instruction helper that
+clears `task->func` so the task runs once. The decomp's recovered names call
+that address `printf`, and ps2_recomp binds any function with a runtime stub's
+name to the stub, so the runtime's printf ran instead. The task ran again, the
+second map load released the first one's data, and the area entry read nulls.
+Found by chaining `--trace=ADDR:N` (which now hex-dumps memory at `a0`).
+
+**Fix:** `make_function_map.py` gives a decomp-recovered name that collides with
+a runtime stub name an address suffix (`printf_001024a8`). SDK names found by
+ps2_analyzer are unaffected (those are matched to real library code).
+
+## 14. Opening movie: libmpeg in an overlay, and CD read callbacks
+
+**Symptom:** after New Game the `movie` overlay became resident but the screen
+stayed black at 60 fps.
+
+**Cause, part 1:** Sony's libmpeg is linked into `ovl_movie` and drives the IPU
+directly; the runtime does not emulate the IPU, but it has an ffmpeg-backed
+libmpeg written for Dragon Quest VIII. ps2_analyzer run over
+`build/overlays/movie.elf` finds the library (`config/analyzer/movie.toml`).
+
+**Fix:** `gen_stubs.py --overlay sceMpeg,sceIpu` (plus `--extra` for the three
+small entries it does not name: `sceMpegDelete`, `sceMpegIsEnd`,
+`sceMpegIsRefBuffEmpty`) writes `config/overlays/movie.stubs.toml`, which
+`make_config.py` puts in the overlay's config. The runtime's libmpeg also wrote
+DQ8's libmpeg globals at fixed addresses; `patches/ps2recomp/0004` puts that
+behind `setMpegLegacyGuestGlobals`, which KH2 turns off.
+
+**Cause, part 2:** still no frames: the stream feeder never called the demuxer.
+KH2's async loader (`0x001AE8D8`) starts `sceCdRead` and waits for the CD
+callback registered with `sceCdCallback` to report completion. The runtime's
+`sceCdCallback` discarded the function and its `sceCdRead` notified no one.
+
+**Fix:** `port/runtime/cd_callback.cpp` records the callback and, after each
+read, runs it as an interrupt-context invocation with `SCECdFuncRead`.
+
+Also fixed on the way: the tail-jump forwarders (entry 8) sent a replacement
+that called its original back into itself once (ResetGraph ran twice).
+Replacements now call originals through `kh2::callOriginal`
+(`port/runtime/hle_call.h`), which the forwarders honour.
+
+**Result:** the full opening movie plays with correct colour.

@@ -8,6 +8,8 @@
 #
 # address     what                      replaced in
 0x002F6FA0    sceCdSearchFile           cd_iso.cpp
+0x002F6698    sceCdCallback             cd_callback.cpp
+0x002F7BE8    sceCdRead                 cd_callback.cpp (wraps the stub)
 0x002F28B8    sceGsSetDefLoadImage      gs_image.cpp
 0x002F2BE0    sceGsExecLoadImage        gs_image.cpp
 0x002F1E18    sceGsResetGraph           gs_env.cpp (wraps the stub)

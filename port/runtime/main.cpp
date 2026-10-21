@@ -32,7 +32,22 @@
 #include "dma_log.h"
 #include "gs_image.h"
 #include "gs_env.h"
+#include "cd_callback.h"
 #include "profiler.h"
+
+namespace ps2_stubs
+{
+void setMpegLegacyGuestGlobals(bool enabled); // patches/ps2recomp/0004
+}
+
+// See hle_call.h: set while a replacement calls the function it replaced.
+thread_local bool kh2_callingOriginal = false;
+
+// Movie-path counters kept by the runtime's libmpeg (Kernel/Stubs/MPEG.cpp).
+extern std::atomic<uint64_t> g_mpegDemuxCount;
+extern std::atomic<uint64_t> g_mpegGetPictureCount;
+extern std::atomic<uint64_t> g_mpegWriteFrameCount;
+extern std::atomic<uint64_t> g_mpegDemuxRefusedCount;
 
 namespace
 {
@@ -334,8 +349,14 @@ bool headlessPump(void *userData)
     if (o.statusEvery > 0 && std::chrono::duration<double>(now - h.lastStatus).count() >= o.statusEvery)
     {
         h.lastStatus = now;
-        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s\n", elapsed(h),
-                    (unsigned long long)frame, kh2ovl::activeName(), kh2ovl::switchCount(),
+        char mpeg[128] = "";
+        if (g_mpegDemuxCount.load() || g_mpegGetPictureCount.load())
+            std::snprintf(mpeg, sizeof(mpeg), " mpeg: demux=%llu refused=%llu pictures=%llu frames=%llu",
+                          (unsigned long long)g_mpegDemuxCount.load(), (unsigned long long)g_mpegDemuxRefusedCount.load(),
+                          (unsigned long long)g_mpegGetPictureCount.load(),
+                          (unsigned long long)g_mpegWriteFrameCount.load());
+        std::printf("[status] t=%.1fs guest_frame=%llu overlay=%s overlay_switches=%u%s%s%s\n", elapsed(h),
+                    (unsigned long long)frame, kh2ovl::activeName(), kh2ovl::switchCount(), mpeg,
                     o.trace.empty() ? "" : " calls:", kh2trace::summary().c_str());
         std::fflush(stdout);
     }
@@ -425,8 +446,12 @@ int main(int argc, char **argv)
     kh2pad2::install(runtime);
     kh2gs::install(runtime);
     kh2gs::installEnv(runtime);
+    // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by
+    // default also pokes Dragon Quest VIII's libmpeg globals (patch 0004).
+    ps2_stubs::setMpegLegacyGuestGlobals(false);
     if (!paths.cdImage.empty())
         kh2cd::install(runtime, paths.cdImage.string());
+    kh2cd::installCallbacks(runtime);
     if (!opt.dmaLog.empty())
         kh2dma::install(runtime, opt.dmaLog);
     if (!opt.gsDumpAt.empty())

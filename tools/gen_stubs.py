@@ -8,6 +8,9 @@ the runtime implements but which KH2 must keep as guest code.
 Adapted from DQ8Recomp's tools/oracle/gen_stubs.py (GPL-3.0).
 
 Usage: gen_stubs.py <analyzer.toml> <ps2_call_list.h>  > stubs.toml.fragment
+       gen_stubs.py <overlay analyzer.toml> <ps2_call_list.h> --overlay sceMpeg,sceIpu
+         [--extra name@0xADDR,...] > config/overlays/<name>.stubs.toml
+       (overlay-local SDK copies; for ovl_movie see docs/pipeline.md)
 """
 import re
 import sys
@@ -85,11 +88,26 @@ def proposed_stubs(path):
 
 
 def main():
-    analyzer_toml, call_list = sys.argv[1], sys.argv[2]
+    # Overlay mode: --overlay PREFIX[,PREFIX...] binds only names with these
+    # prefixes and skips the main executable's manual bindings.
+    args = sys.argv[1:]
+    prefixes = None
+    extra = []
+    if "--extra" in args:   # name@0xADDR[,...]: bindings the analyzer did not name
+        i = args.index("--extra")
+        extra = [tuple(e.split("@")) for e in args[i + 1].split(",") if e]
+        del args[i:i + 2]
+    if "--overlay" in args:
+        i = args.index("--overlay")
+        prefixes = tuple(args[i + 1].split(","))
+        del args[i:i + 2]
+    analyzer_toml, call_list = args[0], args[1]
     stubs = macro_names(call_list, "PS2_STUB_LIST")
     syscalls = macro_names(call_list, "PS2_SYSCALL_LIST")
     accepted, as_syscall, unknown, kept = [], [], [], []
     for name, addr in proposed_stubs(analyzer_toml):
+        if prefixes is not None and not name.startswith(prefixes):
+            continue
         if name in DO_NOT_STUB:
             kept.append((name, addr))
         elif name in stubs:
@@ -108,7 +126,7 @@ def main():
     for n, a in unknown:
         log(f"  unknown     : {n}@{a}\n")
 
-    for n, a in MANUAL_STUBS:
+    for n, a in (MANUAL_STUBS if prefixes is None else []) + extra:
         if n not in stubs and n not in syscalls:
             raise SystemExit(f"manual stub {n} has no runtime handler")
         accepted.append((n, a))

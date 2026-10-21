@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "ps2_runtime.h"
+#include "hle_call.h"
 #include "runtime/ps2_pad_host.h"
 
 namespace kh2dma
@@ -136,7 +137,7 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             std::fflush(stdout);
         }
     }
-    g_original(rdram, ctx, runtime);
+    kh2::callOriginal(g_original, rdram, ctx, runtime);
 }
 } // namespace
 

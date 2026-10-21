@@ -71,15 +71,14 @@ def slim_includes(tree: Path):
 SIG_RE = re.compile(r"^void (\w+_0x([0-9a-f]+))\(uint8_t\* ?rdram, R5900Context\* ?ctx, PS2Runtime ?\* ?runtime\) \{$", re.M)
 STUB_CALL_RE = re.compile(r"^    ps2_(stubs|syscalls)::\w+\(rdram, ctx, runtime\);", re.M)
 FORWARD = """    {{ // tools/recomp.py: a tail jump (J) calls this directly; honour PS2Runtime::replaceFunction
-        static thread_local bool s_inReplacement = false;
+        const bool viaOriginal = kh2_callingOriginal; // set by kh2::callOriginal (port/runtime/hle_call.h)
+        kh2_callingOriginal = false;
         const PS2Runtime::RecompiledFunction replacement =
             g_ps2RecompiledFunctionTable[(0x{addr}u - g_ps2RecompiledFunctionTableBase) >> 2];
-        if (!s_inReplacement && replacement && replacement != &{name})
+        if (!viaOriginal && replacement && replacement != &{name})
         {{
-            s_inReplacement = true;
             ctx->pc = 0x{addr}u;
             replacement(rdram, ctx, runtime);
-            s_inReplacement = false;
             return;
         }}
     }}
@@ -111,6 +110,7 @@ def forward_replaced(tree: Path, hle: set):
             continue
         insert = FORWARD.format(addr=f"{addr:x}", name=name)
         text = text[:m.end()] + "\n" + insert.rstrip("\n") + text[m.end():]
+        text = text[:m.start()] + "extern thread_local bool kh2_callingOriginal;\n" + text[m.start():]
         cpp.write_text(text, encoding="utf-8")
         count += 1
     return count

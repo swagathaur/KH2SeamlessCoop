@@ -1,0 +1,165 @@
+vu0: the R register. VRNEXT stepped a made-up generator and never wrote its
+destination register, so every VU0 random number KH2 asks for (403 VRNEXTs,
+mostly in effect code: particle sizes, spreads, lifetimes) was whatever ft
+held before. Now R is the VU's 23-bit LFSR in the mantissa of a float in
+[1, 2): VRNEXT steps it (PCSX2's feedback) and writes ft's dest fields, VRGET
+reads it, VRINIT/VRXOR load and mix only the low 23 bits.
+
+diff --git a/ps2xRecomp/src/lib/r5900_decoder.cpp b/ps2xRecomp/src/lib/r5900_decoder.cpp
+index 9e627a3..bdfd2c6 100644
+--- a/ps2xRecomp/src/lib/r5900_decoder.cpp
++++ b/ps2xRecomp/src/lib/r5900_decoder.cpp
+@@ -921,7 +921,7 @@ namespace ps2recomp
+                     break;
+                 case VU0_S2_VRNEXT:
+                     inst.modificationInfo.modifiesControl = true; /* Modifies R */
+-                    inst.modificationInfo.modifiesVFR = false;
++                    inst.modificationInfo.modifiesVFR = true;     /* and writes ft (patch 0028) */
+                     break;
+                 case VU0_S2_VABS:
+                 case VU0_S2_VMOVE:
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 87b57a9..61c0af6 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -183,20 +183,15 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VRNEXT(const Instruction &inst)
+     {
+-        return fmt::format(
+-            "{{\n"
+-            "    uint32_t r_vals[4];\n"
+-            "    _mm_storeu_si128((__m128i*)r_vals, _mm_castps_si128(ctx->vu0_r));\n"
+-            "\n"
+-            "    // Simple LFSR-based random number generation (PS2-like behavior)\n"
+-            "    uint32_t feedback = r_vals[0] ^ (r_vals[0] << 13) ^ (r_vals[1] >> 19) ^ (r_vals[2] << 7);\n"
+-            "    r_vals[0] = r_vals[1];\n"
+-            "    r_vals[1] = r_vals[2];\n"
+-            "    r_vals[2] = r_vals[3];\n"
+-            "    r_vals[3] = feedback;\n"
+-            "\n"
+-            "    ctx->vu0_r = _mm_castsi128_ps(_mm_loadu_si128((__m128i*)r_vals));\n"
+-            "}}");
++        // patch 0028: step R's 23-bit LFSR and write it (a float in [1, 2)) to
++        // ft's dest fields.
++        uint8_t dest_mask = inst.vectorInfo.vectorField;
++        uint8_t ft_reg = inst.rt;
++        if (ft_reg == 0)
++            return "ctx->vu0_r = ps2_vu_rset(ps2_vu_rnext(ps2_vu_r(ctx->vu0_r)));";
++        return fmt::format("{{ ctx->vu0_r = ps2_vu_rset(ps2_vu_rnext(ps2_vu_r(ctx->vu0_r))); __m128i mask = _mm_set_epi32({}, {}, {}, {}); "
++                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], ctx->vu0_r, _mm_castsi128_ps(mask)); }}",
++                           (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0, ft_reg, ft_reg);
+     }
+ 
+     std::string CodeGenerator::translateVU_VMADD_Field(const Instruction &inst)
+@@ -835,56 +830,28 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VRGET(const Instruction &inst)
+     {
++        // patch 0028: R as the float in [1, 2) it holds.
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+         uint8_t ft_reg = inst.rt;
+-        return fmt::format("{{ __m128 res = ctx->vu0_r; __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0, ft_reg, ft_reg);
++        if (ft_reg == 0)
++            return "";
++        return fmt::format("{{ __m128 res = ps2_vu_rset(ps2_vu_r(ctx->vu0_r)); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0, ft_reg, ft_reg);
+     }
+ 
+     std::string CodeGenerator::translateVU_VRINIT(const Instruction &inst)
+     {
++        // patch 0028: R = 0x3F800000 | the low 23 bits of fs.fsf.
+         uint8_t fs_reg = inst.rd;
+         uint8_t fsf = inst.vectorInfo.fsf;
+-
+-        return fmt::format(
+-            "{{\n"
+-            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{})));\n"
+-            "    uint32_t seed; std::memcpy(&seed, &src, sizeof(seed));\n"
+-            "\n"
+-            "    // PS2 uses a specific LFSR initialization pattern\n"
+-            "    if (seed == 0) seed = 1;\n"
+-            "\n"
+-            "    uint32_t r0 = seed;\n"
+-            "    uint32_t r1 = seed * 0x41C64E6D + 0x3039;\n"
+-            "    uint32_t r2 = r1 * 0x41C64E6D + 0x3039;\n"
+-            "    uint32_t r3 = r2 * 0x41C64E6D + 0x3039;\n"
+-            "\n"
+-            "    ctx->vu0_r = _mm_castsi128_ps(_mm_set_epi32(r3, r2, r1, r0));\n"
+-            "}}",
+-            fs_reg, fs_reg, fsf);
++        return fmt::format("ctx->vu0_r = ps2_vu_rset((uint32_t)_mm_extract_ps(ctx->vu0_vf[{}], {}));", fs_reg, fsf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VRXOR(const Instruction &inst)
+     {
++        // patch 0028: R's 23 bits xor the low 23 bits of fs.fsf.
+         uint8_t fs_reg = inst.rd;
+         uint8_t fsf = inst.vectorInfo.fsf;
+-
+-        return fmt::format(
+-            "{{\n"
+-            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{})));\n"
+-            "    uint32_t src_bits; std::memcpy(&src_bits, &src, sizeof(src_bits));\n"
+-            "    __m128i r_current = _mm_castps_si128(ctx->vu0_r);\n"
+-            "    __m128i fs_data = _mm_set1_epi32((int)src_bits);\n"
+-            "\n"
+-            "    // XOR the current random value with the data from the VU vector register\n"
+-            "    __m128i xored = _mm_xor_si128(r_current, fs_data);\n"
+-            "\n"
+-            "    // Apply a simple mixing function similar to PS2's LFSR\n"
+-            "    __m128i mixed = _mm_xor_si128(xored, _mm_slli_epi32(xored, 7));\n"
+-            "    mixed = _mm_xor_si128(mixed, _mm_srli_epi32(mixed, 9));\n"
+-            "\n"
+-            "    ctx->vu0_r = _mm_castsi128_ps(mixed);\n"
+-            "}}",
+-            fs_reg, fs_reg, fsf);
++        return fmt::format("ctx->vu0_r = ps2_vu_rset(ps2_vu_r(ctx->vu0_r) ^ (uint32_t)_mm_extract_ps(ctx->vu0_vf[{}], {}));", fs_reg, fsf);
+     }
+ 
+ }
+diff --git a/ps2xRuntime/include/ps2_mmi.h b/ps2xRuntime/include/ps2_mmi.h
+index 46ae1e8..f1f26c6 100644
+--- a/ps2xRuntime/include/ps2_mmi.h
++++ b/ps2xRuntime/include/ps2_mmi.h
+@@ -273,4 +273,16 @@ inline __m128i ps2_mmi_pshiftvw(__m128i rsv, __m128i rtv, int kind)
+ #define PS2_MMI_PSRLVW(rs, rt) ps2_mmi_pshiftvw((__m128i)(rs), (__m128i)(rt), 1)
+ #define PS2_MMI_PSRAVW(rs, rt) ps2_mmi_pshiftvw((__m128i)(rs), (__m128i)(rt), 2)
+ 
++// --- VU0 R register (patch 0028): a 23-bit LFSR kept in the mantissa of a
++// float in [1, 2); ctx->vu0_r holds it in every lane.
++inline uint32_t ps2_vu_r(__m128 r) { return (uint32_t)_mm_cvtsi128_si32(_mm_castps_si128(r)); }
++inline __m128 ps2_vu_rset(uint32_t v) { return _mm_castsi128_ps(_mm_set1_epi32((int)(0x3F800000u | (v & 0x007FFFFFu)))); }
++// One step as the VU does it (PCSX2's RNEXT): shift left, feed back bits 4 ^ 22.
++inline uint32_t ps2_vu_rnext(uint32_t r)
++{
++    const uint32_t x = (r >> 4) & 1u, y = (r >> 22) & 1u;
++    r = (r << 1) ^ (x ^ y);
++    return 0x3F800000u | (r & 0x007FFFFFu);
++}
++
+ #endif // PS2_MMI_H
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index e3d29c3..d73f961 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -1201,6 +1201,20 @@ void register_ps2_vu_tests()
+                            (0xFF60u << 16) | 140u),
+                      "PMFHL.SH packs the eight lanes back in halfword order");
+         });
++        tc.Run("VU0 R register stays a float in [1, 2)", [&](TestCase &t)
++        {
++            uint32_t r = ps2_vu_r(ps2_vu_rset(0x12345678u));
++            t.IsTrue(r == (0x3F800000u | (0x12345678u & 0x7FFFFFu)), "RINIT keeps the low 23 bits");
++            bool ok = true;
++            for (int i = 0; i < 1000; ++i)
++            {
++                r = ps2_vu_rnext(r);
++                float f;
++                std::memcpy(&f, &r, 4);
++                ok = ok && f >= 1.0f && f < 2.0f;
++            }
++            t.IsTrue(ok, "RNEXT values lie in [1, 2)");
++        });
+         tc.Run("word multiply, divide, variable shift", [&](TestCase &t)
+         {
+             R5900Context ctx{};

@@ -1242,6 +1242,28 @@ public:
                 }
             }
         }
+        // Diagnostics: KH2_HD_DUMP=<folder> writes each new composite and its
+        // base image as raw RGBA (<name>_<w>x<h>.rgba).
+        static const char *dump = std::getenv("KH2_HD_DUMP");
+        if (dump && m_compDumped < 60)
+        {
+            auto write = [&](const char *tag, const std::vector<uint8_t> &px) {
+                char name[512];
+                std::snprintf(name, sizeof(name), "%s/%03d_%s_%dx%d.rgba", dump, m_compDumped, tag, bw, bh);
+                if (FILE *fd = std::fopen(name, "wb"))
+                {
+                    std::fwrite(px.data(), 1, px.size(), fd);
+                    std::fclose(fd);
+                }
+            };
+            write("base", *b);
+            write("comp", out);
+            std::printf("[hd] dump %03d: %s rect %u,%u %ux%u, %zu patch(es)\n", m_compDumped,
+                        m_entries[size_t(base)].path.c_str(), rx, ry, rw, rh, patches.size());
+            for (const Patch &p : patches)
+                std::printf("[hd]   patch %u,%u %ux%u <- %s\n", p.x, p.y, p.w, p.h, m_entries[size_t(p.entry)].path.c_str());
+            ++m_compDumped;
+        }
         Vulkan::ImageHandle img = upload(out, bw, bh);
         if (m_log && m_loggedComposites++ < 40)
             std::printf("[hd] composite %s with %zu animation frame(s)\n", m_entries[size_t(base)].source.c_str(),
@@ -1278,6 +1300,7 @@ public:
     std::vector<Entry> m_entries;
     std::unordered_multimap<uint64_t, int> m_byKey;
     std::vector<Region> m_regions;
+    int m_compDumped = 0; // KH2_HD_DUMP
     std::unordered_map<int, ImageSlot> m_images;
     uint64_t m_imageBytes = 0;
     std::vector<PixelCache> m_pixelCache;

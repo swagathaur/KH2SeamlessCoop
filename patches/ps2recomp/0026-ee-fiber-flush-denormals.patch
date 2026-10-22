@@ -1,0 +1,52 @@
+ee: guest fibers run with MXCSR DAZ|FTZ: the PS2's FPU and VUs treat denormal
+operands as zero and flush denormal results to zero.
+
+diff --git a/ps2xRuntime/src/lib/Kernel/EeFiber.cpp b/ps2xRuntime/src/lib/Kernel/EeFiber.cpp
+index 4961db6..4a8ed60 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeFiber.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeFiber.cpp
+@@ -4,6 +4,20 @@
+ #include <cstring>
+ #include <new>
+ 
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++#include <xmmintrin.h>
++// Guest code flushes denormals like the PS2's FPU and VUs, which treat
++// denormal operands as zero and return zero for results too small to be
++// normal: MXCSR DAZ | FTZ for every EE fiber (each fiber keeps its own MXCSR).
++// (patch 0026)
++static inline void eeFiberGuestFpMode()
++{
++    _mm_setcsr(_mm_getcsr() | 0x8040u);
++}
++#else
++static inline void eeFiberGuestFpMode() {}
++#endif
++
+ #if defined(_WIN32)
+ #define EE_FIBER_WIN32 1
+ #ifndef WIN32_LEAN_AND_MEAN
+@@ -173,6 +187,7 @@ namespace
+     extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
+     {
+         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
++        eeFiberGuestFpMode();
+         boot->entry(boot->user);
+         std::abort(); // entry must never return
+     }
+@@ -192,6 +207,7 @@ namespace
+     extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
+     {
+         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
++        eeFiberGuestFpMode();
+         boot->entry(boot->user);
+         std::abort();
+     }
+@@ -267,6 +283,7 @@ namespace
+     void WINAPI fiberStart(void *param)
+     {
+         auto *self = static_cast<FiberPlatform *>(param);
++        eeFiberGuestFpMode();
+         self->entry(self->user);
+         std::abort(); // returning would end the thread
+     }

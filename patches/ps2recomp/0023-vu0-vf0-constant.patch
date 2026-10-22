@@ -1,0 +1,56 @@
+vu0: VF0 stays (0, 0, 0, 1). An instruction with VF0 as destination (games
+use "vsub.xy vf0, a, b" for its flags) or an LQC2 into it no longer changes
+it. KH2 does this in the Sandlot after the Seifer cutscene; the clobbered
+VF0 zeroed the camera view matrix (black 3D) and the IK chains.
+
+diff --git a/ps2xRecomp/src/lib/code_generator.cpp b/ps2xRecomp/src/lib/code_generator.cpp
+index 693bd81..5981f4c 100644
+--- a/ps2xRecomp/src/lib/code_generator.cpp
++++ b/ps2xRecomp/src/lib/code_generator.cpp
+@@ -270,6 +270,12 @@ namespace ps2recomp
+             for (size_t at = code.find(from); at != std::string::npos; at = code.find(from, at + to.size()))
+                 code.replace(at, from.size(), to);
+         }
++        // VF0 is hardwired to (0, 0, 0, 1). Games write to it on purpose to
++        // set the flags without keeping a result (KH2: "vsub.xy vf0, vf4,
++        // vf11" to compare two points); the write must not stick, or every
++        // later use of vf0 (w = 1 for translations, vdiv vf0w) breaks.
++        if (code.find("ctx->vu0_vf[0] = ") != std::string::npos)
++            code += " ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);";
+         return code;
+     }
+ 
+diff --git a/ps2xRecomp/src/lib/instruction_translator.cpp b/ps2xRecomp/src/lib/instruction_translator.cpp
+index ae38ffa..8c33661 100644
+--- a/ps2xRecomp/src/lib/instruction_translator.cpp
++++ b/ps2xRecomp/src/lib/instruction_translator.cpp
+@@ -217,6 +217,9 @@ namespace ps2recomp
+                 inst.rt,
+                 genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), "bits"));
+         case OPCODE_LDC2:
++            // VF0 is hardwired to (0, 0, 0, 1): a load into it is discarded.
++            if (inst.rt == 0)
++                return "// LQC2 into VF0 ignored";
+             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps({});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
+         case OPCODE_SDC2:
+             return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)) + ";";
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 77d39de..c6b9507 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -191,6 +191,15 @@ void register_code_generator_tests()
+                  "ABS.S keeps its different fs operand encoding");
+     });
+ 
++    tc.Run("VU0 writes to VF0 do not stick", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++        R5900Decoder decoder;
++        // vsub.xy vf0, vf4, vf11 (KH2 0x1f81fc): flags only.
++        const auto code = gen.translateInstruction(decoder.decodeInstruction(0x1000, 0x4b8b202cu));
++        t.IsTrue(code.find("ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);") != std::string::npos,
++                 "VF0 is restored after an instruction that names it as destination");
++    });
++
+     tc.Run("VU0 macro arithmetic saturates like the VUs", [](TestCase &t) {
+         CodeGenerator gen({}, {});
+         R5900Decoder decoder;

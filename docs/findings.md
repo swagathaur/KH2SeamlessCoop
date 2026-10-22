@@ -325,3 +325,30 @@ FINISH!, LEVEL UP!) have bigger pictures (a 512x256 gauge sheet where the
 disc has 256x256, 30 % more data) and their own layout; with them this
 executable corrupts memory in Olympus Coliseum. The overrides leave them
 out; the disc's sheets already use English words.
+
+## Floating point: no infinities, NaNs or writable VF0
+
+The EE's FPU and the VUs saturate: a zero divisor gives +-FLT_MAX, an
+overflow FLT_MAX, a square root of a negative number sqrt(|x|), and VF0 is
+hardwired to (0, 0, 0, 1). Host floats do none of this, and KH2 depends on
+all of it after the Seifer cutscene in the Sandlot (event 78):
+
+- `FUN_001f7e90` (a clip test) runs `vsub.xy vf0, vf4, vf11` and reads the
+  status flags (`cfc2 vi16`). Writing the result into VF0 broke every later
+  `vdiv Q, vf0w, ...` and `vmaddw ... vf0w`: the camera's view matrix
+  (`kn::Camera` at `0x003A7F70`, view at +0x10, eye +0x50, target +0x60, up
+  +0x70, roll +0x80; built by `0x00107118`) came out all zero, bone matrices
+  too, and the 3D went black behind the HUD. Patch 0023 keeps VF0.
+- The IK (`0x00124CA8`, called from the model update `0x00129C38`) then
+  normalised zero vectors; the host infinities became NaN positions and
+  cameras. Patches 0021 (DIV.S/SQRT.S/RSQRT.S) and 0022 (VU0 VADD/VSUB/VMUL)
+  saturate like the hardware.
+
+The status/MAC flags of VU0 macro arithmetic are still not computed, so code
+like the clip test above reads stale flags. `PS2X_FPU_LOG=1` prints the sites
+of divisions by zero with their `$ra`.
+
+Diagnostics used for this: `KH2_PGS_TRACE_FBP=<fbp|999>:<from>:<lines>[:<to>]`
+(state changes of draws into a frame buffer, transfers and CLUT loads, from
+the GIF stream), `KH2_PGS_VRAM_DUMP=<tick>,...` (paraLLEl-GS VRAM),
+`KH2_RAM_DUMP=<frame>,...` (guest RAM and scratchpad), `KH2_PGS_NO_READBACK`.

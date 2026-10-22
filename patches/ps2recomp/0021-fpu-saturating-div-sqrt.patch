@@ -1,0 +1,125 @@
+fpu: DIV.S, SQRT.S and RSQRT.S saturate like the R5900 instead of making host
+infinities and NaNs: a zero divisor gives +-FLT_MAX, a negative radicand |x|,
+an overflow FLT_MAX. KH2 divided by zero at the start of the second Seifer
+fight in the Sandlot; the infinity became NaN positions (black 3D).
+ps2FpuDivideByZero(pc) is called at each zero divide (PS2X_FPU_LOG=1 lists
+the sites).
+
+diff --git a/ps2xRecomp/src/lib/fpu_translator.cpp b/ps2xRecomp/src/lib/fpu_translator.cpp
+index 8b57fb6..6bc63a6 100644
+--- a/ps2xRecomp/src/lib/fpu_translator.cpp
++++ b/ps2xRecomp/src/lib/fpu_translator.cpp
+@@ -53,13 +53,21 @@ namespace ps2recomp
+             case COP1_S_MUL:
+                 return fmt::format("ctx->f[{}] = FPU_MUL_S(ctx->f[{}], ctx->f[{}]);", fd, fs, ft);
+             case COP1_S_DIV:
+-                return fmt::format("if (ctx->f[{}] == 0.0f) {{ ctx->fcr31 |= 0x100000; /* DZ flag */ "
+-                                   "ctx->f[{}] = copysignf(INFINITY, ctx->f[{}] * 0.0f); }} "
+-                                   "else ctx->f[{}] = ctx->f[{}] / ctx->f[{}];",
+-                                   ft, fd, fs, fd, fs, ft);
++                // The R5900 has no infinities or NaNs: a zero (or denormal)
++                // divisor gives +-FLT_MAX with the operands' sign, and an
++                // overflow saturates. Host infinities would turn into NaNs
++                // later (inf * 0) and spread through positions and cameras.
++                return fmt::format("{{ uint32_t ps2_a, ps2_b; std::memcpy(&ps2_a, &ctx->f[{}], 4); std::memcpy(&ps2_b, &ctx->f[{}], 4); "
++                                   "if ((ps2_b & 0x7F800000u) == 0) {{ ctx->fcr31 |= 0x100000; /* DZ flag */ "
++                                   "void ps2FpuDivideByZero(uint32_t, uint32_t); ps2FpuDivideByZero(0x{:x}u, GPR_U32(ctx, 31)); "
++                                   "uint32_t ps2_r = ((ps2_a ^ ps2_b) & 0x80000000u) | 0x7F7FFFFFu; std::memcpy(&ctx->f[{}], &ps2_r, 4); }} "
++                                   "else {{ float ps2_q = ctx->f[{}] / ctx->f[{}]; "
++                                   "ctx->f[{}] = std::isfinite(ps2_q) ? ps2_q : copysignf(3.40282347e38f, ps2_q); }} }}",
++                                   fs, ft, inst.address, fd, fs, ft, fd);
+             case COP1_S_SQRT:
+                 // R5900 SQRT.S uses ft, unlike ABS.S/MOV.S/NEG.S.
+-                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, ft);
++                // A negative operand gives sqrt(|x|) on the R5900, not a NaN.
++                return fmt::format("ctx->f[{}] = sqrtf(fabsf(ctx->f[{}]));", fd, ft);
+             case COP1_S_ABS:
+                 return fmt::format("ctx->f[{}] = FPU_ABS_S(ctx->f[{}]);", fd, fs);
+             case COP1_S_MOV:
+@@ -78,7 +86,14 @@ namespace ps2recomp
+                 return fmt::format("{{ int32_t tmp = FPU_CVT_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
+             case COP1_S_RSQRT:
+                 // fd = fs / sqrt(ft), like the VU's RSQRT.
+-                return fmt::format("ctx->f[{}] = ctx->f[{}] / sqrtf(ctx->f[{}]);", fd, fs, ft);
++                // As DIV.S/SQRT.S: a zero radicand gives +-FLT_MAX, a negative one |x|.
++                return fmt::format("{{ uint32_t ps2_a, ps2_b; std::memcpy(&ps2_a, &ctx->f[{}], 4); std::memcpy(&ps2_b, &ctx->f[{}], 4); "
++                                   "if ((ps2_b & 0x7F800000u) == 0) {{ ctx->fcr31 |= 0x100000; "
++                                   "void ps2FpuDivideByZero(uint32_t, uint32_t); ps2FpuDivideByZero(0x{:x}u, GPR_U32(ctx, 31)); "
++                                   "uint32_t ps2_r = (ps2_a & 0x80000000u) | 0x7F7FFFFFu; std::memcpy(&ctx->f[{}], &ps2_r, 4); }} "
++                                   "else {{ float ps2_q = ctx->f[{}] / sqrtf(fabsf(ctx->f[{}])); "
++                                   "ctx->f[{}] = std::isfinite(ps2_q) ? ps2_q : copysignf(3.40282347e38f, ps2_q); }} }}",
++                                   fs, ft, inst.address, fd, fs, ft, fd);
+             case COP1_S_ADDA:
+                 return fmt::format("FPU_SET_ACC(ctx, FPU_ADD_S(ctx->f[{}], ctx->f[{}]));", fs, ft);
+             case COP1_S_SUBA:
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 91e6e0d..1534085 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -28,6 +28,9 @@
+ #include <chrono>
+ #include <atomic>
+ #include <thread>
++#include <mutex>
++#include <cstdio>
++#include <cstdlib>
+ #include <unordered_map>
+ #include <sstream>
+ 
+@@ -2694,3 +2697,23 @@ void PS2Runtime::run()
+ 
+     RUNTIME_LOG("[run] exiting loop");
+ }
++
++// Generated DIV.S/RSQRT.S code calls this when the divisor is zero (patch
++// 0021): the result saturates as on the R5900. PS2X_FPU_LOG=1 prints the
++// first few divisions at each site (with $ra), to find guest code that
++// relies on it.
++void ps2FpuDivideByZero(uint32_t pc, uint32_t ra)
++{
++    static const bool log = std::getenv("PS2X_FPU_LOG") != nullptr;
++    if (!log)
++        return;
++    static std::mutex mutex;
++    static std::unordered_map<uint32_t, uint64_t> seen;
++    std::lock_guard<std::mutex> lock(mutex);
++    const uint64_t n = seen[pc]++;
++    if (n < 3)
++    {
++        std::printf("[fpu] divide by zero at 0x%08X (ra 0x%08X)\n", pc, ra);
++        std::fflush(stdout);
++    }
++}
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index c8f8deb..4fabbe7 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -179,7 +179,7 @@ void register_code_generator_tests()
+                 const auto inst = decoder.decodeInstruction(0x1000, raw);
+                 const auto generated = gen.translateInstruction(inst);
+                 const std::string expected = "ctx->f[" + std::to_string(destination) +
+-                    "] = FPU_SQRT_S(ctx->f[" + std::to_string(source) + "]);";
++                    "] = sqrtf(fabsf(ctx->f[" + std::to_string(source) + "]));";
+                 t.IsTrue(generated.find(expected) != std::string::npos,
+                          "SQRT.S operand comes from instruction bits 20:16");
+             }
+@@ -197,8 +197,18 @@ void register_code_generator_tests()
+         const uint32_t rawFpu = (OPCODE_COP1 << 26) | (COP1_S << 21) | (4u << 16) |
+                                 (9u << 11) | (2u << 6) | COP1_S_RSQRT;
+         const auto fpu = gen.translateInstruction(decoder.decodeInstruction(0x1000, rawFpu));
+-        t.IsTrue(fpu.find("ctx->f[2] = ctx->f[9] / sqrtf(ctx->f[4]);") != std::string::npos,
++        t.IsTrue(fpu.find("float ps2_q = ctx->f[9] / sqrtf(fabsf(ctx->f[4]));") != std::string::npos,
+                  "RSQRT.S divides fs by the root of ft");
++        t.IsTrue(fpu.find("0x7F7FFFFFu") != std::string::npos && fpu.find("INFINITY") == std::string::npos,
++                 "RSQRT.S saturates to FLT_MAX instead of an infinity");
++
++        // div.s $f2, $f9, $f4: a zero divisor saturates like the R5900 (no infinities).
++        const uint32_t rawDiv = (OPCODE_COP1 << 26) | (COP1_S << 21) | (4u << 16) |
++                                (9u << 11) | (2u << 6) | COP1_S_DIV;
++        const auto div = gen.translateInstruction(decoder.decodeInstruction(0x1000, rawDiv));
++        t.IsTrue(div.find("float ps2_q = ctx->f[9] / ctx->f[4];") != std::string::npos &&
++                     div.find("0x7F7FFFFFu") != std::string::npos && div.find("INFINITY") == std::string::npos,
++                 "DIV.S divides fs by ft and saturates a zero divisor to FLT_MAX");
+ 
+         // vrsqrt Q, vf12x, vf6x, as Dragon Quest VIII's distance constraints use it.
+         const auto vu = gen.translateInstruction(decoder.decodeInstruction(0x1000, 0x4a0663beu));

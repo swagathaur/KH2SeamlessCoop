@@ -1,0 +1,75 @@
+vu0: macro-mode VADD/VSUB/VMUL results saturate to +-FLT_MAX like the VUs
+(ps2_vu_saturate.h) instead of making host infinities, which became NaNs.
+The generator emits PS2_V*_SAT; tools/recomp.py includes ps2_vu_saturate.h
+in files that use them.
+
+diff --git a/ps2xRecomp/src/lib/code_generator.cpp b/ps2xRecomp/src/lib/code_generator.cpp
+index 68b0984..693bd81 100644
+--- a/ps2xRecomp/src/lib/code_generator.cpp
++++ b/ps2xRecomp/src/lib/code_generator.cpp
+@@ -260,7 +260,17 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVUInstruction(const Instruction &inst)
+     {
+-        return VuTranslator(*this).translate(inst);
++        // VU0 results saturate like the hardware (ps2_vu_saturate.h): host
++        // infinities would turn into NaNs that the PS2 never makes.
++        std::string code = VuTranslator(*this).translate(inst);
++        for (const char *op : {"PS2_VADD(", "PS2_VSUB(", "PS2_VMUL("})
++        {
++            const std::string from = op;
++            const std::string to = from.substr(0, from.size() - 1) + "_SAT(";
++            for (size_t at = code.find(from); at != std::string::npos; at = code.find(from, at + to.size()))
++                code.replace(at, from.size(), to);
++        }
++        return code;
+     }
+ 
+     CodeGenerator::AnalysisResult CodeGenerator::collectInternalBranchTargets(
+diff --git a/ps2xRuntime/include/ps2_vu_saturate.h b/ps2xRuntime/include/ps2_vu_saturate.h
+new file mode 100644
+index 0000000..657f108
+--- /dev/null
++++ b/ps2xRuntime/include/ps2_vu_saturate.h
+@@ -0,0 +1,20 @@
++#pragma once
++// VU0 macro-mode arithmetic that saturates like the PS2's VUs (patch 0022).
++// The VUs have no infinities or NaNs: an overflow gives +-FLT_MAX, so
++// FLT_MAX * FLT_MAX stays FLT_MAX and FLT_MAX - FLT_MAX is 0. With host
++// floats the same code makes infinities and then NaNs, which KH2 spreads
++// into positions and cameras. Generated code that uses VU0 includes this
++// header (tools/recomp.py adds the include).
++#include "ps2_runtime_macros.h"
++
++inline __m128 ps2_vu_saturate(__m128 v)
++{
++    const __m128 max = _mm_set1_ps(3.40282347e38f);
++    const __m128 min = _mm_set1_ps(-3.40282347e38f);
++    // max/min return the second operand for a NaN: a NaN becomes -FLT_MAX.
++    return _mm_min_ps(_mm_max_ps(v, min), max);
++}
++
++#define PS2_VADD_SAT(a, b) ps2_vu_saturate(PS2_VADD(a, b))
++#define PS2_VSUB_SAT(a, b) ps2_vu_saturate(PS2_VSUB(a, b))
++#define PS2_VMUL_SAT(a, b) ps2_vu_saturate(PS2_VMUL(a, b))
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 4fabbe7..77d39de 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -191,6 +191,16 @@ void register_code_generator_tests()
+                  "ABS.S keeps its different fs operand encoding");
+     });
+ 
++    tc.Run("VU0 macro arithmetic saturates like the VUs", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++        R5900Decoder decoder;
++        // vadd.xyzw vf3, vf1, vf2
++        const uint32_t raw = (0x12u << 26) | (1u << 25) | (0xFu << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u;
++        const auto code = gen.translateInstruction(decoder.decodeInstruction(0x1000, raw));
++        t.IsTrue(code.find("PS2_VADD_SAT(") != std::string::npos && code.find("PS2_VADD(") == std::string::npos,
++                 "VADD goes through the saturating macro");
++    });
++
+     tc.Run("RSQRT keeps its numerator on the FPU and in VU0 macro mode", [](TestCase &t) {
+         CodeGenerator gen({}, {});
+         R5900Decoder decoder;

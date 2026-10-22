@@ -125,11 +125,183 @@ uint64_t g_enqueued = 0;         // packets queued so far (under g_queueMutex)
 uint64_t g_processed = 0;        // packets fed to paraLLEl-GS (render thread)
 constexpr size_t kQueueLimit = 256u << 20; // past this the producer waits (render thread stuck)
 
+// KH2_PGS_TRACE_FBP=<fbp>[:fromVsync[:lines]]: logs every change of drawing
+// state for primitives drawn into that frame buffer (colour, texture, blend),
+// parsed from the GIF stream as it is queued. Diagnostics only.
+struct GifTrace
+{
+    bool on = false;
+    uint32_t fbp = 0;
+    uint64_t from = 0, to = ~0ull;
+    int left = 0;
+    uint64_t vsync = 0;
+    uint64_t prim = 0, rgbaq = 0, frame[2] = {}, tex0[2] = {}, alpha[2] = {}, test[2] = {}, zbuf[2] = {}, bitblt = 0, trxpos = 0, trxreg = 0, scissor[2] = {}, xyoff[2] = {};
+    std::string last;
+    GifTrace()
+    {
+        const char *e = std::getenv("KH2_PGS_TRACE_FBP");
+        if (!e)
+            return;
+        unsigned long long a = 0, b = 0, t = ~0ull;
+        int n = 2000;
+        std::sscanf(e, "%llu:%llu:%d:%llu", &a, &b, &n, &t);
+        to = t;
+        on = true;
+        fbp = uint32_t(a);
+        from = b;
+        left = n;
+    }
+    void kick(uint32_t x, uint32_t y, uint32_t z = 0)
+    {
+        if (vsync < from || vsync > to || left <= 0)
+            return;
+        const int c = int((prim >> 9) & 1);
+        if (fbp != 999 && (frame[c] & 0x1FF) != fbp)
+            return;
+        char key[400];
+        std::snprintf(key, sizeof(key), "fb=%llx prim=%03llx rgba=%08llx tex0=%016llx alpha=%llx test=%llx fbmsk=%08llx zbuf=%llx sc=%llx of=%llx sz=%x",
+                      (unsigned long long)(frame[c] & 0xFFFFFFFF), (unsigned long long)(prim & 0x7FF), (unsigned long long)(rgbaq & 0xFFFFFFFF),
+                      (unsigned long long)tex0[c], (unsigned long long)alpha[c], (unsigned long long)test[c],
+                      (unsigned long long)(frame[c] >> 32), (unsigned long long)zbuf[c], (unsigned long long)scissor[c], (unsigned long long)xyoff[c], (prim & 7) == 6 ? z : 0u);
+        if (last == key)
+            return;
+        last = key;
+        --left;
+        std::fprintf(stderr, "[trace] v%llu fbp=%u %s xy=%u,%u z=%08x\n", (unsigned long long)vsync, uint32_t(frame[c] & 0x1FF), key, x >> 4, y >> 4, z);
+    }
+    void clut(uint32_t r, uint64_t v)
+    {
+        const uint32_t cld = uint32_t(v >> 61);
+        if (cld == 0 || vsync < from || vsync > to || left <= 0)
+            return;
+        --left;
+        std::fprintf(stderr, "[trace] v%llu clut reg=%02x cld=%u cbp=%llu cpsm=%llu csm=%llu csa=%llu (tbp=%llu psm=%llu)\n",
+                     (unsigned long long)vsync, r, cld, (unsigned long long)((v >> 37) & 0x3FFF),
+                     (unsigned long long)((v >> 51) & 0xF), (unsigned long long)((v >> 55) & 1),
+                     (unsigned long long)((v >> 56) & 0x1F), (unsigned long long)(v & 0x3FFF),
+                     (unsigned long long)((v >> 20) & 0x3F));
+    }
+    void reg(uint32_t r, uint64_t v)
+    {
+        switch (r)
+        {
+        case 0x00: prim = v; break;
+        case 0x01: rgbaq = v; break;
+        case 0x04:
+        case 0x05: kick(uint32_t(v & 0xFFFF), uint32_t((v >> 16) & 0xFFFF), uint32_t(v >> 32)); break;
+        case 0x06: tex0[0] = v; clut(r, v); break;
+        case 0x07: tex0[1] = v; clut(r, v); break;
+        case 0x16:
+        case 0x17: clut(r, v); break;
+        case 0x42: alpha[0] = v; break;
+        case 0x43: alpha[1] = v; break;
+        case 0x47: test[0] = v; break;
+        case 0x48: test[1] = v; break;
+        case 0x40: scissor[0] = v; break;
+        case 0x41: scissor[1] = v; break;
+        case 0x18: xyoff[0] = v; break;
+        case 0x19: xyoff[1] = v; break;
+        case 0x50: bitblt = v; break;
+        case 0x51: trxpos = v; break;
+        case 0x52: trxreg = v; break;
+        case 0x53:
+            if (vsync >= from && vsync <= to && left > 0)
+            {
+                --left;
+                std::fprintf(stderr, "[trace] v%llu xfer dir=%llu sbp=%llu sbw=%llu spsm=%llx dbp=%llu dbw=%llu dpsm=%llx pos=%llx size=%llux%llu\n",
+                             (unsigned long long)vsync, (unsigned long long)(v & 3), (unsigned long long)(bitblt & 0x3FFF),
+                             (unsigned long long)((bitblt >> 16) & 0x3F), (unsigned long long)((bitblt >> 24) & 0x3F),
+                             (unsigned long long)((bitblt >> 32) & 0x3FFF), (unsigned long long)((bitblt >> 48) & 0x3F),
+                             (unsigned long long)((bitblt >> 56) & 0x3F), (unsigned long long)trxpos,
+                             (unsigned long long)(trxreg & 0xFFF), (unsigned long long)((trxreg >> 32) & 0xFFF));
+            }
+            break;
+        case 0x4e: zbuf[0] = v; break;
+        case 0x4f: zbuf[1] = v; break;
+        case 0x4c: frame[0] = v; break;
+        case 0x4d: frame[1] = v; break;
+        default: break;
+        }
+    }
+    void packet(const uint8_t *data, uint32_t size)
+    {
+        uint32_t at = 0;
+        while (at + 16 <= size)
+        {
+            uint64_t lo, hi;
+            std::memcpy(&lo, data + at, 8);
+            std::memcpy(&hi, data + at + 8, 8);
+            at += 16;
+            const uint32_t nloop = uint32_t(lo & 0x7FFF);
+            const uint32_t flg = uint32_t((lo >> 58) & 3);
+            uint32_t nreg = uint32_t(lo >> 60);
+            if (nreg == 0)
+                nreg = 16;
+            if ((lo >> 46) & 1)
+                prim = (lo >> 47) & 0x7FF;
+            if (flg == 0)
+            {
+                for (uint32_t i = 0; i < nloop; ++i)
+                    for (uint32_t j = 0; j < nreg && at + 16 <= size; ++j, at += 16)
+                    {
+                        const uint32_t r = uint32_t((hi >> (4 * j)) & 0xF);
+                        uint32_t w[4];
+                        std::memcpy(w, data + at, 16);
+                        uint64_t d0;
+                        std::memcpy(&d0, data + at, 8);
+                        switch (r)
+                        {
+                        case 0x0: reg(0x00, d0); break;
+                        case 0x1:
+                            rgbaq = (w[0] & 0xFF) | ((w[1] & 0xFF) << 8) | ((w[2] & 0xFF) << 16) | (uint64_t(w[3] & 0xFF) << 24);
+                            break;
+                        case 0x4:
+                        case 0x5:
+                            if (!((w[3] >> 15) & 1))
+                                kick(w[0] & 0xFFFF, w[1] & 0xFFFF, r == 0x5 ? w[2] : (w[2] >> 4) & 0xFFFFFF);
+                            break;
+                        case 0xE:
+                        {
+                            uint64_t a;
+                            std::memcpy(&a, data + at + 8, 8);
+                            reg(uint32_t(a & 0xFF), d0);
+                            break;
+                        }
+                        default:
+                            if (r >= 0x6 && r <= 0xD)
+                                reg(r, d0);
+                            break;
+                        }
+                    }
+            }
+            else if (flg == 1)
+            {
+                const uint32_t count = nloop * nreg;
+                for (uint32_t k = 0; k < count && at + 8 <= size; ++k)
+                {
+                    uint64_t v;
+                    std::memcpy(&v, data + at + 8 * (k & 1), 8);
+                    reg(uint32_t((hi >> (4 * (k % nreg))) & 0xF), v);
+                    if (k & 1)
+                        at += 16;
+                }
+                if (count & 1)
+                    at += 16;
+            }
+            else
+                at += nloop * 16;
+        }
+    }
+};
+GifTrace g_trace;
+
 void tapPacket(const uint8_t *data, uint32_t size, void *)
 {
     size &= ~15u;
     if (size == 0)
         return;
+    if (g_trace.on)
+        g_trace.packet(data, size);
     std::unique_lock<std::mutex> lock(g_queueMutex);
     if (g_queue.size() > kQueueLimit &&
         !g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; }))
@@ -180,9 +352,11 @@ bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, u
                      std::vector<uint8_t> &out, void *)
 {
     static int logged = 0;
-    if (std::getenv("KH2_PGS_READBACK_LOG") && logged++ < 64)
+    static const int logLimit = std::getenv("KH2_PGS_READBACK_LOG") ? std::atoi(std::getenv("KH2_PGS_READBACK_LOG")) : 0;
+    if (logged++ < logLimit)
         std::printf("[pgs] readback sbp %u sbw %u psm 0x%02X at %u,%u %ux%u\n", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
-    if (!g_gs || g_opt.keepSoftwareRaster)
+    static const bool disabled = std::getenv("KH2_PGS_NO_READBACK") != nullptr; // diagnostics
+    if (!g_gs || g_opt.keepSoftwareRaster || disabled)
         return false;
     const uint32_t bits = transferBits(spsm);
     if (!bits || !rrw || !rrh)
@@ -211,7 +385,7 @@ bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, u
     out.swap(g_rbData);
     g_rbData.clear();
     static int dumped = 0;
-    if (std::getenv("KH2_PGS_READBACK_LOG") && dumped < 4)
+    if (std::getenv("KH2_PGS_READBACK_DUMP") && dumped < 4)
     {
         char name[64];
         std::snprintf(name, sizeof(name), "readback_%d_%ux%u_psm%02X.bin", dumped++, rrw, rrh, spsm);
@@ -1047,11 +1221,37 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 #endif
     if (!g_active)
         return !g_closed;
+    g_trace.vsync = vsyncTick;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         registerThread();
         drainQueue();
         g_gs->flush();
+        // KH2_PGS_VRAM_DUMP=<tick>[,<tick>...]: writes paraLLEl-GS's VRAM
+        // (4 MB, swizzled) to vram_<tick>.bin. Diagnostics only.
+        if (const char *dump = std::getenv("KH2_PGS_VRAM_DUMP"))
+        {
+            for (const char *p = dump; *p;)
+            {
+                char *end = nullptr;
+                const unsigned long long t = std::strtoull(p, &end, 10);
+                if (end == p)
+                    break;
+                if (t == vsyncTick)
+                {
+                    const void *mem = g_gs->map_vram_read(0, 4u << 20);
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "vram_%llu.bin", t);
+                    if (FILE *f = std::fopen(name, "wb"))
+                    {
+                        std::fwrite(mem, 1, 4u << 20, f);
+                        std::fclose(f);
+                        std::fprintf(stderr, "[pgs] wrote %s\n", name);
+                    }
+                }
+                p = *end ? end + 1 : end;
+            }
+        }
         applyPending();
         copyPrivRegisters(priv);
         VSyncInfo info = {};

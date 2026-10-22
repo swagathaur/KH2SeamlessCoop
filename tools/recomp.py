@@ -37,6 +37,8 @@ def run(cmd, log=None):
 
 DECL_RE = re.compile(r"^void (\w+)\(uint8_t\* ?rdram, R5900Context\* ?ctx, PS2Runtime ?\* ?runtime\);$", re.M)
 NAME_RE = re.compile(r"\b(\w+_0x[0-9a-f]+)\b")
+MACROS_INCLUDE = '#include "ps2_runtime_macros.h"\n'
+VU_SATURATE_INCLUDE = '#include "ps2_vu_saturate.h"\n'
 GLOBAL_INCLUDES = ('#include "ps2_recompiled_functions.h"\n', '#include "ps2_recompiled_stubs.h"\n')
 
 
@@ -65,6 +67,10 @@ def slim_includes(tree: Path):
         block = "".join(f"{decls[n]}\n" for n in used)
         text = text.replace(GLOBAL_INCLUDES[0], "// declarations (tools/recomp.py slim_includes)\n" + block, 1)
         text = text.replace(GLOBAL_INCLUDES[1], "", 1)
+        # Saturating VU0 arithmetic (patches/ps2recomp/0022): only the files
+        # that use it include the header, so it needs no full rebuild.
+        if "_SAT(" in text and VU_SATURATE_INCLUDE not in text:
+            text = text.replace(MACROS_INCLUDE, MACROS_INCLUDE + VU_SATURATE_INCLUDE, 1)
         cpp.write_text(text, encoding="utf-8")
 
 

@@ -956,6 +956,34 @@ bool harnessTick(Harness &h, uint64_t frame)
     }
     if (o.skipCutscenesUntil && due(o.skipCutscenesUntil))
         kh2skip::setAutoSkip(false);
+    // KH2_RAM_DUMP=<frame>[,<frame>...]: writes the 32 MB of guest RAM to
+    // rdram_<frame>.bin. Diagnostics only.
+    if (const char *dump = std::getenv("KH2_RAM_DUMP"))
+        for (const char *p = dump; *p;)
+        {
+            char *end = nullptr;
+            const unsigned long long at = std::strtoull(p, &end, 10);
+            if (end == p)
+                break;
+            if (due(at))
+            {
+                char name[64];
+                std::snprintf(name, sizeof(name), "rdram_%llu.bin", at);
+                if (FILE *f = std::fopen(name, "wb"))
+                {
+                    std::fwrite(h.runtime->memory().getRDRAM(), 1, 32u << 20, f);
+                    std::fclose(f);
+                    std::snprintf(name, sizeof(name), "spr_%llu.bin", at);
+                    if (FILE *g = std::fopen(name, "wb"))
+                    {
+                        std::fwrite(h.runtime->memory().getScratchpad(), 1, 16u << 10, g);
+                        std::fclose(g);
+                    }
+                    std::printf("[harness] wrote %s\n", name);
+                }
+            }
+            p = *end ? end + 1 : end;
+        }
     for (const auto &[at, amount] : o.hurtEnemies)
         if (due(at))
         {
@@ -1134,6 +1162,11 @@ bool headlessPump(void *userData)
                     pressed |= st.buttons;
                 sticks = (uint32_t(st.rx) << 24) | (uint32_t(st.ry) << 16) | (uint32_t(st.lx) << 8) | st.ly;
             }
+        // The host loop can skip guest frames: a button newly held is a press
+        // even when its first frame was not seen.
+        static uint32_t lastHeld = 0;
+        pressed |= heldAll & ~lastHeld;
+        lastHeld = heldAll;
         ps2PadPublishHostState(heldAll, pressed, sticks);
     }
     kh2movie::poll(*h.runtime);

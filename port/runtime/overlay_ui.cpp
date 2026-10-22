@@ -121,7 +121,8 @@ void drawKeyboard()
 }
 
 const unsigned kSsaa[] = {1, 2, 4, 8, 16};
-const char *kSsaaNames[] = {"Off (native)", "2x", "4x", "8x", "16x"};
+const char *kSsaaNames[] = {"Off (PS2 resolution)", "2x", "4x (2x resolution)", "8x (2x resolution)",
+                            "16x (4x resolution)"};
 
 void applyAspect()
 {
@@ -138,7 +139,8 @@ bool save()
                                                     "widescreen", "patch",   "swap-confirm", "no-rumble",
                                                     "show-fps",   "ff-speed", "pause-unfocused",
                                                     "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window",
-                                                    "no-name-tags", "skip-movies", "skip-cutscenes"};
+                                                    "no-name-tags", "skip-movies", "skip-cutscenes",
+                                                    "no-ssaa-textures", "no-mipmaps"};
         for (std::string line; std::getline(in, line);)
         {
             std::string key = line.substr(0, line.find_first_of("=#;"));
@@ -156,6 +158,10 @@ bool save()
     out << "ssaa = " << kh2pgs::superSampling() << "\n";
     if (!kh2pgs::fsr())
         out << "no-fsr = 1\n";
+    if (!kh2pgs::superSampledTextures())
+        out << "no-ssaa-textures = 1\n";
+    if (kh2pgs::sharpestTextures())
+        out << "no-mipmaps = 1\n";
     if (kh2pgs::vsync())
         out << "vsync = 1\n";
     if (kh2pgs::fullscreen())
@@ -215,7 +221,18 @@ void draw()
             ssaa = i;
     if (ImGui::Combo("Super-sampling", &ssaa, kSsaaNames, 5))
         kh2pgs::setSuperSampling(kSsaa[ssaa]);
-    ImGui::SetItemTooltip("Renders each pixel from several samples: smoother edges, less shimmer.");
+    ImGui::SetItemTooltip("Renders each pixel from several samples: smoother edges, less shimmer, and a\n"
+                          "sharper picture (2x the PS2's resolution from 4x, 4x from 16x).");
+    bool ssTex = kh2pgs::superSampledTextures();
+    if (ImGui::Checkbox("Super-sample screen effects", &ssTex))
+        kh2pgs::setSuperSampledTextures(ssTex);
+    ImGui::SetItemTooltip("KH2 redraws the finished frame for its screen effects. Off, that pass drops\n"
+                          "back to PS2 resolution.");
+    bool sharpTex = kh2pgs::sharpestTextures();
+    if (ImGui::Checkbox("Sharpest textures", &sharpTex))
+        kh2pgs::setSharpestTextures(sharpTex);
+    ImGui::SetItemTooltip("Always use full-size textures, even far away (no mipmaps). Sharper at high\n"
+                          "resolution; can shimmer.");
     bool fsr = kh2pgs::fsr();
     if (ImGui::Checkbox("Sharp upscaling (AMD FSR 1)", &fsr))
         kh2pgs::setFsr(fsr);

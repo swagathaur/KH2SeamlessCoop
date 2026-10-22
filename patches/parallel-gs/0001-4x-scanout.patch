@@ -1,0 +1,234 @@
+kh2recomp: 4x scanout with 16x ordered super-sampling (one sample per output
+pixel instead of 2x2 averages). gs/shaders/slangmosh.hpp is regenerated with
+Granite's slangmosh (gs/slangmosh.sh) and left out of this patch.
+
+diff --git a/gs/gs_renderer.cpp b/gs/gs_renderer.cpp
+index dbe032d..74763d5 100644
+--- a/gs/gs_renderer.cpp
++++ b/gs/gs_renderer.cpp
+@@ -4126,9 +4126,20 @@ void GSRenderer::transfer_overlap_barrier()
+ 	stats.num_copy_barriers++;
+ }
+ 
++// kh2recomp: 16x ordered super-sampling scans out at 4x (each output pixel one
++// sample of the 4x4 grid) instead of 2x (averages of 2x2 samples).
++static uint32_t scanout_scale_log2(uint32_t super_samples, uint32_t rate_x_log2, uint32_t rate_y_log2)
++{
++	if (super_samples <= 1)
++		return 0;
++	if (super_samples == 16 && rate_x_log2 == 2 && rate_y_log2 == 2)
++		return 2;
++	return 1;
++}
++
+ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img, const DISPFBBits &dispfb,
+                                      const SamplingRect &rect, uint32_t super_samples,
+-                                     const Vulkan::Image *promoted)
++                                     const Vulkan::Image *promoted, uint32_t scale_log2)
+ {
+ 	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+ 	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+@@ -4149,17 +4160,15 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
+ 		cmd.set_storage_buffer(0, 0, *buffers.gpu);
+ 
+ 	auto valid_extent = rect.valid_extent;
+-	if (super_samples > 1)
+-	{
+-		valid_extent.width *= 2;
+-		valid_extent.height *= 2;
+-	}
++	valid_extent.width <<= scale_log2;
++	valid_extent.height <<= scale_log2;
+ 	cmd.set_scissor({{ 0, 0 }, valid_extent });
+ 
+-	cmd.set_specialization_constant_mask(0x7);
++	cmd.set_specialization_constant_mask(0xf);
+ 	cmd.set_specialization_constant(0, uint32_t(dispfb.PSM));
+ 	cmd.set_specialization_constant(1, vram_size - 1);
+ 	cmd.set_specialization_constant(2, super_samples);
++	cmd.set_specialization_constant(3, scale_log2);
+ 
+ 	struct Registers
+ 	{
+@@ -4622,6 +4631,9 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 		}
+ 	}
+ 
++	const uint32_t hr_log2 = high_resolution_scanout ?
++	                         scanout_scale_log2(super_samples, sampling_rate_x_log2, sampling_rate_y_log2) : 0;
++
+ 	if (EN1)
+ 	{
+ 		if (device->consumes_debug_markers())
+@@ -4643,13 +4655,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 
+ 		if (image_info.width && image_info.height)
+ 		{
+-			if (high_resolution_scanout)
+-			{
+-				image_info.width *= 2;
+-				image_info.height *= 2;
+-			}
++			image_info.width <<= hr_log2;
++			image_info.height <<= hr_log2;
+ 			circuit1 = device->create_image(image_info);
+-			sample_crtc_circuit(cmd, *circuit1, priv.dispfb1, rect, super_samples, promoted1);
++			sample_crtc_circuit(cmd, *circuit1, priv.dispfb1, rect, super_samples, promoted1, hr_log2);
+ 			device->set_name(*circuit1, "Circuit1");
+ 		}
+ 
+@@ -4701,13 +4710,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 
+ 		if (image_info.width && image_info.height)
+ 		{
+-			if (high_resolution_scanout)
+-			{
+-				image_info.width *= 2;
+-				image_info.height *= 2;
+-			}
++			image_info.width <<= hr_log2;
++			image_info.height <<= hr_log2;
+ 			circuit2 = device->create_image(image_info);
+-			sample_crtc_circuit(cmd, *circuit2, priv.dispfb2, rect, super_samples, promoted2);
++			sample_crtc_circuit(cmd, *circuit2, priv.dispfb2, rect, super_samples, promoted2, hr_log2);
+ 			device->set_name(*circuit2, "Circuit2");
+ 		}
+ 
+@@ -4763,11 +4769,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 		uint32_t horiz_resolution1 = circuit2 ? circuit2->get_width() : 0;
+ 
+ 		// Need to do all the CRTC offset math in single sampled domain to avoid lots of confusing cases later.
+-		if (high_resolution_scanout)
+-		{
+-			horiz_resolution0 >>= 1;
+-			horiz_resolution1 >>= 1;
+-		}
++		horiz_resolution0 >>= hr_log2;
++		horiz_resolution1 >>= hr_log2;
+ 
+ 		uint32_t magh1 = priv.display1.MAGH + 1;
+ 		uint32_t magh2 = priv.display2.MAGH + 1;
+@@ -4811,11 +4814,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 		auto effective_mode_width = mode_width;
+ 		auto effective_mode_height = mode_height;
+ 
+-		if (high_resolution_scanout)
+-		{
+-			effective_mode_width *= 2;
+-			effective_mode_height *= 2;
+-		}
++		effective_mode_width <<= hr_log2;
++		effective_mode_height <<= hr_log2;
+ 
+ 		bool is_raw_circuit1 =
+ 				circuit1 && !circuit2 && MMOD == PMODEBits::MMOD_ALPHA_ALP && ALP == 0xff &&
+@@ -4837,8 +4837,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 			                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+ 			                  info.dst_stage, info.dst_access);
+ 
+-			result.internal_width = result.image->get_width() >> int(high_resolution_scanout);
+-			result.internal_height = result.image->get_height() >> int(high_resolution_scanout);
++			result.internal_width = result.image->get_width() >> hr_log2;
++			result.internal_height = result.image->get_height() >> hr_log2;
+ 			result.double_strike = double_strike;
+ 
+ 			flush_submit(0);
+@@ -4848,8 +4848,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 
+ 	result.internal_width = mode_width;
+ 	result.internal_height = mode_height;
+-	image_info.width = mode_width << int(high_resolution_scanout);
+-	image_info.height = mode_height << int(high_resolution_scanout);
++	image_info.width = mode_width << hr_log2;
++	image_info.height = mode_height << hr_log2;
+ 
+ 	if (field_aware_rendering)
+ 	{
+@@ -4920,10 +4920,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 
+ 			if (high_resolution_scanout)
+ 			{
+-				vp.x *= 2.0f;
+-				vp.y *= 2.0f;
+-				vp.width *= 2.0f;
+-				vp.height *= 2.0f;
++				const float hr_scale = float(1u << hr_log2);
++				vp.x *= hr_scale;
++				vp.y *= hr_scale;
++				vp.width *= hr_scale;
++				vp.height *= hr_scale;
+ 
+ 				if (field_aware_rendering && !info.phase)
+ 					vp.y -= 1.0f;
+@@ -4953,10 +4954,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+ 
+ 			if (high_resolution_scanout)
+ 			{
+-				vp.x *= 2.0f;
+-				vp.y *= 2.0f;
+-				vp.width *= 2.0f;
+-				vp.height *= 2.0f;
++				const float hr_scale = float(1u << hr_log2);
++				vp.x *= hr_scale;
++				vp.y *= hr_scale;
++				vp.width *= hr_scale;
++				vp.height *= hr_scale;
+ 
+ 				if (field_aware_rendering && !info.phase)
+ 					vp.y -= 1.0f;
+diff --git a/gs/gs_renderer.hpp b/gs/gs_renderer.hpp
+index d9acc50..476bd72 100644
+--- a/gs/gs_renderer.hpp
++++ b/gs/gs_renderer.hpp
+@@ -498,7 +498,7 @@ private:
+ 
+ 	void sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::Image &img,
+ 	                         const DISPFBBits &dispfb, const SamplingRect &rect, uint32_t super_samples,
+-	                         const Vulkan::Image *promoted);
++	                         const Vulkan::Image *promoted, uint32_t scale_log2);
+ 
+ 	static SamplingRect compute_circuit_rect(const PrivRegisterState &priv, uint32_t phase,
+ 	                                         const DISPLAYBits &display, bool force_progressive,
+diff --git a/gs/shaders/sample_circuit.frag b/gs/shaders/sample_circuit.frag
+index f8acb20..287035d 100644
+--- a/gs/shaders/sample_circuit.frag
++++ b/gs/shaders/sample_circuit.frag
+@@ -40,6 +40,8 @@ layout(push_constant) uniform Registers
+ layout(constant_id = 0) const int PSM = 0;
+ layout(constant_id = 1) const uint VRAM_MASK = 4 * 1024 * 1024 - 1;
+ layout(constant_id = 2) const uint SUPER_SAMPLES = 1;
++// kh2recomp: log2 of the output scale (1: 2x, 2: 4x with 16x ordered samples).
++layout(constant_id = 3) const uint SCALE_LOG2 = 1;
+ 
+ const bool is_tex_16bit = PSM == PSMCT16 || PSM == PSMCT16S || PSM == PSMZ16 || PSM == PSMZ16S;
+ 
+@@ -100,7 +102,7 @@ void main()
+     uvec2 super_sampled_coord = uvec2(gl_FragCoord.xy);
+     uvec2 single_sampled_coord;
+     if (SUPER_SAMPLES >= 4)
+-        single_sampled_coord = super_sampled_coord >> 1;
++        single_sampled_coord = super_sampled_coord >> SCALE_LOG2;
+     else
+         single_sampled_coord = super_sampled_coord;
+ 
+@@ -121,6 +123,20 @@ void main()
+         // SUPER_SAMPLES == 2 forces 1 path.
+         FragColor = sample_vram(addr, 0);
+     }
++    else if (SUPER_SAMPLES == 16 && SCALE_LOG2 == 2)
++    {
++        // One sample per output pixel. The ubershader stores the sample at
++        // subpixel (x, y) of the 4x4 grid in layer
++        // (y & 1) + (x & 1) * 2 + (y >> 1 & 1) * 4 + (x >> 1 & 1) * 8.
++        if (super_sample_is_valid(addr))
++        {
++            uvec2 sub = super_sampled_coord & 3u;
++            uint slice = (sub.y & 1u) + (sub.x & 1u) * 2u + (sub.y >> 1u) * 4u + (sub.x >> 1u) * 8u;
++            FragColor = sample_vram(addr, BASE_SSAA_LAYER + slice);
++        }
++        else
++            FragColor = sample_vram(addr, 0);
++    }
+     else if (SUPER_SAMPLES >= 4)
+     {
+         if (super_sample_is_valid(addr))

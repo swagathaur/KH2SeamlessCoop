@@ -27,11 +27,14 @@ much slower.
 
 | Option | Effect |
 |---|---|
-| `--ssaa=N` | Super-sampling: 1, 2, 4, 8 or 16 samples per pixel. Sharper edges and less shimmer; 4 is a good start |
+| `--ssaa=N` | Super-sampling: 1, 2, 4, 8 or 16 samples per pixel. Smoother edges, less shimmer, and more resolution: 4 and 8 give 2x the PS2's 512x448, 16 gives 4x (2048x1792), enough for 1440p and 4K |
+| `--no-ssaa-textures` | Let KH2's full-screen effect pass (it redraws every finished frame) drop back to one sample, which brings back the PS2-resolution look |
+| `--no-mipmaps` | Always sample full-size textures (menu: Sharpest textures) |
+| `--backbuffer-promotion` | paraLLEl-GS hack: show the source of a final scaling blit (experimental) |
 | `--window=WxH` | Initial window size (default 1280x960) |
 | `--fullscreen` | Start fullscreen. **Alt+Enter** or **F11** toggles |
 | `--vsync` | Present in step with the display (default: lowest latency, no tearing) |
-| `--no-fsr` | Bilinear scaling to the window instead of AMD FSR 1 with sharpening |
+| `--no-fsr` | Bilinear scaling to the window instead of AMD FSR 1 with sharpening (FSR is only used when the window is taller than the picture) |
 | `--renderer=soft` | Use the software rasteriser |
 
 The picture keeps the game's aspect ratio (4:3, or 16:9 with `--widescreen`),

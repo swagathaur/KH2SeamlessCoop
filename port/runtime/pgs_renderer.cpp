@@ -95,6 +95,10 @@ ImageHandle g_fsrTarget;
 // Granite looks up a per-thread index for its command pools. Every call into
 // it happens under g_mutex, so all threads can share index 0; an unregistered
 // thread would get 0 too, but with an error logged on every call.
+std::atomic<int> g_pendingSsaa{0};        // 0: no change
+std::atomic<int> g_pendingSsTextures{-1}; // -1: no change
+std::atomic<int> g_pendingSharpest{-1};
+
 void registerThread()
 {
     static thread_local bool registered = false;
@@ -715,7 +719,9 @@ void present()
     const bool ui = uiBuild();
     if (ui)
         uiUpdateTextures(*cmd);
-    const bool useFsr = g_opt.fsr && g_last.image && g_fsrTarget;
+    // FSR is an upscaler: with 16x super-sampling the picture (4x the PS2's)
+    // can be taller than the window, and then a bilinear blit does better.
+    const bool useFsr = g_opt.fsr && g_last.image && g_fsrTarget && g_fsrTarget->get_height() > g_last.image->get_height();
     if (useFsr)
         renderFsr(*cmd, g_last.image->get_view());
     cmd->begin_render_pass(dev.get_swapchain_render_pass(SwapchainRenderPass::ColorOnly));
@@ -798,11 +804,18 @@ bool init(const Options &options)
     gsOpt.super_sampling = toSuperSampling(g_opt.superSampling);
     gsOpt.ordered_super_sampling = true;
     gsOpt.dynamic_super_sampling = true;
+    gsOpt.super_sampled_textures = g_opt.superSampledTextures;
     if (!g_gs->init(g_device, gsOpt))
     {
         std::fprintf(stderr, "[pgs] GS initialisation failed (missing GPU features?); using the software renderer\n");
         g_gs.reset();
         return false;
+    }
+    {
+        Hacks hacks = {};
+        hacks.backbuffer_promotion = g_opt.backbufferPromotion;
+        hacks.disable_mipmaps = g_opt.disableMipmaps;
+        g_gs->set_hacks(hacks);
     }
     const auto &props = g_device->get_gpu_properties();
     std::printf("[pgs] paraLLEl-GS on %s, %ux super-sampling%s\n", props.deviceName, g_opt.superSampling,
@@ -876,6 +889,37 @@ void shutdown()
     g_active = false;
 }
 
+// Settings changes from the menu (render thread, g_mutex held).
+void applyPending()
+{
+    if (!g_gs)
+        return;
+    const int ssaa = g_pendingSsaa.exchange(0);
+    const int ssTex = g_pendingSsTextures.exchange(-1);
+    const int sharp = g_pendingSharpest.exchange(-1);
+    bool rate = false;
+    if (ssaa > 0 && unsigned(ssaa) != g_opt.superSampling)
+    {
+        g_opt.superSampling = unsigned(ssaa);
+        rate = true;
+    }
+    if (ssTex >= 0 && bool(ssTex) != g_opt.superSampledTextures)
+    {
+        g_opt.superSampledTextures = ssTex != 0;
+        rate = true;
+    }
+    if (rate)
+        g_gs->set_super_sampling_rate(toSuperSampling(g_opt.superSampling), true, g_opt.superSampledTextures);
+    if (sharp >= 0 && bool(sharp) != g_opt.disableMipmaps)
+    {
+        g_opt.disableMipmaps = sharp != 0;
+        Hacks hacks = {};
+        hacks.backbuffer_promotion = g_opt.backbufferPromotion;
+        hacks.disable_mipmaps = g_opt.disableMipmaps;
+        g_gs->set_hacks(hacks);
+    }
+}
+
 bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 {
 #if defined(_WIN32)
@@ -889,6 +933,7 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
         registerThread();
         drainQueue();
         g_gs->flush();
+        applyPending();
         copyPrivRegisters(priv);
         VSyncInfo info = {};
         info.phase = uint32_t(vsyncTick & 1u);
@@ -949,15 +994,15 @@ bool showFps() { return g_showFps; }
 void setShowFps(bool show) { g_showFps = show; }
 
 unsigned superSampling() { return g_opt.superSampling; }
-void setSuperSampling(unsigned n)
-{
-    std::lock_guard<std::mutex> lock(g_mutex);
-    registerThread();
-    if (!g_gs || n == g_opt.superSampling)
-        return;
-    g_opt.superSampling = n;
-    g_gs->set_super_sampling_rate(toSuperSampling(n), true, false);
-}
+// The settings menu runs on the render thread with g_mutex held (inside
+// present()), so these only record the change; applyPending() makes it at the
+// next frame.
+void setSuperSampling(unsigned n) { g_pendingSsaa = int(n); }
+bool superSampledTextures() { return g_opt.superSampledTextures; }
+void setSuperSampledTextures(bool on) { g_pendingSsTextures = on ? 1 : 0; }
+bool sharpestTextures() { return g_opt.disableMipmaps; }
+void setSharpestTextures(bool on) { g_pendingSharpest = on ? 1 : 0; }
+
 bool fsr() { return g_opt.fsr; }
 void setFsr(bool on) { g_opt.fsr = on; }
 bool vsync() { return g_opt.vsync; }

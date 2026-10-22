@@ -13,8 +13,17 @@ namespace kh2pgs
 {
 struct Options
 {
-    // Super-sampling factor: 1, 2, 4, 8 or 16 samples per pixel.
+    // Super-sampling factor: 1, 2, 4, 8 or 16 samples per pixel. The picture
+    // goes out at 2x the PS2 resolution with 4 or 8, 4x with 16.
     unsigned superSampling = 1;
+    // Keep the samples when the game draws the frame onto itself as a texture
+    // (its full-screen effects): without, those passes drop back to 1 sample.
+    bool superSampledTextures = true;
+    // paraLLEl-GS hack: when the frame is finished by a scaling blit, show the
+    // blit's (super-sampled) source instead.
+    bool backbufferPromotion = false;
+    // paraLLEl-GS hack: always read texture LOD 0 (sharper textures far away).
+    bool disableMipmaps = false;
     // Open a window and present into it (otherwise frames are only read back,
     // for screenshots and tests).
     bool windowed = false;
@@ -84,6 +93,10 @@ void setShowFps(bool show);
 
 // Live settings.
 unsigned superSampling();
+bool superSampledTextures();
+void setSuperSampledTextures(bool on);
+bool sharpestTextures();
+void setSharpestTextures(bool on);
 void setSuperSampling(unsigned n);
 bool fsr();
 void setFsr(bool on);

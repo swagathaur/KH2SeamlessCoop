@@ -126,6 +126,9 @@ struct Options
     unsigned windowW = 1280, windowH = 960;
     bool vsync = false;
     bool fsr = true;
+    bool ssaaTextures = true;          // --no-ssaa-textures
+    bool backbufferPromotion = false;  // --backbuffer-promotion
+    bool noMipmaps = false;            // --no-mipmaps
     bool swapConfirm = false;          // controller: confirm on the right button instead of the bottom
     bool noRumble = false;
     bool showFps = false;
@@ -206,6 +209,9 @@ void usage()
         "  --window=WxH            window size (default 1280x960)\n"
         "  --vsync                 present in sync with the display's refresh\n"
         "  --no-fsr                bilinear upscale to the window instead of FSR 1 + sharpening\n"
+        "  --no-ssaa-textures      super-sampling: let the game's full-screen effects drop to 1 sample\n"
+        "  --backbuffer-promotion  super-sampling: show the source of the game's final scaling blit\n"
+        "  --no-mipmaps            always sample the sharpest texture level\n"
         "  --swap-confirm          controller: right face button confirms (default: bottom button)\n"
         "  --no-rumble             controller vibration off\n"
         "  --show-fps              show frame rates (F2 toggles; F1 or Select+Start opens settings)\n"
@@ -354,6 +360,9 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         }
         else if (a == "--vsync") o.vsync = true;
         else if (a == "--no-fsr") o.fsr = false;
+        else if (a == "--no-ssaa-textures") o.ssaaTextures = false;
+        else if (a == "--backbuffer-promotion") o.backbufferPromotion = true;
+        else if (a == "--no-mipmaps") o.noMipmaps = true;
         else if (a == "--swap-confirm") o.swapConfirm = true;
         else if (a == "--no-rumble") o.noRumble = true;
         else if (a == "--show-fps") o.showFps = true;
@@ -1197,8 +1206,8 @@ std::vector<std::string> readSettings(const char *argv0)
             // On/off switches take 1/0 (true/false, yes/no, on/off); every other
             // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
             static const std::set<std::string> kSwitches = {
-                "english", "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mouse-camera",
-                "no-name-tags", "no-rumble", "no-shared-enemies", "pause-unfocused", "profile", "show-fps",
+                "backbuffer-promotion", "english", "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mipmaps", "no-mouse-camera",
+                "no-name-tags", "no-rumble", "no-shared-enemies", "no-ssaa-textures", "pause-unfocused", "profile", "show-fps",
                 "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
             const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
             const bool off = val == "0" || val == "false" || val == "no" || val == "off";
@@ -1305,6 +1314,9 @@ int main(int argc, char **argv)
         g.fullscreen = opt.fullscreen;
         g.vsync = opt.vsync;
         g.fsr = opt.fsr;
+        g.superSampledTextures = opt.ssaaTextures;
+        g.backbufferPromotion = opt.backbufferPromotion;
+        g.disableMipmaps = opt.noMipmaps;
         gpu = kh2pgs::init(g);
         if (!gpu && opt.renderer == "gpu" && opt.headless)
             return kExitInitFailed;

@@ -28,3 +28,6 @@ logs/
 
 # Harness screenshots (game imagery; never commit)
 shots/
+
+# Crash and hang reports (kh2recomp writes them next to the build)
+crashes/

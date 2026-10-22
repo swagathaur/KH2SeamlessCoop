@@ -145,9 +145,13 @@ of the executable, and the patched versions are swapped in at start-up.
 ## English text
 
 The disc is Japanese, but the English text of the PC release (KINGDOM HEARTS
-HD 1.5+2.5 ReMIX, Steam or Epic) can be used in its place. Extract it once
-(the second command adds the menus, layouts and other pictures with words in
-them):
+HD 1.5+2.5 ReMIX, Steam or Epic) can be used in its place. **`Play KH2.bat`
+does all of this by itself** when it finds the PC release (Steam's library
+folders and the usual Epic place are searched; `game\pc-release.txt` can
+name its `Image\dt` folder) and Python 3 is installed: it extracts the text,
+builds the HD texture index (both once) and, on a first run, turns both on.
+By hand: extract the text once (the second command adds the menus, layouts
+and other pictures with words in them):
 
 ```
 python tools/egs_extract.py "<game folder>\Image\dt" game\files\english --english
@@ -170,7 +174,8 @@ told it is not running the Japanese version (`port/runtime/english_text.h`).
 The PC release also carries high-resolution versions of the game's textures:
 menus, the title screen, fonts, message windows, item pictures, tutorials,
 characters and places. Build
-the index once (it only reads the .pkg files; nothing is copied):
+the index once (`Play KH2.bat` does; it only reads the .pkg files, nothing
+is copied):
 
 ```
 python tools/egs_hd_extract.py "<game folder>\Image\dt" game\files\hd
@@ -187,9 +192,9 @@ GS, so this works with the English text on or off for the parts both
 versions share. Known limits: the PC's button icons are laid out
 differently and are left out, and textures the game builds in memory (the
 title logo's animation, say) stay as they are. The PC release has to stay
-installed where it was when the index was built; rebuild the index after
-updating this project (the format changes now and then). `--hd-log` lists
-what matched.
+installed where it was when the index was built. When this project's tools
+learn to find more, `Play KH2.bat` rebuilds the index (and the game says so
+in its log if it was started another way). `--hd-log` lists what matched.
 
 ## Co-op (preview)
 

@@ -49,6 +49,9 @@ EXCLUDE = {
 }
 
 
+MANIFEST_FORMAT = 3
+
+
 def key64(data):
     """CRC-32 (zlib) in the high half, Adler-32 in the low half."""
     return (zlib.crc32(data) & 0xFFFFFFFF) << 32 | (zlib.adler32(data) & 0xFFFFFFFF)
@@ -231,7 +234,10 @@ def main():
         if os.path.exists(base + ".hed"):
             archives.append((base, E.read_hed(base + ".hed")))
     os.makedirs(out, exist_ok=True)
-    manifest = ["#archive %d %s" % (i, os.path.abspath(base + ".pkg")) for i, (base, _) in enumerate(archives)]
+    # "#format": bumped when the index finds more (the runtime and
+    # tools/win/play.ps1 rebuild or warn about older ones).
+    manifest = ["#format %d" % MANIFEST_FORMAT]
+    manifest += ["#archive %d %s" % (i, os.path.abspath(base + ".pkg")) for i, (base, _) in enumerate(archives)]
     stats = {"files": 0, "images": 0, "skipped": 0, "dupes": 0}
     seen = set()
 

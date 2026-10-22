@@ -1113,6 +1113,9 @@ std::unique_ptr<Replacer> g_replacer;
 bool g_log = false;
 } // namespace
 
+// tools/egs_hd_extract.py's "#format" line: older indexes miss things.
+constexpr int kManifestFormat = 3;
+
 size_t load(const std::filesystem::path &folder)
 {
     std::ifstream in(folder / "manifest.txt");
@@ -1124,10 +1127,16 @@ size_t load(const std::filesystem::path &folder)
     auto r = std::make_unique<Replacer>();
     r->m_folder = folder;
     r->m_log = g_log;
+    int format = 0;
     for (std::string line; std::getline(in, line);)
     {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
+        if (line.rfind("#format ", 0) == 0)
+        {
+            format = std::atoi(line.c_str() + 8);
+            continue;
+        }
         if (line.rfind("#archive ", 0) == 0)
         {
             // "#archive <index> <path>" (the path may have spaces)
@@ -1174,6 +1183,11 @@ size_t load(const std::filesystem::path &folder)
     }
     const size_t n = r->m_entries.size();
     std::printf("[hd] %zu high-resolution textures in %s\n", n, folder.string().c_str());
+    if (format < kManifestFormat)
+        std::fprintf(stderr,
+                     "[hd] %s was built by an older tools/egs_hd_extract.py: run it again for the textures it "
+                     "now finds (maps, animations)\n",
+                     (folder / "manifest.txt").string().c_str());
     if (n)
         g_replacer = std::move(r);
     return n;

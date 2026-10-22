@@ -350,13 +350,27 @@ public:
         const uint64_t span = uint64_t(pos.DSAY) * rowBytes + uint64_t(h) * rowBytes;
         const uint64_t last = first + std::max<uint64_t>(1, (span + 8191u) / 8192u) - 1u;
         const uint32_t mask = wordMask(psm);
+        // Diagnostics: KH2_HD_WATCH=<tbp> logs every upload touching that
+        // page and every texture lookup there (with its answer).
+        static const char *watchEnv = std::getenv("KH2_HD_WATCH");
+        static const uint32_t watch = watchEnv ? uint32_t(std::atoi(watchEnv)) : 0xFFFFFFFFu;
+        if (watch != 0xFFFFFFFFu && first <= watch / 32u && watch / 32u <= last && m_watchLines < 4000)
+        {
+            ++m_watchLines;
+            std::printf("[hd] watch #%ld upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u size %zu\n", m_finds, dbp, dbw,
+                        psm, w, h, pos.DSAX, pos.DSAY, size);
+        }
         for (size_t i = 0; i < m_regions.size();)
         {
             const Region &r = m_regions[i];
             // Small uploads (palettes) tucked into a texture's unused blocks
             // do not end it; anything bigger, or at its base, does.
             const bool tucked = size < 4096 && dbp != r.dbp;
-            if (!tucked && r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
+            // A patch into the texture itself (KH2 animates faces by sending
+            // a few rows of the eyes and mouth into the character's texture,
+            // at its base pointer with an offset): the HD image stays.
+            const bool patch = dbp == r.dbp && (pos.DSAX || pos.DSAY) && size * 4 <= r.bytes;
+            if (!tucked && !patch && r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
             {
                 if (m_log && m_loggedDrops.insert(uint64_t(r.entry) << 32 | dbp).second)
                     std::printf("[hd] %s dropped: upload dbp %u psm 0x%02X %ux%u over it\n",
@@ -436,6 +450,22 @@ public:
 
     bool find(const ParallelGS::TEX0Bits &tex0, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
               ParallelGS::TextureReplacement &out) override
+    {
+        ++m_finds;
+        const bool hit = findImpl(tex0, x, y, w, h, out);
+        static const char *watchEnv = std::getenv("KH2_HD_WATCH");
+        if (watchEnv && uint32_t(std::atoi(watchEnv)) == tex0.TBP0 && m_watchLines < 4000)
+        {
+            ++m_watchLines;
+            std::printf("[hd] watch #%ld find tbw %u psm 0x%02X tw/th %u/%u rect %u,%u %ux%u cbp %u csa %u -> %s\n", m_finds,
+                        uint32_t(tex0.TBW), uint32_t(tex0.PSM), uint32_t(tex0.TW), uint32_t(tex0.TH), x, y, w, h,
+                        uint32_t(tex0.CBP), uint32_t(tex0.CSA), hit ? "replaced" : "-");
+        }
+        return hit;
+    }
+
+    bool findImpl(const ParallelGS::TEX0Bits &tex0, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                  ParallelGS::TextureReplacement &out)
     {
         if (!m_enabled || m_regions.empty())
             return false;
@@ -779,6 +809,8 @@ public:
     std::set<int> m_loggedUploads, m_loggedHits;
     std::set<uint64_t> m_loggedMisses, m_loggedDrops, m_loggedFinds, m_scanned, m_traced;
     int m_dumped = 0;
+    long m_finds = 0;
+    int m_watchLines = 0;
     long m_dumpSeen = 0;
     long m_tracedUploads = 0;
     std::set<uint64_t> m_tracedKeys, m_tracedHits;

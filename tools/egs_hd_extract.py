@@ -101,7 +101,11 @@ def texture_data(original):
     (TextureInfo) number Offset1[n] + 1 (upload 0 is the palette), whose
     DMA reference tag (+0x70) points at its data in the section. The PC's
     OriginalAssetOffset only approximates this (it drifts in big maps).
-    Returns [(file offset, bytes)] in the order of texture_envs, or []."""
+    Returns [(file offset or None, picture start, picture end, boundaries)]
+    in the order of texture_envs, or []. None: the environment's texture is
+    not in the section's upload list (the game sends it some other way); it
+    is then in the picture data, most likely starting where an upload's data
+    ends or at the start (boundaries)."""
     out = []
     if original[:4] != b"BAR\x01":
         return out
@@ -110,7 +114,8 @@ def texture_data(original):
         t, _, _, off, size = struct.unpack_from("<HH4sII", original, 16 + i * 16)
         if t != 7 or size < 36:
             continue
-        _, _, tcount, gcount, off1, tinf = struct.unpack_from("<6i", original, off)
+        _, _, tcount, gcount, off1, tinf, _, pic, pal = struct.unpack_from("<9i", original, off)
+        pic_range = (off + pic, off + (pal if pic < pal <= size else size))
         uploads = []
         for u in range(max(tcount, 0)):
             at = off + tinf + u * 0x90 + 0x70
@@ -118,12 +123,10 @@ def texture_data(original):
                 break
             tag = struct.unpack_from("<Q", original, at)[0]
             uploads.append((off + ((tag >> 32) & 0x7FFFFFFF), (tag & 0xFFFF) * 16))
+        bounds = sorted({pic_range[0]} | {a for a, _ in uploads} | {a + n for a, n in uploads})
         for g in range(max(gcount, 0)):
-            if off + off1 + g >= off + size:
-                out.append(None)
-                continue
-            u = original[off + off1 + g] + 1
-            out.append(uploads[u] if u < len(uploads) else None)
+            u = original[off + off1 + g] + 1 if off1 + g < size else len(uploads)
+            out.append((uploads[u][0] if u < len(uploads) else None,) + pic_range + (bounds,))
     return out
 
 
@@ -226,8 +229,18 @@ def main():
                 variant = "-"
                 if m:
                     n = int(m.group(1))
-                    if n < len(datas) and datas[n] is not None:
+                    if n < len(datas) and datas[n][0] is not None:
                         at = datas[n][0]
+                    elif n < len(datas) and datas[n][1] <= at < datas[n][2]:
+                        # Not uploaded by the section's list: a boundary of
+                        # the uploads' data (the old "- 16 * n" rule's place,
+                        # right for models, or the one nearest the PC's
+                        # offset), else that rule.
+                        near = min(datas[n][3], key=lambda b: abs(b - at))
+                        if at - 16 * n not in datas[n][3] and abs(near - at) <= 0x100:
+                            at = near
+                        else:
+                            at -= 16 * n
                     else:
                         at -= 16 * n
                     if n < len(envs):

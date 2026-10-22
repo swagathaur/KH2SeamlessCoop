@@ -31,3 +31,7 @@ shots/
 
 # Crash and hang reports (kh2recomp writes them next to the build)
 crashes/
+
+# Diagnostics: dumps of game data (hd_dump_*.bin, extracted files)
+scratch/
+hd_dump_*.bin

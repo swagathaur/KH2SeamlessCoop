@@ -271,3 +271,10 @@ table 0x1C. Icons are command 0x09 + index into the `icon` font (0x14 SELECT,
 0x15 START, 0x16 d-pad, 0x1E-0x21 R1 R2 L1 L2, 0x22-0x25 triangle cross
 square circle). The PC release's messages use 0xDA and up for its own
 button prompts (`tools/egs_extract.py` maps them back).
+
+Area name cards: each room's map (map/jp/<room>.map) holds the card shown on
+entry, a picture (BAR type 24, 512x128 4-bit) and its layout (type 25). The
+Japanese card already carries the English subtitle ("-THE USUAL SPOT-"). The
+PC release's map/us/<room>.bar holds only a 64x32 placeholder picture with a
+zeroed layout (the PC draws its cards from the remastered image itself), so
+it cannot be swapped in.

@@ -137,8 +137,13 @@ struct GifTrace
     uint64_t vsync = 0;
     uint64_t prim = 0, rgbaq = 0, frame[2] = {}, tex0[2] = {}, alpha[2] = {}, test[2] = {}, zbuf[2] = {}, bitblt = 0, trxpos = 0, trxreg = 0, scissor[2] = {}, xyoff[2] = {};
     std::string last;
+    int big = 0;          // KH2_PGS_TRACE_BIG=<px>: log sprites at least this big
+    int vtx = 0;          // vertices since the last PRIM write
+    uint32_t vx = 0, vy = 0;
     GifTrace()
     {
+        if (const char *b = std::getenv("KH2_PGS_TRACE_BIG"))
+            big = std::atoi(b);
         const char *e = std::getenv("KH2_PGS_TRACE_FBP");
         if (!e)
             return;
@@ -153,6 +158,31 @@ struct GifTrace
     }
     void kick(uint32_t x, uint32_t y, uint32_t z = 0)
     {
+        if (big > 0 && (prim & 7) == 6 && vsync >= from && vsync <= to && left > 0)
+        {
+            if ((vtx++ & 1) == 0)
+            {
+                vx = x;
+                vy = y;
+            }
+            else
+            {
+                const int w = std::abs(int(x) - int(vx)) >> 4, h = std::abs(int(y) - int(vy)) >> 4;
+                if (w >= big || h >= big)
+                {
+                    const int c = int((prim >> 9) & 1);
+                    --left;
+                    std::fprintf(stderr, "[big] v%llu fbp=%llu prim=%03llx %dx%d at %u,%u rgba=%08llx tex0=%016llx alpha=%llx\n",
+                                 (unsigned long long)vsync, (unsigned long long)(frame[c] & 0x1FF),
+                                 (unsigned long long)(prim & 0x7FF), w, h, std::min(vx, x) >> 4, std::min(vy, y) >> 4,
+                                 (unsigned long long)(rgbaq & 0xFFFFFFFF), (unsigned long long)tex0[c],
+                                 (unsigned long long)alpha[c]);
+                }
+            }
+            return;
+        }
+        if (big > 0)
+            return;
         if (vsync < from || vsync > to || left <= 0)
             return;
         const int c = int((prim >> 9) & 1);
@@ -185,7 +215,7 @@ struct GifTrace
     {
         switch (r)
         {
-        case 0x00: prim = v; break;
+        case 0x00: prim = v; vtx = 0; break;
         case 0x01: rgbaq = v; break;
         case 0x04:
         case 0x05: kick(uint32_t(v & 0xFFFF), uint32_t((v >> 16) & 0xFFFF), uint32_t(v >> 32)); break;
@@ -238,7 +268,10 @@ struct GifTrace
             if (nreg == 0)
                 nreg = 16;
             if ((lo >> 46) & 1)
+            {
                 prim = (lo >> 47) & 0x7FF;
+                vtx = 0;
+            }
             if (flg == 0)
             {
                 for (uint32_t i = 0; i < nloop; ++i)

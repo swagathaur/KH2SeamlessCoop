@@ -77,6 +77,14 @@ tools\win\build.ps1            # compiles everything recorded in build\vu-profil
 
 Programs not recorded yet still run, interpreted. Recording more is always safe.
 
+Measured on an RTX 3080 (GPU renderer, 1x super-sampling, compiled VU1
+programs, real-time pacing), warping into the first room of each world: Twilight
+Town, Olympus Coliseum, the Land of Dragons, 100 Acre Wood, the Pride Lands,
+Disney Castle, Timeless River, Halloween Town, Port Royal, Space Paranoids and
+The World That Never Was hold 60 fps; Hollow Bastion (57, minimum 56), Beast's
+Castle (58, minimum 50) and Agrabah (55, minimum 47) dip during their opening
+events, which used VU1 programs not recorded before (now recorded).
+
 ## Controls
 
 Controllers through SDL3: Xbox, PlayStation (DualShock 4, DualSense), Switch

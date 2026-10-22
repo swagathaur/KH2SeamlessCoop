@@ -163,6 +163,8 @@ menus, tutorials and item names are in English, with the international font;
 the PC's button prompts become the PS2 button icons, laid out for this game
 (circle confirms, cross jumps). Still Japanese: the area name cards (they live
 inside the map files), the small captions on the title menu, and the voices.
+The field HUD sheets stay the disc's (the PC's are laid out differently and
+crash this executable; the disc's words there are English anyway).
 
 How it works: the files under `game\files\english` replace the game's own
 `msg\jp\*`, `menu\jp\*` and so on by name (any folder given with

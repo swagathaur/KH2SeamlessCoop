@@ -306,5 +306,22 @@ environment list (GsInfo, 0xA0 bytes each), picture data, palette.
   (U, V) and size in the texture, and the frames' data. The game sends a
   frame into the texture at its base pointer, offset to (U, V) (Roxas's
   eyes: 96x48 at 0,20 of his head texture, sent 44 rows high). The PC's
-  "-n" images after the last environment are these, a vertical strip of
-  all frames each.
+  "-n" images count through the environments, with each animation's frame
+  strip (a vertical strip of all its frames) placed among them after its
+  texture (Donald: -0 body, -1 his face's frames, -2 and -3 the other
+  textures); a strip's offset lies in the footer's frame data.
+
+## Disc size and host files
+
+The disc image is 4.3 GB (0x204330 sectors). PS2Recomp gave host files
+(loose `cdrom0:` files, file overrides) sectors from 0x100000 up, inside
+the disc: reads of the disc's own data past 2 GB (Olympus Coliseum's
+files, among others) returned override files and the game crashed on a
+null pointer when entering the world with English text on. Host files now
+get sectors after the end of the image (patch 0019).
+
+The PC release's `field2d/us/xx0field.2dd` (the field HUD sheets: gauges,
+FINISH!, LEVEL UP!) have bigger pictures (a 512x256 gauge sheet where the
+disc has 256x256, 30 % more data) and their own layout; with them this
+executable corrupts memory in Olympus Coliseum. The overrides leave them
+out; the disc's sheets already use English words.

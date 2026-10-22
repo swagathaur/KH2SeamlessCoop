@@ -39,28 +39,48 @@ namespace
 constexpr size_t kHashBytes = 256;
 
 // CRC-32 (zlib's) in the high half, Adler-32 in the low half: what
-// tools/egs_hd_extract.py writes (both are fast in Python's zlib).
-uint32_t crc32(const uint8_t *p, size_t n)
+// tools/egs_hd_extract.py writes (both are fast in Python's zlib). Both can
+// continue over more data, so the nested prefixes a match is confirmed with
+// (1 KiB ... 256 KiB) are hashed in one pass (PrefixHash).
+const std::array<std::array<uint32_t, 256>, 8> &crcTables()
 {
-    static const auto table = [] {
-        std::array<uint32_t, 256> t{};
+    static const auto tables = [] {
+        std::array<std::array<uint32_t, 256>, 8> t{};
         for (uint32_t i = 0; i < 256; ++i)
         {
             uint32_t c = i;
             for (int k = 0; k < 8; ++k)
                 c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            t[i] = c;
+            t[0][i] = c;
         }
+        for (uint32_t i = 0; i < 256; ++i)
+            for (int k = 1; k < 8; ++k)
+                t[size_t(k)][i] = (t[size_t(k) - 1][i] >> 8) ^ t[0][t[size_t(k) - 1][i] & 0xFF];
         return t;
     }();
-    uint32_t c = 0xFFFFFFFFu;
-    for (size_t i = 0; i < n; ++i)
-        c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
-    return ~c;
+    return tables;
 }
-uint32_t adler32(const uint8_t *p, size_t n)
+// Slicing-by-8; c is the running (inverted) state.
+uint32_t crc32Update(uint32_t c, const uint8_t *p, size_t n)
 {
-    uint32_t a = 1, b = 0;
+    const auto &t = crcTables();
+    while (n >= 8)
+    {
+        uint32_t lo, hi;
+        std::memcpy(&lo, p, 4);
+        std::memcpy(&hi, p + 4, 4);
+        lo ^= c;
+        c = t[7][lo & 0xFF] ^ t[6][(lo >> 8) & 0xFF] ^ t[5][(lo >> 16) & 0xFF] ^ t[4][lo >> 24] ^ t[3][hi & 0xFF] ^
+            t[2][(hi >> 8) & 0xFF] ^ t[1][(hi >> 16) & 0xFF] ^ t[0][hi >> 24];
+        p += 8;
+        n -= 8;
+    }
+    while (n--)
+        c = t[0][(c ^ *p++) & 0xFF] ^ (c >> 8);
+    return c;
+}
+void adler32Update(uint32_t &a, uint32_t &b, const uint8_t *p, size_t n)
+{
     while (n)
     {
         const size_t chunk = std::min<size_t>(n, 5552);
@@ -74,9 +94,30 @@ uint32_t adler32(const uint8_t *p, size_t n)
         p += chunk;
         n -= chunk;
     }
-    return b << 16 | a;
 }
-uint64_t key64(const uint8_t *p, size_t n) { return uint64_t(crc32(p, n)) << 32 | adler32(p, n); }
+uint64_t key64(const uint8_t *p, size_t n)
+{
+    uint32_t a = 1, b = 0;
+    adler32Update(a, b, p, n);
+    return uint64_t(~crc32Update(0xFFFFFFFFu, p, n)) << 32 | (b << 16 | a);
+}
+
+// key64 of growing prefixes of the same bytes, each byte hashed once.
+struct PrefixHash
+{
+    const uint8_t *p;
+    size_t done = 0;
+    uint32_t crc = 0xFFFFFFFFu, a = 1, b = 0;
+    uint64_t upTo(size_t len)
+    {
+        if (len < done)
+            return key64(p, len); // shorter than before: rare
+        crc = crc32Update(crc, p + done, len - done);
+        adler32Update(a, b, p + done, len - done);
+        done = len;
+        return uint64_t(~crc) << 32 | (b << 16 | a);
+    }
+};
 
 // GS formats: bits per pixel of storage, and which bits of a 32-bit word a
 // format owns (the "H" formats share words with each other).
@@ -318,6 +359,20 @@ public:
         // A key shared by many textures is a pattern, not a texture.
         if (std::distance(range.first, range.second) > 32)
             return -1;
+        // The candidates' checks are the same few prefix lengths: hash each
+        // once, in one pass.
+        PrefixHash prefix{bytes};
+        std::array<std::pair<size_t, uint64_t>, 8> known{};
+        size_t knownCount = 0;
+        auto prefixKey = [&](size_t len) {
+            for (size_t i = 0; i < knownCount; ++i)
+                if (known[i].first == len)
+                    return known[i].second;
+            const uint64_t k = prefix.upTo(len);
+            if (knownCount < known.size())
+                known[knownCount++] = {len, k};
+            return k;
+        };
         for (auto it = range.first; it != range.second; ++it)
         {
             const Entry &e = m_entries[size_t(it->second)];
@@ -331,7 +386,7 @@ public:
                 // A later difference (the game edits some sheets in memory, e.g.
                 // the HUD's) leaves what agreed so far; a texture still has to
                 // agree over 4 KiB of real content to count.
-                if (key64(bytes, len) != hash)
+                if (prefixKey(len) != hash)
                     break;
                 agreed = std::max(agreed, len);
             }
@@ -1114,7 +1169,7 @@ bool g_log = false;
 } // namespace
 
 // tools/egs_hd_extract.py's "#format" line: older indexes miss things.
-constexpr int kManifestFormat = 3;
+constexpr int kManifestFormat = 4;
 
 size_t load(const std::filesystem::path &folder)
 {

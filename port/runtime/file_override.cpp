@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 
@@ -93,8 +94,37 @@ size_t install(const std::vector<std::filesystem::path> &folders)
         }
     }
     g_files.clear();
+    // Diagnostics: KH2_FILES_SKIP=a,b,... leaves out names containing any of
+    // these (to find which override a problem comes from).
+    std::vector<std::string> skips;
+    if (const char *env = std::getenv("KH2_FILES_SKIP"))
+    {
+        std::string all = env;
+        for (size_t at = 0; at <= all.size();)
+        {
+            const size_t comma = std::min(all.find(',', at), all.size());
+            if (comma > at)
+                skips.push_back(all.substr(at, comma - at));
+            at = comma + 1;
+        }
+    }
+    size_t refused = 0;
     for (const auto &[name, host] : byName)
     {
+        if (std::any_of(skips.begin(), skips.end(), [&](const std::string &k) { return name.find(k) != std::string::npos; }))
+            continue;
+        // The PC release's field HUD sheets (field2d/us/xx0field.2dd) have
+        // bigger pictures and their own layout (a 512x256 gauge sheet where
+        // the disc has 256x256): with them this executable corrupts memory
+        // and crashes in Olympus Coliseum. The disc's own are kept (their
+        // words are in English anyway: LEVEL UP!, FINISH!, ...).
+        static const std::string kFieldSheet = "field.2dd";
+        if (name.rfind("field2d/", 0) == 0 && name.size() > kFieldSheet.size() &&
+            name.compare(name.size() - kFieldSheet.size(), kFieldSheet.size(), kFieldSheet) == 0)
+        {
+            ++refused;
+            continue;
+        }
         Override o;
         o.name = name;
         o.host = host;
@@ -113,7 +143,7 @@ size_t install(const std::vector<std::filesystem::path> &folders)
         g_files.push_back(o);
     }
     if (!g_files.empty())
-        std::printf("[files] %zu file overrides\n", g_files.size());
+        std::printf("[files] %zu file overrides (%zu HUD sheets left out)\n", g_files.size(), refused);
     return g_files.size();
 }
 

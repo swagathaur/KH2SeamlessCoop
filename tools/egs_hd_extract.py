@@ -49,7 +49,7 @@ EXCLUDE = {
 }
 
 
-MANIFEST_FORMAT = 3
+MANIFEST_FORMAT = 4
 
 
 def key64(data):
@@ -292,6 +292,22 @@ def main():
             envs = texture_envs(original)
             datas = texture_data(original)
             anims = texture_animations(original)
+            # Which "-<n>" image is which: the PC numbers the environments in
+            # order but puts each texture animation's strip among them, so
+            # an image whose offset lies in an animation's frames is that
+            # strip, and the others count through the environments.
+            roles = {}
+            numbered = sorted((int(mm.group(1)), oo & 0x0FFFFFFF) for an_, oo, *_ in assets
+                              for mm in [re.match(r"-(\d+)\.", an_)] if mm)
+            env_next = 0
+            for n, pc_at in numbered:
+                strip = next((k for k, (foff, count, fw, fh, bpp) in enumerate(anims)
+                              if foff - 0x100 <= pc_at < foff + count * fw * fh * bpp // 8), None)
+                if strip is not None:
+                    roles[n] = ("anim", strip)
+                else:
+                    roles[n] = ("env", env_next)
+                    env_next += 1
             for aname, orig_off, dpos, aclen, adlen, data in assets:
                 ext = os.path.splitext(aname)[1].lower()
                 if (name, aname) in EXCLUDE or not (orig_off & 0x20000000) or ext not in (".png", ".dds"):
@@ -313,33 +329,36 @@ def main():
                 if not m:
                     emit(name, aname, original, at, "-", None, ref, data)
                     continue
-                # Model and map textures ("-<n>.dds"): texture environment n
-                # (palette variants of one texture share the data and differ
-                # there), then the texture animations' frame strips.
+                # Model and map textures ("-<n>.dds"): the texture environments
+                # in order (palette variants of one texture share the data
+                # and differ there), with each texture animation's frame
+                # strip among them (after its texture's environment).
                 n = int(m.group(1))
-                if n < len(datas):
-                    if datas[n][0] is not None:
-                        at = datas[n][0]
-                    elif datas[n][1] <= at < datas[n][2]:
-                        # Not uploaded by the section's list: a boundary of
-                        # the uploads' data (the old "- 16 * n" place, or the
-                        # one nearest the PC's offset), else that rule.
-                        near = min(datas[n][3], key=lambda b: abs(b - at))
-                        at = near if at - 16 * n not in datas[n][3] and abs(near - at) <= 0x100 else at - 16 * n
-                    else:
-                        at -= 16 * n
-                    variant = "v:%d:%d:%d:%d:%d:%d:%d:%d" % envs[n] if n < len(envs) else "-"
-                    emit(name, aname, original, at, variant, None, ref, data)
-                elif n < len(datas) + len(anims):
+                kind, index = roles.get(n, ("env", n))
+                if kind == "anim":
                     # One entry per frame, keyed by the frame's data:
                     # "p:<frame>:<frames>:<width>:<height>".
-                    foff, count, fw, fh, bpp = anims[n - len(datas)]
+                    foff, count, fw, fh, bpp = anims[index]
                     fbytes = fw * fh * bpp // 8
                     for k in range(count):
                         emit(name, aname, original, foff + k * fbytes, "p:%d:%d:%d:%d" % (k, count, fw, fh), fbytes,
                              ref, data)
+                    continue
+                if index < len(datas):
+                    if datas[index][0] is not None:
+                        at = datas[index][0]
+                    elif datas[index][1] <= at < datas[index][2]:
+                        # Not uploaded by the section's list: a boundary of
+                        # the uploads' data (the old "- 16 * n" place, or the
+                        # one nearest the PC's offset), else that rule.
+                        near = min(datas[index][3], key=lambda b: abs(b - at))
+                        at = near if at - 16 * n not in datas[index][3] and abs(near - at) <= 0x100 else at - 16 * n
+                    else:
+                        at -= 16 * n
                 else:
-                    emit(name, aname, original, at - 16 * n, "-", None, ref, data)
+                    at -= 16 * n
+                variant = "v:%d:%d:%d:%d:%d:%d:%d:%d" % envs[index] if index < len(envs) else "-"
+                emit(name, aname, original, at, variant, None, ref, data)
             break
     if not listing:
         with open(os.path.join(out, "manifest.txt"), "w") as f:

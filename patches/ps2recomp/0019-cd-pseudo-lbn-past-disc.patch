@@ -1,0 +1,65 @@
+cd: host files get sectors past the end of the disc image (a 4.3 GB image is longer than
+the old 0x100000 start, so reads of the disc there landed in override files).
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+index ccdd9c9..69b341c 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+@@ -987,7 +987,7 @@ namespace ps2_stubs
+         setReturnS32(ctx, 1);
+     }
+ 
+-    // Give a host file sectors of its own past the disc, readable with
++    // Give a host file sectors of its own past the disc's end, readable with
+     // sceCdRead like the image (for game file overrides). Same file, same LBN.
+     bool mapHostFileToCd(const std::filesystem::path &hostPath, uint32_t &lbn, uint32_t &sectors)
+     {
+@@ -1002,9 +1002,8 @@ namespace ps2_stubs
+             CdFileEntry entry;
+             entry.hostPath = hostPath;
+             entry.sizeBytes = static_cast<uint32_t>(std::min<uint64_t>(sizeBytes, 0xFFFFFFFFu));
+-            entry.baseLbn = g_nextPseudoLbn;
+             entry.sectors = sectorsForBytes(sizeBytes);
+-            g_nextPseudoLbn += entry.sectors + 1;
++            entry.baseLbn = allocatePseudoLbn(entry.sectors);
+             it = g_cdFilesByKey.emplace(key, entry).first;
+         }
+         lbn = it->second.baseLbn;
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 39f3abe..d394ac3 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -210,6 +210,21 @@ namespace
+         return true;
+     }
+ 
++    // Sectors for a host file, past the end of the disc image: a DVD-9 image
++    // is longer than kCdPseudoLbnStart (KH2 FM+ is 4.3 GB), and reads of the
++    // disc's own sectors there must not land in a host file.
++    uint32_t allocatePseudoLbn(uint32_t sectors)
++    {
++        uint64_t totalSectors = 0;
++        if (tryGetCdImageTotalSectors(totalSectors) && g_nextPseudoLbn < totalSectors + 0x1000u)
++        {
++            g_nextPseudoLbn = static_cast<uint32_t>((totalSectors + 0x1000u + 0xFFFu) & ~uint64_t(0xFFFu));
++        }
++        const uint32_t base = g_nextPseudoLbn;
++        g_nextPseudoLbn += sectors + 1;
++        return base;
++    }
++
+     uint32_t sectorsForBytes(uint64_t byteCount)
+     {
+         const uint64_t sectors = (byteCount + (kCdSectorSize - 1)) / kCdSectorSize;
+@@ -394,10 +409,8 @@ namespace
+         CdFileEntry entry;
+         entry.hostPath = path;
+         entry.sizeBytes = static_cast<uint32_t>(std::min<uint64_t>(sizeBytes, 0xFFFFFFFFu));
+-        entry.baseLbn = g_nextPseudoLbn;
+         entry.sectors = sectorsForBytes(sizeBytes);
+-
+-        g_nextPseudoLbn += entry.sectors + 1;
++        entry.baseLbn = allocatePseudoLbn(entry.sectors);
+         g_cdFilesByKey.emplace(key, entry);
+         entryOut = entry;
+         g_lastCdError = 0;

@@ -99,7 +99,8 @@ def texture_data(original):
     """Where each texture environment's picture is, as the game uploads it:
     for every BAR entry of type 7, environment n (GsInfo n) samples upload
     (TextureInfo) number Offset1[n] + 1 (upload 0 is the palette), whose
-    DMA reference tag (+0x70) points at its data in the section. The PC's
+    DMA reference tag (+0x70) points at its data in the section (the list
+    has the palette's transfer and then TextureInfoCount more). The PC's
     OriginalAssetOffset only approximates this (it drifts in big maps).
     Returns [(file offset or None, picture start, picture end, boundaries)]
     in the order of texture_envs, or []. None: the environment's texture is
@@ -117,7 +118,7 @@ def texture_data(original):
         _, _, tcount, gcount, off1, tinf, _, pic, pal = struct.unpack_from("<9i", original, off)
         pic_range = (off + pic, off + (pal if pic < pal <= size else size))
         uploads = []
-        for u in range(max(tcount, 0)):
+        for u in range(max(tcount, 0) + 1):  # the palette's, then the textures'
             at = off + tinf + u * 0x90 + 0x70
             if at + 8 > off + size:
                 break
@@ -127,6 +128,39 @@ def texture_data(original):
         for g in range(max(gcount, 0)):
             u = original[off + off1 + g] + 1 if off1 + g < size else len(uploads)
             out.append((uploads[u][0] if u < len(uploads) else None,) + pic_range + (bounds,))
+    return out
+
+
+def texture_animations(original):
+    """Texture animations ("TEXA" in the footer after each type-7 section's
+    palette: KH2 animates eyes and mouths by sending sprite frames into a
+    character's texture): [(frames offset, frame count, width, height,
+    bits per pixel)] in file order. The PC's "-<n>" images past the last
+    texture environment are these, one vertical strip of frames each."""
+    out = []
+    if original[:4] != b"BAR\x01":
+        return out
+    count = struct.unpack_from("<I", original, 4)[0]
+    for i in range(count):
+        t, _, _, off, size = struct.unpack_from("<HH4sII", original, 16 + i * 16)
+        if t != 7 or size < 36:
+            continue
+        colours, pal = struct.unpack_from("<i", original, off + 4)[0], struct.unpack_from("<i", original, off + 32)[0]
+        p, end = off + pal + colours * 4, off + size
+        while p + 8 <= end:
+            tag = original[p:p + 4]
+            if tag == b"_KN5":
+                break
+            length = struct.unpack_from("<i", original, p + 4)[0]
+            sub = p + 8
+            if tag == b"TEXA" and sub + 40 <= end:
+                f = struct.unpack_from("<12H4i", original, sub)
+                bpp, sprites, w, h, sprite_off = f[3], f[7], f[10], f[11], f[14]
+                if bpp in (4, 8) and sprites and w and h:
+                    out.append((sub + sprite_off, sprites, w, h, bpp))
+            if length < 0:
+                break
+            p = sub + length
     return out
 
 
@@ -198,8 +232,46 @@ def main():
             archives.append((base, E.read_hed(base + ".hed")))
     os.makedirs(out, exist_ok=True)
     manifest = ["#archive %d %s" % (i, os.path.abspath(base + ".pkg")) for i, (base, _) in enumerate(archives)]
-    files = images = skipped = dupes = 0
+    stats = {"files": 0, "images": 0, "skipped": 0, "dupes": 0}
     seen = set()
+
+    def emit(name, aname, original, at, variant, limit, ref, data):
+        """One manifest line: the image ref for the data at original[at:]
+        (at most limit bytes of it count, for animation frames)."""
+        end = len(original) if limit is None else min(len(original), at + limit)
+        chunk = original[at:min(end, at + 256)]
+        if at < 0 or len(chunk) < 64:
+            stats["skipped"] += 1
+            return
+        # Keyed past a blank start (leading bytes all alike, in 16-byte steps),
+        # as the runtime does: blank starts are everywhere.
+        skip = leading_blank(original[:end], at)
+        # A blank start (one byte value over 64 KiB, or a whole frame) would
+        # also match the game's own empty buffers: leave those out.
+        head = original[at:min(end, at + 65536)]
+        if head.count(head[0]) == len(head):
+            stats["skipped"] += 1
+            return
+        keyed = original[at + skip:min(end, at + skip + 256)]
+        if len(keyed) < 256 and (skip or len(keyed) < 64):
+            stats["skipped"] += 1
+            return
+        checks = []
+        for n in (1024, 4096, 16384, 65536, 262144):
+            if at + n <= end:
+                checks.append("%d:%016x" % (n, key64(original[at:at + n])))
+        ident = (key64(keyed), skip, tuple(checks), variant)
+        if ident in seen:
+            stats["dupes"] += 1  # the same original bytes again (shared art): one image
+            return
+        seen.add(ident)
+        if listing:
+            print(name, aname, hex(at), variant)
+            return
+        manifest.append("%016x %d@%d %s %s %s %s" % (key64(keyed), len(keyed), skip, ref, name,
+                                                  ",".join(checks) or "-", variant))
+        stats["images"] += 1
+
     for name in names:
         md5 = hashlib.md5(name.encode()).digest()
         for ai, (base, hed) in enumerate(archives):
@@ -210,90 +282,63 @@ def main():
                 if struct.unpack("<iiii", pkg.read(16))[1] == 0:
                     break
                 original, assets = read_full(pkg, hed[md5][0], extract)
-            files += 1
+            stats["files"] += 1
             envs = texture_envs(original)
             datas = texture_data(original)
+            anims = texture_animations(original)
             for aname, orig_off, dpos, aclen, adlen, data in assets:
                 ext = os.path.splitext(aname)[1].lower()
-                if (name, aname) in EXCLUDE:
-                    skipped += 1
+                if (name, aname) in EXCLUDE or not (orig_off & 0x20000000) or ext not in (".png", ".dds"):
+                    stats["skipped"] += 1
                     continue
-                if not (orig_off & 0x20000000) or ext not in (".png", ".dds"):
-                    skipped += 1
-                    continue
-                at = orig_off & 0x0FFFFFFF
-                # Model and map textures ("-<n>.dds"): the offset is the
-                # texture data's plus 16 * n (palette variants of one texture
-                # share the data, so the PC tells them apart that way).
-                m = re.match(r"-(\d+)\.", aname)
-                variant = "-"
-                if m:
-                    n = int(m.group(1))
-                    if n < len(datas) and datas[n][0] is not None:
-                        at = datas[n][0]
-                    elif n < len(datas) and datas[n][1] <= at < datas[n][2]:
-                        # Not uploaded by the section's list: a boundary of
-                        # the uploads' data (the old "- 16 * n" rule's place,
-                        # right for models, or the one nearest the PC's
-                        # offset), else that rule.
-                        near = min(datas[n][3], key=lambda b: abs(b - at))
-                        if at - 16 * n not in datas[n][3] and abs(near - at) <= 0x100:
-                            at = near
-                        else:
-                            at -= 16 * n
-                    else:
-                        at -= 16 * n
-                    if n < len(envs):
-                        variant = "v:%d:%d:%d:%d:%d:%d:%d:%d" % envs[n]
-                    if at < 0:
-                        skipped += 1
-                        continue
-                chunk = original[at:at + 256]
-                if len(chunk) < 64:
-                    skipped += 1
-                    continue
-                # Keyed past a blank start (leading bytes all alike, in 16-byte
-                # steps), as the runtime does: blank starts are everywhere.
-                skip = leading_blank(original, at)
-                # A blank start (one byte value over 64 KiB) would also match
-                # the game's own empty buffers: leave those out.
-                head = original[at:at + 65536]
-                if head.count(head[0]) == len(head):
-                    skipped += 1
-                    continue
-                rel = os.path.join(name.replace("/", os.sep) + ".hd", aname.replace("/", "_"))
-                if listing:
-                    print(name, aname, hex(at), adlen)
-                elif extract:
+                if extract:
+                    rel = os.path.join(name.replace("/", os.sep) + ".hd", aname.replace("/", "_"))
                     dst = os.path.join(out, rel)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     with open(dst, "wb") as f:
                         f.write(data)
+                    ref = rel.replace(os.sep, "/")
                 else:
                     # Read from the .pkg by the runtime: archive, file entry,
                     # data offset, stored and real length, type.
-                    rel = "pkg:%d:%d:%d:%d:%d:%s" % (ai, hed[md5][0], dpos, aclen, adlen, ext[1:])
-                checks = []
-                for n in (1024, 4096, 16384, 65536, 262144):
-                    if at + n <= len(original):
-                        checks.append("%d:%016x" % (n, key64(original[at:at + n])))
-                keyed = original[at + skip:at + skip + 256]
-                if len(keyed) < 256 and skip:
-                    skipped += 1
+                    ref = "pkg:%d:%d:%d:%d:%d:%s" % (ai, hed[md5][0], dpos, aclen, adlen, ext[1:])
+                at = orig_off & 0x0FFFFFFF
+                m = re.match(r"-(\d+)\.", aname)
+                if not m:
+                    emit(name, aname, original, at, "-", None, ref, data)
                     continue
-                ident = (key64(keyed), skip, tuple(checks), variant)
-                if ident in seen:
-                    dupes += 1  # the same original bytes again (shared art): one image
-                    continue
-                seen.add(ident)
-                manifest.append("%016x %d@%d %s %s %s %s" % (key64(keyed), len(keyed), skip, rel.replace(os.sep, "/"),
-                                                          name, ",".join(checks) or "-", variant))
-                images += 1
+                # Model and map textures ("-<n>.dds"): texture environment n
+                # (palette variants of one texture share the data and differ
+                # there), then the texture animations' frame strips.
+                n = int(m.group(1))
+                if n < len(datas):
+                    if datas[n][0] is not None:
+                        at = datas[n][0]
+                    elif datas[n][1] <= at < datas[n][2]:
+                        # Not uploaded by the section's list: a boundary of
+                        # the uploads' data (the old "- 16 * n" place, or the
+                        # one nearest the PC's offset), else that rule.
+                        near = min(datas[n][3], key=lambda b: abs(b - at))
+                        at = near if at - 16 * n not in datas[n][3] and abs(near - at) <= 0x100 else at - 16 * n
+                    else:
+                        at -= 16 * n
+                    variant = "v:%d:%d:%d:%d:%d:%d:%d:%d" % envs[n] if n < len(envs) else "-"
+                    emit(name, aname, original, at, variant, None, ref, data)
+                elif n < len(datas) + len(anims):
+                    # One entry per frame, keyed by the frame's data:
+                    # "p:<frame>:<frames>:<width>:<height>".
+                    foff, count, fw, fh, bpp = anims[n - len(datas)]
+                    fbytes = fw * fh * bpp // 8
+                    for k in range(count):
+                        emit(name, aname, original, foff + k * fbytes, "p:%d:%d:%d:%d" % (k, count, fw, fh), fbytes,
+                             ref, data)
+                else:
+                    emit(name, aname, original, at - 16 * n, "-", None, ref, data)
             break
     if not listing:
         with open(os.path.join(out, "manifest.txt"), "w") as f:
             f.write("\n".join(manifest) + "\n")
-    print(f"{files} files, {images} images, {skipped} skipped, {dupes} duplicates")
+    print("%(files)d files, %(images)d images, %(skipped)d skipped, %(dupes)d duplicates" % stats)
 
 
 if __name__ == "__main__":

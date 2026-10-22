@@ -298,6 +298,13 @@ environment list (GsInfo, 0xA0 bytes each), picture data, palette.
   its CLAMP rectangle (at the artists' scale). Their OriginalAssetOffset is
   close to the data's offset but drifts (by 0x60 + n, or worse in big maps),
   so the data is found through the upload list instead.
-- Some sections (BOB objects, SK0 sky) have environments whose texture is
-  not uploaded by their own list (animated or shared): those keep the PC's
-  offset.
+- The upload list is the palette's transfer followed by TextureInfoCount
+  texture transfers (OpenKH: clutTransfer + textureTransfer).
+- After the palette (PaletteOffset + ColorCount * 4) comes a footer of
+  tagged blocks ("_DMY", "UVSC", "TEXA", ending at "_KN5"). TEXA is a texture
+  animation: texture index, bits per pixel, frame count, the frames' place
+  (U, V) and size in the texture, and the frames' data. The game sends a
+  frame into the texture at its base pointer, offset to (U, V) (Roxas's
+  eyes: 96x48 at 0,20 of his head texture, sent 44 rows high). The PC's
+  "-n" images after the last environment are these, a vertical strip of
+  all frames each.

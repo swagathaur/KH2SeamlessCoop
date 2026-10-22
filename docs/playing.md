@@ -179,7 +179,10 @@ python tools/egs_hd_extract.py "<game folder>\Image\dt" game\files\hd
 then start with `--hd-textures` (or `hd-textures = 1`; the settings menu has a
 switch to compare). Character models and maps are included, with their
 palette variants (recoloured enemies, the many textures packed into one
-map atlas). Each texture is recognised by the data the game sends to the
+map atlas) and the PC's frames for animated eyes and mouths. Images load in
+the background, so a new area shows its PS2 textures for a moment rather
+than stalling; at most 1.5 GB of them stay on the GPU (the environment
+variable `KH2_HD_BUDGET_MB` changes that). Each texture is recognised by the data the game sends to the
 GS, so this works with the English text on or off for the parts both
 versions share. Known limits: the PC's button icons are laid out
 differently and are left out, and textures the game builds in memory (the

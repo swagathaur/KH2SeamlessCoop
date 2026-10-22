@@ -6,13 +6,17 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -252,6 +256,17 @@ struct Entry
     // The part of the texture the image covers (its environment's CLAMP
     // region; vw 0: all of it).
     uint32_t vx = 0, vy = 0, vw = 0, vh = 0;
+    // A frame of a texture animation (eyes, mouths): frame pframe of a strip
+    // of pframes frames, each pw x ph texels ("p:" in the manifest).
+    int pframe = -1, pframes = 0;
+    uint32_t pw = 0, ph = 0;
+};
+
+// An animation frame the game sent into a texture with an HD image.
+struct Patch
+{
+    uint32_t x, y, w, h;
+    int entry;
 };
 
 struct Region
@@ -263,6 +278,7 @@ struct Region
     int entry;
     uint64_t bytes;
     std::vector<int> alts; // entries with the same data (palette variants)
+    std::vector<Patch> patches; // animation frames sent into it since
 };
 
 class Replacer final : public ParallelGS::TextureReplacer
@@ -360,17 +376,45 @@ public:
             std::printf("[hd] watch #%ld upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u size %zu\n", m_finds, dbp, dbw,
                         psm, w, h, pos.DSAX, pos.DSAY, size);
         }
+        const auto *bytes = static_cast<const uint8_t *>(data);
+        size_t matchLen = 0;
+        std::vector<int> alts;
+        int match = bestMatch(bytes, size, matchLen, &alts);
+        // The agreement has to include real content: blank stretches (cleared
+        // buffers, transparent corners) look alike everywhere.
+        if (match >= 0)
+        {
+            const size_t n2 = std::min<size_t>(size, matchLen);
+            size_t differing = 0;
+            for (size_t i = 1; i < n2; ++i)
+                differing += bytes[i] != bytes[0];
+            if (differing * 64 < n2)
+                match = -1;
+        }
+        const bool frame = match >= 0 && m_entries[size_t(match)].pframes > 0;
         for (size_t i = 0; i < m_regions.size();)
         {
-            const Region &r = m_regions[i];
+            Region &r = m_regions[i];
             // Small uploads (palettes) tucked into a texture's unused blocks
             // do not end it; anything bigger, or at its base, does.
             const bool tucked = size < 4096 && dbp != r.dbp;
             // A patch into the texture itself (KH2 animates faces by sending
-            // a few rows of the eyes and mouth into the character's texture,
-            // at its base pointer with an offset): the HD image stays.
+            // a frame of the eyes or mouth into the character's texture, at
+            // its base pointer with an offset): the HD image stays, with the
+            // frame's HD image over that part when the PC has one.
             const bool patch = dbp == r.dbp && (pos.DSAX || pos.DSAY) && size * 4 <= r.bytes;
-            if (!tucked && !patch && r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
+            if (patch)
+            {
+                auto overlaps = [&](const Patch &p) {
+                    return p.x < pos.DSAX + w && pos.DSAX < p.x + p.w && p.y < pos.DSAY + h && pos.DSAY < p.y + p.h;
+                };
+                r.patches.erase(std::remove_if(r.patches.begin(), r.patches.end(), overlaps), r.patches.end());
+                if (frame)
+                    r.patches.push_back({pos.DSAX, pos.DSAY, w, h, match});
+                ++i;
+                continue;
+            }
+            if (!tucked && r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
             {
                 if (m_log && m_loggedDrops.insert(uint64_t(r.entry) << 32 | dbp).second)
                     std::printf("[hd] %s dropped: upload dbp %u psm 0x%02X %ux%u over it\n",
@@ -380,7 +424,6 @@ public:
             else
                 ++i;
         }
-        const auto *bytes = static_cast<const uint8_t *>(data);
         static const bool scan = std::getenv("KH2_HD_SCAN") != nullptr; // diagnostics: textures inside uploads
         if (scan && size >= 1024 && m_scanned.insert(key64(bytes, std::min<size_t>(size, 4096)) ^ size).second)
         {
@@ -416,9 +459,6 @@ public:
                 std::fclose(f);
             }
         }
-        size_t matchLen = 0;
-        std::vector<int> alts;
-        const int match = bestMatch(bytes, size, matchLen, &alts);
         // KH2_HD_TRACE: the first 2000 different uploads (by place and data).
         static const bool traceUp = std::getenv("KH2_HD_TRACE") != nullptr;
         if (traceUp && m_tracedUploads < 2000 &&
@@ -428,21 +468,12 @@ public:
             std::printf("[hd] trace upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u size %zu -> %s\n", dbp, dbw, psm, w, h,
                         pos.DSAX, pos.DSAY, size, match >= 0 ? m_entries[size_t(match)].source.c_str() : "-");
         }
-        if (match < 0)
+        // An animation frame is only ever a part of another texture.
+        if (match < 0 || frame)
             return;
-        // The agreement has to include real content: blank stretches (cleared
-        // buffers, transparent corners) look alike everywhere.
-        {
-            const size_t n2 = std::min<size_t>(size, matchLen);
-            size_t differing = 0;
-            for (size_t i = 1; i < n2; ++i)
-                differing += bytes[i] != bytes[0];
-            if (differing * 64 < n2)
-                return;
-        }
         const Entry &e = m_entries[size_t(match)];
         m_regions.push_back({dbp, dbw, psm, pos.DSAX, pos.DSAY, w, h, uint32_t(first), uint32_t(last), mask, match,
-                             uint64_t(size), std::move(alts)});
+                             uint64_t(size), std::move(alts), {}});
         if (m_log && m_loggedUploads.insert(match).second)
             std::printf("[hd] upload %s: dbp %u dbw %u psm 0x%02X %ux%u at %u,%u (%zu bytes agree) -> %s\n",
                         e.source.c_str(), dbp, dbw, psm, w, h, pos.DSAX, pos.DSAY, matchLen, e.path.c_str());
@@ -590,6 +621,9 @@ public:
                 rw = ce.vw;
                 rh = ce.vh;
             }
+            if (!r.patches.empty())
+                if (Vulkan::ImageHandle c = composite(chosen, r.patches, rx, ry, rw, rh))
+                    img = c;
             out.image = img;
             out.x = rx;
             out.y = ry;
@@ -742,12 +776,9 @@ public:
         return true;
     }
 
-    Vulkan::ImageHandle image(int entry)
+    // An image's pixels, RGBA with the GS's alpha (0x80 opaque).
+    bool pixels(int entry, int &w, int &h, std::vector<uint8_t> &rgba)
     {
-        auto found = m_images.find(entry);
-        if (found != m_images.end())
-            return found->second;
-        Vulkan::ImageHandle img;
         const std::string &ref = m_entries[size_t(entry)].path;
         std::string path;
         std::vector<uint8_t> file;
@@ -762,47 +793,309 @@ public:
             std::ifstream in(path, std::ios::binary);
             file.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
-        int w = 0, h = 0, comp = 0;
-        std::vector<uint8_t> dds;
-        stbi_uc *px = nullptr;
+        w = h = 0;
+        rgba.clear();
         if (file.size() > 4 && std::memcmp(file.data(), "DDS ", 4) == 0)
         {
-            if (loadDds(file, w, h, dds))
-                px = dds.data();
+            if (!loadDds(file, w, h, rgba))
+                rgba.clear();
         }
         else if (!file.empty())
-            px = stbi_load_from_memory(file.data(), int(file.size()), &w, &h, &comp, 4);
-        if (px && m_device)
         {
-            // GS texture alpha: 0x80 is opaque.
-            static const bool tint = std::getenv("KH2_HD_TINT") != nullptr; // debugging: replaced = red
-            for (size_t i = 0, n = size_t(w) * size_t(h); i < n; ++i)
+            int comp = 0;
+            if (stbi_uc *px = stbi_load_from_memory(file.data(), int(file.size()), &w, &h, &comp, 4))
             {
-                px[i * 4 + 3] = stbi_uc((unsigned(px[i * 4 + 3]) * 128u + 127u) / 255u);
-                if (tint)
-                {
-                    px[i * 4 + 1] = 0;
-                    px[i * 4 + 2] = 0;
-                }
+                rgba.assign(px, px + size_t(w) * size_t(h) * 4u);
+                stbi_image_free(px);
             }
-            auto info = Vulkan::ImageCreateInfo::immutable_2d_image(unsigned(w), unsigned(h), VK_FORMAT_R8G8B8A8_UNORM);
-            Vulkan::ImageInitialData init = {px, 0, 0};
-            img = m_device->create_image(info, &init);
         }
-        else
+        if (rgba.empty() || w <= 0 || h <= 0)
+        {
             std::fprintf(stderr, "[hd] cannot load %s\n", path.c_str());
-        if (px && dds.empty())
-            stbi_image_free(px);
-        m_images[entry] = img; // a failure is remembered too
+            return false;
+        }
+        static const bool tint = std::getenv("KH2_HD_TINT") != nullptr; // debugging: replaced = red
+        for (size_t i = 0, n = size_t(w) * size_t(h); i < n; ++i)
+        {
+            rgba[i * 4 + 3] = uint8_t((unsigned(rgba[i * 4 + 3]) * 128u + 127u) / 255u);
+            if (tint)
+            {
+                rgba[i * 4 + 1] = 0;
+                rgba[i * 4 + 2] = 0;
+            }
+        }
+        return true;
+    }
+
+    Vulkan::ImageHandle upload(const std::vector<uint8_t> &rgba, int w, int h)
+    {
+        if (!m_device)
+            return {};
+        auto info = Vulkan::ImageCreateInfo::immutable_2d_image(unsigned(w), unsigned(h), VK_FORMAT_R8G8B8A8_UNORM);
+        Vulkan::ImageInitialData init = {rgba.data(), 0, 0};
+        return m_device->create_image(info, &init);
+    }
+
+    // The image for an entry. Decoding (inflating, DXT) runs on worker
+    // threads so a new area does not stall the frame: until an image is
+    // ready the game's own texture is drawn (KH2_HD_SYNC=1 waits instead,
+    // for reproducible screenshots).
+    Vulkan::ImageHandle image(int entry)
+    {
+        auto found = m_images.find(entry);
+        if (found != m_images.end())
+        {
+            found->second.lastUse = m_finds;
+            return found->second.image;
+        }
+        static const bool sync = std::getenv("KH2_HD_SYNC") != nullptr;
+        int w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+        bool ok = false;
+        if (sync)
+            ok = pixels(entry, w, h, rgba);
+        else
+        {
+            std::unique_lock<std::mutex> lock(m_loadMutex);
+            auto done = m_loaded.find(entry);
+            if (done == m_loaded.end())
+            {
+                if (m_queued.insert(entry).second)
+                {
+                    m_queue.push_back(entry);
+                    startWorkers();
+                    m_loadCond.notify_one();
+                }
+                return {};
+            }
+            w = done->second.w;
+            h = done->second.h;
+            rgba = std::move(done->second.rgba);
+            ok = done->second.ok;
+            m_loaded.erase(done);
+            m_queued.erase(entry);
+        }
+        Vulkan::ImageHandle img;
+        if (ok)
+            img = upload(rgba, w, h);
+        const uint64_t bytes = img ? uint64_t(w) * uint64_t(h) * 4u : 0;
+        m_images[entry] = {img, m_finds, bytes}; // a failure is remembered too
+        m_imageBytes += bytes;
+        trimImages();
         return img;
     }
+
+    void startWorkers()
+    {
+        if (!m_workers.empty())
+            return;
+        const unsigned n = std::max(1u, std::min(3u, std::thread::hardware_concurrency() / 4u));
+        for (unsigned i = 0; i < n; ++i)
+            m_workers.emplace_back([this] { worker(); });
+    }
+
+    void worker()
+    {
+        for (;;)
+        {
+            int entry;
+            {
+                std::unique_lock<std::mutex> lock(m_loadMutex);
+                m_loadCond.wait(lock, [this] { return m_stop || !m_queue.empty(); });
+                if (m_stop)
+                    return;
+                // Newest first: what the game asked for last is on screen now.
+                entry = m_queue.back();
+                m_queue.pop_back();
+            }
+            Loaded l;
+            l.ok = pixels(entry, l.w, l.h, l.rgba);
+            std::lock_guard<std::mutex> lock(m_loadMutex);
+            m_loaded[entry] = std::move(l);
+        }
+    }
+
+    void stopWorkers()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_loadMutex);
+            m_stop = true;
+            m_queue.clear();
+        }
+        m_loadCond.notify_all();
+        for (auto &t : m_workers)
+            t.join();
+        m_workers.clear();
+        std::lock_guard<std::mutex> lock(m_loadMutex);
+        m_stop = false;
+        m_loaded.clear();
+        m_queued.clear();
+    }
+
+    ~Replacer() override { stopWorkers(); }
+
+    struct Loaded
+    {
+        bool ok = false;
+        int w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+    };
+    std::mutex m_loadMutex;
+    std::condition_variable m_loadCond;
+    std::deque<int> m_queue;
+    std::set<int> m_queued;
+    std::unordered_map<int, Loaded> m_loaded;
+    std::vector<std::thread> m_workers;
+    bool m_stop = false;
+
+    // Keeps the images under a budget (KH2_HD_BUDGET_MB, default 1536):
+    // the least recently used go (paraLLEl-GS holds its own references to
+    // what the frame being drawn uses).
+    void trimImages()
+    {
+        static const uint64_t budget = [] {
+            const char *env = std::getenv("KH2_HD_BUDGET_MB");
+            const long mb = env ? std::atol(env) : 1536;
+            return uint64_t(std::max(mb, 64L)) << 20;
+        }();
+        if (m_imageBytes <= budget)
+            return;
+        std::vector<std::pair<long, int>> byAge;
+        byAge.reserve(m_images.size());
+        for (const auto &kv : m_images)
+            if (kv.second.bytes)
+                byAge.emplace_back(kv.second.lastUse, kv.first);
+        std::sort(byAge.begin(), byAge.end());
+        for (const auto &[use, entry] : byAge)
+        {
+            if (m_imageBytes <= budget * 3 / 4 || use >= m_finds)
+                break;
+            auto it = m_images.find(entry);
+            m_imageBytes -= it->second.bytes;
+            m_images.erase(it);
+        }
+    }
+
+    // A pixel cache for compositing (base images and frame strips).
+    const std::vector<uint8_t> *cachedPixels(int entry, int &w, int &h)
+    {
+        for (auto &c : m_pixelCache)
+            if (c.entry == entry)
+            {
+                c.lastUse = m_finds;
+                w = c.w;
+                h = c.h;
+                return c.rgba.empty() ? nullptr : &c.rgba;
+            }
+        PixelCache c;
+        c.entry = entry;
+        c.lastUse = m_finds;
+        pixels(entry, c.w, c.h, c.rgba);
+        if (m_pixelCache.size() >= 8)
+            m_pixelCache.erase(std::min_element(m_pixelCache.begin(), m_pixelCache.end(),
+                                                [](const PixelCache &a, const PixelCache &b) { return a.lastUse < b.lastUse; }));
+        m_pixelCache.push_back(std::move(c));
+        w = m_pixelCache.back().w;
+        h = m_pixelCache.back().h;
+        return m_pixelCache.back().rgba.empty() ? nullptr : &m_pixelCache.back().rgba;
+    }
+
+    // The base image with the animation frames the game has sent into the
+    // texture drawn over it (texel rectangle rx, ry, rw x rh of the texture).
+    Vulkan::ImageHandle composite(int base, const std::vector<Patch> &patches, uint32_t rx, uint32_t ry, uint32_t rw,
+                                  uint32_t rh)
+    {
+        uint64_t key = 0xcbf29ce484222325ull;
+        auto mix = [&](uint64_t v) { key = (key ^ v) * 0x100000001b3ull; };
+        mix(uint64_t(base));
+        mix(uint64_t(rx) << 32 | ry);
+        mix(uint64_t(rw) << 32 | rh);
+        for (const Patch &p : patches)
+        {
+            mix(uint64_t(p.x) << 32 | p.y);
+            mix(uint64_t(p.w) << 32 | p.h);
+            mix(uint64_t(uint32_t(p.entry)));
+        }
+        for (auto &c : m_composites)
+            if (c.key == key)
+            {
+                c.lastUse = m_finds;
+                return c.image;
+            }
+        int bw = 0, bh = 0;
+        const std::vector<uint8_t> *b = cachedPixels(base, bw, bh);
+        if (!b || !rw || !rh)
+            return {};
+        std::vector<uint8_t> out = *b;
+        const float sx = float(bw) / float(rw), sy = float(bh) / float(rh);
+        for (const Patch &p : patches)
+        {
+            const Entry &e = m_entries[size_t(p.entry)];
+            int fw = 0, fh = 0;
+            const std::vector<uint8_t> *f = cachedPixels(p.entry, fw, fh);
+            if (!f || p.x < rx || p.y < ry)
+                continue;
+            // The frame's rows in the strip, and the part of the sprite the
+            // game sent (it may send fewer rows than a frame has).
+            const float rowsPerFrame = float(fh) / float(e.pframes);
+            const float top = float(e.pframe) * rowsPerFrame;
+            const int dx0 = int(float(p.x - rx) * sx + 0.5f), dy0 = int(float(p.y - ry) * sy + 0.5f);
+            const int dx1 = std::min(bw, int(float(p.x - rx + p.w) * sx + 0.5f));
+            const int dy1 = std::min(bh, int(float(p.y - ry + p.h) * sy + 0.5f));
+            for (int y = std::max(dy0, 0); y < dy1; ++y)
+            {
+                const float v = (float(y - dy0) + 0.5f) / sy; // texels into the patch
+                const int srcY = std::min(fh - 1, int(top + v / float(e.ph) * rowsPerFrame));
+                for (int x = std::max(dx0, 0); x < dx1; ++x)
+                {
+                    const float u = (float(x - dx0) + 0.5f) / sx;
+                    const int srcX = std::min(fw - 1, int(u / float(e.pw) * float(fw)));
+                    std::memcpy(&out[(size_t(y) * size_t(bw) + size_t(x)) * 4u],
+                                &(*f)[(size_t(srcY) * size_t(fw) + size_t(srcX)) * 4u], 4);
+                }
+            }
+        }
+        Vulkan::ImageHandle img = upload(out, bw, bh);
+        if (m_log && m_loggedComposites++ < 40)
+            std::printf("[hd] composite %s with %zu animation frame(s)\n", m_entries[size_t(base)].source.c_str(),
+                        patches.size());
+        if (m_composites.size() >= 16)
+            m_composites.erase(std::min_element(m_composites.begin(), m_composites.end(),
+                                                [](const Composite &a, const Composite &c) { return a.lastUse < c.lastUse; }));
+        m_composites.push_back({key, img, m_finds});
+        return img;
+    }
+
+    struct ImageSlot
+    {
+        Vulkan::ImageHandle image;
+        long lastUse = 0;
+        uint64_t bytes = 0;
+    };
+    struct PixelCache
+    {
+        int entry = -1;
+        int w = 0, h = 0;
+        long lastUse = 0;
+        std::vector<uint8_t> rgba;
+    };
+    struct Composite
+    {
+        uint64_t key;
+        Vulkan::ImageHandle image;
+        long lastUse;
+    };
 
     std::filesystem::path m_folder;
     std::vector<std::string> m_archives;
     std::vector<Entry> m_entries;
     std::unordered_multimap<uint64_t, int> m_byKey;
     std::vector<Region> m_regions;
-    std::unordered_map<int, Vulkan::ImageHandle> m_images;
+    std::unordered_map<int, ImageSlot> m_images;
+    uint64_t m_imageBytes = 0;
+    std::vector<PixelCache> m_pixelCache;
+    std::vector<Composite> m_composites;
+    int m_loggedComposites = 0;
     Vulkan::Device *m_device = nullptr;
     std::atomic<bool> m_enabled{true};
     bool m_log = false;
@@ -863,6 +1156,12 @@ size_t load(const std::filesystem::path &folder)
         if (std::sscanf(variant.c_str(), "v:%u:%u:%u:%u:%u:%u:%u:%u", &e.vtbp, &e.vcbp, &e.vcsa, &e.vtbw, &e.vx, &e.vy,
                         &e.vw, &e.vh) >= 3)
             e.variant = true;
+        else if (std::sscanf(variant.c_str(), "p:%d:%d:%u:%u", &e.pframe, &e.pframes, &e.pw, &e.ph) != 4 ||
+                 e.pframe < 0 || e.pframe >= e.pframes || !e.pw || !e.ph)
+        {
+            e.pframe = -1;
+            e.pframes = 0;
+        }
         std::istringstream cs(checks);
         for (std::string item; std::getline(cs, item, ',');)
         {
@@ -892,7 +1191,10 @@ void detach()
 {
     if (g_replacer)
     {
+        g_replacer->stopWorkers();
         g_replacer->m_images.clear();
+        g_replacer->m_imageBytes = 0;
+        g_replacer->m_composites.clear();
         g_replacer->m_device = nullptr;
     }
 }

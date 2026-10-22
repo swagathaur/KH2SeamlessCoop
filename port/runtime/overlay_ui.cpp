@@ -19,6 +19,7 @@
 #include "imgui.h"
 
 #include "game_patches.h"
+#include "hd_textures.h"
 #include "game_state.h"
 #include "coop.h"
 #include "puppets.h"
@@ -140,7 +141,7 @@ bool save()
                                                     "show-fps",   "ff-speed", "pause-unfocused",
                                                     "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window",
                                                     "no-name-tags", "skip-movies", "skip-cutscenes",
-                                                    "no-ssaa-textures", "no-mipmaps"};
+                                                    "no-ssaa-textures", "no-mipmaps", "hd-textures"};
         for (std::string line; std::getline(in, line);)
         {
             std::string key = line.substr(0, line.find_first_of("=#;"));
@@ -162,6 +163,8 @@ bool save()
         out << "no-ssaa-textures = 1\n";
     if (kh2pgs::sharpestTextures())
         out << "no-mipmaps = 1\n";
+    if (kh2hd::loaded() && kh2hd::enabled())
+        out << "hd-textures = 1\n";
     if (kh2pgs::vsync())
         out << "vsync = 1\n";
     if (kh2pgs::fullscreen())
@@ -233,6 +236,13 @@ void draw()
         kh2pgs::setSharpestTextures(sharpTex);
     ImGui::SetItemTooltip("Always use full-size textures, even far away (no mipmaps). Sharper at high\n"
                           "resolution; can shimmer.");
+    if (kh2hd::loaded())
+    {
+        bool hd = kh2hd::enabled();
+        if (ImGui::Checkbox("HD textures (PC release)", &hd))
+            kh2hd::setEnabled(hd);
+        ImGui::SetItemTooltip("Menus, fonts and other 2D art from the PC release's remastered textures.");
+    }
     bool fsr = kh2pgs::fsr();
     if (ImGui::Checkbox("Sharp upscaling (AMD FSR 1)", &fsr))
         kh2pgs::setFsr(fsr);

@@ -20,6 +20,7 @@
 #endif
 
 #include "pgs_renderer.h"
+#include "hd_textures.h"
 
 #include <algorithm>
 #include <atomic>
@@ -817,6 +818,8 @@ bool init(const Options &options)
         hacks.disable_mipmaps = g_opt.disableMipmaps;
         g_gs->set_hacks(hacks);
     }
+    if (ParallelGS::TextureReplacer *replacer = kh2hd::attach(g_device))
+        g_gs->set_texture_replacer(replacer);
     const auto &props = g_device->get_gpu_properties();
     std::printf("[pgs] paraLLEl-GS on %s, %ux super-sampling%s\n", props.deviceName, g_opt.superSampling,
                 g_opt.windowed ? ", windowed" : "");
@@ -858,6 +861,9 @@ void shutdown()
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     g_device->wait_idle();
+    if (g_gs)
+        g_gs->set_texture_replacer(nullptr);
+    kh2hd::detach();
 #if defined(_WIN32)
     if (g_imguiReady)
     {

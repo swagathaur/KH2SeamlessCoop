@@ -52,6 +52,7 @@
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
+#include "hd_textures.h"
 #include "file_override.h"
 #include "overlay_ui.h"
 
@@ -129,6 +130,9 @@ struct Options
     bool ssaaTextures = true;          // --no-ssaa-textures
     bool backbufferPromotion = false;  // --backbuffer-promotion
     bool noMipmaps = false;            // --no-mipmaps
+    bool hdTextures = false;           // --hd-textures
+    std::string hdDir;                 // --hd-dir=DIR (default <cd-root>/files/hd)
+    bool hdLog = false;                // --hd-log
     bool swapConfirm = false;          // controller: confirm on the right button instead of the bottom
     bool noRumble = false;
     bool showFps = false;
@@ -212,6 +216,9 @@ void usage()
         "  --no-ssaa-textures      super-sampling: let the game's full-screen effects drop to 1 sample\n"
         "  --backbuffer-promotion  super-sampling: show the source of the game's final scaling blit\n"
         "  --no-mipmaps            always sample the sharpest texture level\n"
+        "  --hd-textures           the PC release's high-resolution 2D textures (tools/egs_hd_extract.py)\n"
+        "  --hd-dir=DIR            where they are (default <cd-root>/files/hd)\n"
+        "  --hd-log                log matched uploads and replaced textures\n"
         "  --swap-confirm          controller: right face button confirms (default: bottom button)\n"
         "  --no-rumble             controller vibration off\n"
         "  --show-fps              show frame rates (F2 toggles; F1 or Select+Start opens settings)\n"
@@ -363,6 +370,9 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a == "--no-ssaa-textures") o.ssaaTextures = false;
         else if (a == "--backbuffer-promotion") o.backbufferPromotion = true;
         else if (a == "--no-mipmaps") o.noMipmaps = true;
+        else if (a == "--hd-textures") o.hdTextures = true;
+        else if (a.rfind("--hd-dir=", 0) == 0) { o.hdDir = value(a); o.hdTextures = true; }
+        else if (a == "--hd-log") o.hdLog = true;
         else if (a == "--swap-confirm") o.swapConfirm = true;
         else if (a == "--no-rumble") o.noRumble = true;
         else if (a == "--show-fps") o.showFps = true;
@@ -1206,7 +1216,7 @@ std::vector<std::string> readSettings(const char *argv0)
             // On/off switches take 1/0 (true/false, yes/no, on/off); every other
             // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
             static const std::set<std::string> kSwitches = {
-                "backbuffer-promotion", "english", "follow-host", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mipmaps", "no-mouse-camera",
+                "backbuffer-promotion", "english", "follow-host", "hd-log", "hd-textures", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mipmaps", "no-mouse-camera",
                 "no-name-tags", "no-rumble", "no-shared-enemies", "no-ssaa-textures", "pause-unfocused", "profile", "show-fps",
                 "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
             const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
@@ -1317,6 +1327,12 @@ int main(int argc, char **argv)
         g.superSampledTextures = opt.ssaaTextures;
         g.backbufferPromotion = opt.backbufferPromotion;
         g.disableMipmaps = opt.noMipmaps;
+        if (opt.hdTextures)
+        {
+            kh2hd::setLog(opt.hdLog);
+            kh2hd::load(opt.hdDir.empty() ? std::filesystem::path(opt.cdRoot.empty() ? "game" : opt.cdRoot) / "files" / "hd"
+                                          : std::filesystem::path(opt.hdDir));
+        }
         gpu = kh2pgs::init(g);
         if (!gpu && opt.renderer == "gpu" && opt.headless)
             return kExitInitFailed;

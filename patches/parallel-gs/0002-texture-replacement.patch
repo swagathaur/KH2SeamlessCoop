@@ -1,0 +1,161 @@
+kh2recomp: texture replacement hook (TextureReplacer): the application sees every
+completed host -> local transfer and can answer a texture lookup with its own image,
+sampled with normalized coordinates over the texel rectangle it stands for, bilinear.
+
+diff --git a/gs/gs_interface.cpp b/gs/gs_interface.cpp
+index ea00016..5eca654 100644
+--- a/gs/gs_interface.cpp
++++ b/gs/gs_interface.cpp
+@@ -315,6 +315,7 @@ void GSInterface::flush_render_pass(FlushReason reason)
+ 	render_pass.held_images.clear();
+ 	render_pass.texture_map.clear();
+ 	render_pass.tex_infos.clear();
++	tex_replaced.clear();
+ 	render_pass.tex_infos_has_super_samples = false;
+ 	render_pass.tex0_infos.clear();
+ 	render_pass.state_vector_map.clear();
+@@ -1592,11 +1593,18 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+ 
+ 	update_texture_page_rects();
+ 
++	// kh2recomp: an application-supplied replacement image for this texture.
++	TextureReplacement replacement = {};
++	const bool replaced = replacer && desc.rect.levels == 1 &&
++	                      replacer->find(desc.tex0.desc, desc.rect.x, desc.rect.y,
++	                                     desc.rect.width, desc.rect.height, replacement) &&
++	                      replacement.image && replacement.width && replacement.height;
++
+ 	// Be quite conservative when we decide to attempt super sampled textures.
+ 	// This is mostly only useful in:
+ 	// - Correctly resolving per-pixel effects which use some form of pixel testing.
+ 	// - Preserving per sample data during blit passes, etc.
+-	if (desc.rect.levels == 1 && super_sampled_textures &&
++	if (!replaced && desc.rect.levels == 1 && super_sampled_textures &&
+ 	    get_bits_per_pixel(desc.tex0.desc.PSM) >= 8 &&
+ 	    PRIMType(prim.desc.PRIM) == PRIMType::Sprite &&
+ 	    tracker.texture_may_super_sample(state_tracker.tex.page_rects[0]))
+@@ -1701,7 +1709,11 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+ 			}
+ 		}
+ 
+-		auto image = tracker.find_cached_texture(hasher.get());
++		Vulkan::ImageHandle image;
++		if (replaced)
++			image = replacement.image;
++		else
++			image = tracker.find_cached_texture(hasher.get());
+ 		if (!image)
+ 		{
+ 			TRACE("CACHE IMAGE", desc);
+@@ -1790,6 +1802,26 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+ 		info.info.bias.x = -float(desc.rect.x) * info.info.sizes.z;
+ 		info.info.bias.y = -float(desc.rect.y) * info.info.sizes.w;
+ 
++		if (replaced)
++		{
++			// The image is sampled with normalized coordinates, so its own size
++			// does not matter: map the texel rectangle it stands for onto it.
++			info.info.sizes.z = 1.0f / float(replacement.width);
++			info.info.sizes.w = 1.0f / float(replacement.height);
++			info.info.bias.x = -float(replacement.x) * info.info.sizes.z;
++			info.info.bias.y = -float(replacement.y) * info.info.sizes.w;
++			if (uint32_t(desc.clamp.desc.WMS) == CLAMPBits::CLAMP)
++			{
++				info.info.region.x = float(desc.rect.x);
++				info.info.region.z = float(desc.rect.x + desc.rect.width) - 1.0f;
++			}
++			if (uint32_t(desc.clamp.desc.WMT) == CLAMPBits::CLAMP)
++			{
++				info.info.region.y = float(desc.rect.y);
++				info.info.region.w = float(desc.rect.y + desc.rect.height) - 1.0f;
++			}
++		}
++
+ 		info.info.arrayed = int(desc.samples > 1);
+ 		info.info.flags = long_term_cache_texture ? TEX_INFO_LONG_TERM_REFERENCE : 0;
+ 		if (info.info.arrayed)
+@@ -1800,6 +1832,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+ 			info.info.flags |= TEX_INFO_FORCE_SAMPLE_MAPPING;
+ 
+ 		render_pass.tex_infos.push_back(info);
++		tex_replaced.resize(render_pass.tex_infos.size(), 0);
++		tex_replaced.back() = replaced ? 1 : 0;
+ 		render_pass.tex0_infos.push_back(ctx.tex0.desc);
+ 		render_pass.held_images.push_back(std::move(image));
+ 	}
+@@ -1841,7 +1875,13 @@ void GSInterface::drawing_kick_update_state(FBFeedbackMode feedback_mode, const
+ 			}
+ 		}
+ 
+-		if (ctx.tex1.desc.mmin_has_mipmap() && !hacks.disable_mipmaps)
++		// kh2recomp: replacement images are larger than the texels they stand
++		// for, and painted to be filtered.
++		const bool tex_is_replaced = tex_index < tex_replaced.size() && tex_replaced[tex_index];
++		if (tex_is_replaced)
++			p.tex |= TEX_SAMPLER_MAG_LINEAR_BIT | TEX_SAMPLER_MIN_LINEAR_BIT;
++
++		if (!tex_is_replaced && ctx.tex1.desc.mmin_has_mipmap() && !hacks.disable_mipmaps)
+ 		{
+ 			p.tex2 = ctx.tex1.desc.LCM << TEX2_FIXED_LOD_OFFSET;
+ 			p.tex2 |= ctx.tex1.desc.L << TEX2_L_OFFSET;
+@@ -3015,6 +3055,13 @@ void GSInterface::flush_pending_transfer(bool keep_alive)
+ 		transfer_state.copy.host_data_size_offset = transfer_state.last_flushed_qwords * sizeof(uint64_t);
+ 		transfer_state.copy.host_data_size_required = transfer_state.required_qwords * sizeof(uint64_t);
+ 
++		if (replacer && transfer_state.copy.host_data_size >= transfer_state.copy.host_data_size_required)
++		{
++			replacer->on_upload(transfer_state.copy.bitbltbuf.desc, transfer_state.copy.trxpos.desc,
++			                    transfer_state.copy.trxreg.desc, transfer_state.copy.host_data,
++			                    transfer_state.copy.host_data_size_required);
++		}
++
+ 		// This is an arbitrarily chosen value to deal with known problematic games.
+ 		constexpr uint32_t CopyCacheHazardLimit = 400;
+ 
+diff --git a/gs/gs_interface.hpp b/gs/gs_interface.hpp
+index 9f05da8..aa70d84 100644
+--- a/gs/gs_interface.hpp
++++ b/gs/gs_interface.hpp
+@@ -248,9 +248,33 @@ public:
+ 	virtual bool on_label(uint64_t payload) = 0;
+ };
+ 
++// kh2recomp: texture replacement. The application sees every completed
++// host -> local transfer, and may answer a texture lookup with an image of its
++// own (e.g. a high-resolution version of what was uploaded).
++struct TextureReplacement
++{
++	Vulkan::ImageHandle image;
++	// The region of the texture's own texel space (relative to TBP0) that the
++	// image covers.
++	uint32_t x, y, width, height;
++};
++
++class TextureReplacer
++{
++public:
++	virtual ~TextureReplacer() = default;
++	virtual void on_upload(const BITBLTBUFBits &bitbltbuf, const TRXPOSBits &trxpos, const TRXREGBits &trxreg,
++	                       const void *data, size_t size) = 0;
++	// The texture about to be sampled, and the texel rectangle it is read in.
++	virtual bool find(const TEX0Bits &tex0, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
++	                  TextureReplacement &replacement) = 0;
++};
++
+ class GSInterface final
+ {
+ public:
++	void set_texture_replacer(TextureReplacer *replacer_) { replacer = replacer_; }
++
+ 	GSInterface();
+ 	bool init(Vulkan::Device *device, const GSOptions &options);
+ 	void reset_context_state();
+@@ -323,6 +347,8 @@ private:
+ 	uint32_t vram_size = 0;
+ 	DebugMode debug_mode;
+ 	Hacks hacks;
++	TextureReplacer *replacer = nullptr;
++	std::vector<uint8_t> tex_replaced; // per render_pass.tex_infos entry
+ 
+ 	std::vector<uint32_t> sync_host_vram_blocks;
+ 	std::vector<uint32_t> sync_vram_host_pages;

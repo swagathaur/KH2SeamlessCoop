@@ -254,6 +254,7 @@ add_executable(kh2recomp
     port/runtime/gs_env.cpp
     port/runtime/profiler.cpp
     port/runtime/pgs_renderer.cpp
+    port/runtime/hd_textures.cpp
     port/runtime/host_input.cpp
     port/runtime/key_bindings.cpp
     port/runtime/game_patches.cpp
@@ -270,7 +271,8 @@ add_executable(kh2recomp
     port/coop/net/session.cpp
     ${KH2_PATCH_SOURCES}
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
-target_include_directories(kh2recomp PRIVATE port/runtime port/coop ${KH2_RUNTIME_INCLUDES})
+target_include_directories(kh2recomp PRIVATE port/runtime port/coop ${KH2_RUNTIME_INCLUDES}
+    third_party/parallel-gs/Granite/third_party/stb/stb)
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs kh2_imgui)
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)

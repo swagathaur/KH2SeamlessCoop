@@ -165,6 +165,23 @@ How it works: the files under `game\files\english` replace the game's own
 `--override-dir` works the same way, for mods), and the game's text code is
 told it is not running the Japanese version (`port/runtime/english_text.h`).
 
+## HD textures
+
+The PC release also carries high-resolution versions of the game's 2D art:
+menus, the title screen, fonts, message windows, item pictures, tutorials. Build
+the index once (it only reads the .pkg files; nothing is copied):
+
+```
+python tools/egs_hd_extract.py "<game folder>\Image\dt" game\files\hd
+```
+
+then start with `--hd-textures` (or `hd-textures = 1`; the settings menu has a
+switch to compare). The game is recognised by the data it sends to the GS, so
+this works with the English text on or off for the parts both versions share.
+Models and maps keep their PS2 textures for now (their textures go to the GS in
+blocks that do not line up with the PC's). The PC release has to stay
+installed where it was when the index was built. `--hd-log` lists what matched.
+
 ## Co-op (preview)
 
 The network layer is in: positions, rooms and HP travel between up to three

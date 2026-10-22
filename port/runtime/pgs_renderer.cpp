@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <chrono>
@@ -120,6 +121,8 @@ std::mutex g_queueMutex;
 std::condition_variable g_queueDrained;
 std::vector<uint8_t> g_queue;    // [u32 size][size bytes]...
 std::vector<uint8_t> g_draining; // the render thread's side of the swap
+uint64_t g_enqueued = 0;         // packets queued so far (under g_queueMutex)
+uint64_t g_processed = 0;        // packets fed to paraLLEl-GS (render thread)
 constexpr size_t kQueueLimit = 256u << 20; // past this the producer waits (render thread stuck)
 
 void tapPacket(const uint8_t *data, uint32_t size, void *)
@@ -145,16 +148,111 @@ void tapPacket(const uint8_t *data, uint32_t size, void *)
     g_queue.resize(at + 4 + size);
     std::memcpy(g_queue.data() + at, &size, 4);
     std::memcpy(g_queue.data() + at + 4, data, size);
+    ++g_enqueued;
+}
+
+// The guest reading GS memory back (local -> host: KH2 copies the finished
+// frame for its pause and battle backgrounds). Only paraLLEl-GS has what was
+// drawn, so the runtime's GS asks here (ps2SetGsReadback) and waits until
+// the render thread has fed paraLLEl-GS everything up to that transfer,
+// which then reads its VRAM.
+std::mutex g_rbMutex;
+std::condition_variable g_rbCond;
+bool g_rbPending = false, g_rbDone = false;
+uint64_t g_rbAfter = 0; // the request's packets are queued once this many were
+size_t g_rbBytes = 0;
+std::vector<uint8_t> g_rbData;
+
+uint32_t transferBits(uint32_t psm)
+{
+    switch (psm)
+    {
+    case 0x00: case 0x30: return 32;
+    case 0x01: case 0x31: return 24;
+    case 0x02: case 0x0A: case 0x32: case 0x3A: return 16;
+    case 0x13: return 8;
+    case 0x14: return 4;
+    default: return 0;
+    }
+}
+
+bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
+                     std::vector<uint8_t> &out, void *)
+{
+    static int logged = 0;
+    if (std::getenv("KH2_PGS_READBACK_LOG") && logged++ < 64)
+        std::printf("[pgs] readback sbp %u sbw %u psm 0x%02X at %u,%u %ux%u\n", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
+    if (!g_gs || g_opt.keepSoftwareRaster)
+        return false;
+    const uint32_t bits = transferBits(spsm);
+    if (!bits || !rrw || !rrh)
+        return false;
+    uint64_t after;
+    {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        after = g_enqueued;
+    }
+    std::unique_lock<std::mutex> lock(g_rbMutex);
+    g_rbBytes = size_t(rrw) * rrh * bits / 8u;
+    g_rbAfter = after;
+    g_rbDone = false;
+    g_rbPending = true;
+    if (!g_rbCond.wait_for(lock, std::chrono::seconds(2), [] { return g_rbDone; }))
+    {
+        g_rbPending = false;
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            std::fprintf(stderr, "[pgs] GS readback timed out; the guest gets stale data\n");
+        }
+        return false;
+    }
+    out.swap(g_rbData);
+    g_rbData.clear();
+    static int dumped = 0;
+    if (std::getenv("KH2_PGS_READBACK_LOG") && dumped < 4)
+    {
+        char name[64];
+        std::snprintf(name, sizeof(name), "readback_%d_%ux%u_psm%02X.bin", dumped++, rrw, rrh, spsm);
+        if (FILE *f = std::fopen(name, "wb"))
+        {
+            std::fwrite(out.data(), 1, out.size(), f);
+            std::fclose(f);
+        }
+    }
+    return true;
+}
+
+// Render thread, under g_mutex, after a drain.
+void serviceReadback()
+{
+    std::lock_guard<std::mutex> lock(g_rbMutex);
+    if (!g_rbPending || g_processed < g_rbAfter || !g_gs)
+        return;
+    const uint32_t words = uint32_t((g_rbBytes + 15u) / 16u);
+    g_rbData.assign(size_t(words) * 16u, 0);
+    g_gs->read_transfer_fifo(g_rbData.data(), words);
+    g_rbData.resize(g_rbBytes);
+    g_rbPending = false;
+    g_rbDone = true;
+    g_rbCond.notify_all();
 }
 
 // Render thread, under g_mutex.
 void drainQueue()
 {
+    uint64_t batchEnd;
     {
         std::lock_guard<std::mutex> lock(g_queueMutex);
         if (g_queue.empty())
+        {
+            g_processed = g_enqueued;
+            serviceReadback();
             return;
+        }
         g_draining.swap(g_queue);
+        batchEnd = g_enqueued;
     }
     g_queueDrained.notify_all();
     if (g_gs)
@@ -171,6 +269,8 @@ void drainQueue()
     g_draining.clear();
     if (g_draining.capacity() > (64u << 20))
         g_draining.shrink_to_fit();
+    g_processed = batchEnd;
+    serviceReadback();
 }
 
 void tapRegister(uint8_t reg, uint64_t value, void *)
@@ -856,6 +956,7 @@ bool init(const Options &options)
     }
 #endif
     ps2SetGifTap(&tapPacket, &tapRegister, nullptr);
+    ps2SetGsReadback(&readbackFromGpu, nullptr);
     ps2SetSoftwareRasterEnabled(g_opt.keepSoftwareRaster);
     g_active = true;
     return true;
@@ -868,6 +969,7 @@ void shutdown()
     if (!g_active)
         return;
     ps2SetGifTap(nullptr, nullptr, nullptr);
+    ps2SetGsReadback(nullptr, nullptr);
     ps2SetSoftwareRasterEnabled(true);
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();

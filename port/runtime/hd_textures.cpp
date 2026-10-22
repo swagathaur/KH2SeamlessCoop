@@ -432,6 +432,9 @@ public:
                         psm, w, h, pos.DSAX, pos.DSAY, size);
         }
         const auto *bytes = static_cast<const uint8_t *>(data);
+        // Palettes (small 32-bit uploads), for recolouring fonts.
+        if (size <= 1024 && psm == 0x00 && pos.DSAX == 0 && pos.DSAY == 0)
+            m_cluts[dbp] = {w, h, std::vector<uint8_t>(bytes, bytes + size)};
         size_t matchLen = 0;
         std::vector<int> alts;
         int match = bestMatch(bytes, size, matchLen, &alts);
@@ -534,6 +537,42 @@ public:
                         e.source.c_str(), dbp, dbw, psm, w, h, pos.DSAX, pos.DSAY, matchLen, e.path.c_str());
     }
 
+    // The GPU renders into (or copies over) these pages: a texture uploaded
+    // there is gone. Games render effects into spare texture memory (KH2's
+    // pause blur, battle transitions); a stale HD image there would be drawn
+    // in place of what was rendered.
+    void on_gpu_write(uint32_t basePage, uint32_t pageWidth, uint32_t pageHeight, uint32_t pageStride,
+                      uint32_t writeMask) override
+    {
+        // (A 24-bit frame buffer leaves the top byte of each word alone: KH2
+        // keeps its fonts there, as 4-bit textures.)
+        if (m_regions.empty() || !pageWidth || !pageHeight || !writeMask)
+            return;
+        std::array<uint64_t, 8> written{}; // 512 pages of 8 KiB: all of GS memory
+        for (uint32_t yy = 0; yy < pageHeight; ++yy)
+            for (uint32_t xx = 0; xx < pageWidth; ++xx)
+            {
+                const uint32_t page = (basePage + yy * pageStride + xx) & 511u;
+                written[page >> 6] |= 1ull << (page & 63u);
+            }
+        for (size_t i = 0; i < m_regions.size();)
+        {
+            const Region &r = m_regions[i];
+            bool hit = false;
+            for (uint32_t page = r.firstPage; (r.mask & writeMask) && page <= r.lastPage && !hit; ++page)
+                hit = (written[(page & 511u) >> 6] >> (page & 63u)) & 1u;
+            if (hit)
+            {
+                if (m_log && m_loggedDrops.insert(uint64_t(r.entry) << 32 | 0xFFFFFFFFu).second)
+                    std::printf("[hd] %s dropped: the GPU draws over it (page %u)\n",
+                                m_entries[size_t(r.entry)].path.c_str(), basePage);
+                m_regions.erase(m_regions.begin() + ptrdiff_t(i));
+            }
+            else
+                ++i;
+        }
+    }
+
     bool find(const ParallelGS::TEX0Bits &tex0, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
               ParallelGS::TextureReplacement &out) override
     {
@@ -606,6 +645,8 @@ public:
                     Vulkan::ImageHandle img = image(chosen);
                     if (!img)
                         return false;
+                    if (Vulkan::ImageHandle c = recolouredFont(chosen, tex0))
+                        img = c;
                     out.image = img;
                     out.x = -sx;
                     out.y = -sy;
@@ -667,6 +708,8 @@ public:
             Vulkan::ImageHandle img = image(chosen);
             if (!img)
                 return false;
+            if (Vulkan::ImageHandle c = recolouredFont(chosen, tex0))
+                img = c;
             const Entry &ce = m_entries[size_t(chosen)];
             if (ce.vw && ce.vh && ce.vx + ce.vw <= rw && ce.vy + ce.vh <= rh)
             {
@@ -1055,6 +1098,95 @@ public:
         return m_pixelCache.back().rgba.empty() ? nullptr : &m_pixelCache.back().rgba;
     }
 
+    // The 16 colours a 4-bit texture is drawn with (CLUT at CBP: an 8x2
+    // upload, or a 16x16 one holding 16 palettes picked by CSA in CSM1
+    // order), RGBA with the GS's alpha.
+    bool palette16(const ParallelGS::TEX0Bits &tex0, std::array<std::array<uint8_t, 4>, 16> &out) const
+    {
+        auto it = m_cluts.find(uint32_t(tex0.CBP));
+        if (it == m_cluts.end())
+            return false;
+        const Clut &c = it->second;
+        if (c.w * c.h == 16 && c.data.size() >= 64)
+        {
+            for (int i = 0; i < 16; ++i)
+                std::memcpy(out[size_t(i)].data(), &c.data[size_t(i) * 4u], 4);
+            return true;
+        }
+        if (c.w == 16 && c.h == 16 && c.data.size() >= 1024)
+        {
+            // CSM1: within each 32 entries, 8-15 and 16-23 are swapped.
+            for (int i = 0; i < 16; ++i)
+            {
+                const int index = int(tex0.CSA) * 16 + i;
+                const int stored = (index & ~0x18) | ((index & 0x08) << 1) | ((index & 0x10) >> 1);
+                std::memcpy(out[size_t(i)].data(), &c.data[size_t(stored) * 4u], 4);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // The PC's fonts are painted in one set of colours (grey letters, black
+    // outline), where the disc's 4-bit fonts are recoloured by palette per
+    // text box (dark letters without an outline in speech bubbles). The HD
+    // font is turned back into its parts (outline .. fill, by brightness,
+    // and coverage) and coloured with the palette the game draws with.
+    Vulkan::ImageHandle recolouredFont(int entry, const ParallelGS::TEX0Bits &tex0)
+    {
+        if ((tex0.PSM != 0x14 && tex0.PSM != 0x24 && tex0.PSM != 0x2C) ||
+            m_entries[size_t(entry)].source != "msg/us/fontimage.bar")
+            return {};
+        std::array<std::array<uint8_t, 4>, 16> pal{};
+        if (!palette16(tex0, pal))
+            return {};
+        uint64_t key = 0xcbf29ce484222325ull ^ uint64_t(uint32_t(entry));
+        for (const auto &col : pal)
+            for (uint8_t b : col)
+                key = (key ^ b) * 0x100000001b3ull;
+        for (auto &f : m_fonts)
+            if (f.key == key)
+            {
+                f.lastUse = m_finds;
+                return f.image;
+            }
+        if (m_log && m_loggedFontPalettes++ < 12)
+        {
+            std::printf("[hd] font palette cbp %u csa %u:", uint32_t(tex0.CBP), uint32_t(tex0.CSA));
+            for (int i = 0; i < 4; ++i)
+                std::printf(" %02x%02x%02x/%02x", pal[size_t(i)][0], pal[size_t(i)][1], pal[size_t(i)][2], pal[size_t(i)][3]);
+            std::printf("\n");
+        }
+        int w = 0, h = 0;
+        const std::vector<uint8_t> *src = cachedPixels(entry, w, h);
+        if (!src)
+            return {};
+        std::vector<uint8_t> out(src->size());
+        // Measured against the disc's font (each 4-bit index's HD pixels):
+        // index 1 is the dark outer edge, 2 the outline's inner part (about
+        // 60 % of the fill's brightness), 3 the fill.
+        const auto &c1 = pal[1], &c2 = pal[2], &c3 = pal[3];
+        for (size_t i = 0, n = size_t(w) * size_t(h); i < n; ++i)
+        {
+            const uint8_t *p = &(*src)[i * 4];
+            const float t = std::min(1.0f, float(std::max({p[0], p[1], p[2]})) / 120.0f);
+            const float coverage = float(p[3]) / 128.0f;
+            const auto &lo = t < 0.6f ? c1 : c2;
+            const auto &hi = t < 0.6f ? c2 : c3;
+            const float f = t < 0.6f ? t / 0.6f : (t - 0.6f) / 0.4f;
+            for (int k = 0; k < 3; ++k)
+                out[i * 4 + size_t(k)] = uint8_t(float(lo[size_t(k)]) + (float(hi[size_t(k)]) - float(lo[size_t(k)])) * f + 0.5f);
+            const float a = float(lo[3]) + (float(hi[3]) - float(lo[3])) * f;
+            out[i * 4 + 3] = uint8_t(std::min(255.0f, a * coverage + 0.5f));
+        }
+        Vulkan::ImageHandle img = upload(out, w, h);
+        if (m_fonts.size() >= 16)
+            m_fonts.erase(std::min_element(m_fonts.begin(), m_fonts.end(),
+                                           [](const Composite &x, const Composite &y) { return x.lastUse < y.lastUse; }));
+        m_fonts.push_back({key, img, m_finds});
+        return img;
+    }
+
     // The base image with the animation frames the game has sent into the
     // texture drawn over it (texel rectangle rx, ry, rw x rh of the texture).
     Vulkan::ImageHandle composite(int base, const std::vector<Patch> &patches, uint32_t rx, uint32_t ry, uint32_t rw,
@@ -1150,6 +1282,14 @@ public:
     uint64_t m_imageBytes = 0;
     std::vector<PixelCache> m_pixelCache;
     std::vector<Composite> m_composites;
+    struct Clut
+    {
+        uint32_t w = 0, h = 0;
+        std::vector<uint8_t> data;
+    };
+    std::unordered_map<uint32_t, Clut> m_cluts;
+    std::vector<Composite> m_fonts;
+    int m_loggedFontPalettes = 0;
     int m_loggedComposites = 0;
     Vulkan::Device *m_device = nullptr;
     std::atomic<bool> m_enabled{true};
@@ -1264,6 +1404,7 @@ void detach()
         g_replacer->m_images.clear();
         g_replacer->m_imageBytes = 0;
         g_replacer->m_composites.clear();
+        g_replacer->m_fonts.clear();
         g_replacer->m_device = nullptr;
     }
 }

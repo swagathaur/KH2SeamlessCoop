@@ -1,0 +1,86 @@
+gs: local -> host transfers can be served by an external renderer (ps2SetGsReadback): with
+the GPU renderer the CPU backend has not drawn anything, so KH2 read back black frames
+(pause background, battle backgrounds).
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_gif_tap.h b/ps2xRuntime/include/runtime/gs/gs_gif_tap.h
+index 06e2452..b8012bf 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_gif_tap.h
++++ b/ps2xRuntime/include/runtime/gs/gs_gif_tap.h
+@@ -13,6 +13,17 @@ void ps2SetGifTap(Ps2GifTapFn packetFn, Ps2GsRegTapFn regFn, void *user);
+ void ps2GifTapPacket(const uint8_t *data, uint32_t sizeBytes);
+ void ps2GifTapRegister(uint8_t reg, uint64_t value);
+ 
++// Local -> host transfers (the guest reading GS memory back) served by the
++// external renderer, which holds what was actually drawn: fill out with the
++// transfer's bytes as the GS FIFO gives them and return true, or return
++// false to let the CPU backend answer from its own (undrawn) memory.
++#include <vector>
++using Ps2GsReadbackFn = bool (*)(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw,
++                                 uint32_t rrh, std::vector<uint8_t> &out, void *user);
++void ps2SetGsReadback(Ps2GsReadbackFn fn, void *user);
++bool ps2GsReadback(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
++                   std::vector<uint8_t> &out);
++
+ // When false the CPU backend skips drawing primitives (transfers and VRAM
+ // bookkeeping still happen), for when an external renderer does the drawing.
+ void ps2SetSoftwareRasterEnabled(bool enabled);
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index bc1d88d..c06a1cc 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1802,6 +1802,10 @@ void GSCpuBackend::PerformLocalToHostTransfer()
+ {
+     m_localToHostBuffer.clear();
+     m_localToHostReadPos = 0u;
++    if (ps2GsReadback(m_transfer.bitbltbuf.sbp, m_transfer.bitbltbuf.sbw, m_transfer.bitbltbuf.spsm,
++                      m_transfer.trxpos.ssax, m_transfer.trxpos.ssay, m_transfer.trxreg.rrw, m_transfer.trxreg.rrh,
++                      m_localToHostBuffer))
++        return;
+     if (!m_vram)
+         return;
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 187ea2d..5a3ea0d 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1616,10 +1616,9 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+     case GS_REG_TRXDIR:
+     {
+         m_trxdir = static_cast<uint32_t>(value & 0x3);
+-        if ((m_trxdir == 1u || m_trxdir == 2u) && !ps2SoftwareRasterEnabled() && !g_readbackLogged.exchange(true))
+-            std::fprintf(stderr, "[gs] the guest reads GS memory back (TRXDIR %u); with the GPU renderer it gets "
+-                                 "stale data (logged once)\n",
+-                         m_trxdir);
++        if (m_trxdir == 1u && !ps2SoftwareRasterEnabled() && !g_readbackLogged.exchange(true))
++            std::fprintf(stderr, "[gs] the guest reads GS memory back (TRXDIR 1); served by the external renderer "
++                                 "when it can (logged once)\n");
+ 
+         if (m_backend)
+         {
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index 7d23bf7..4aa4c0f 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -141,6 +141,22 @@ namespace
+     std::atomic<Ps2GsRegTapFn> g_gifTapReg{nullptr};
+     std::atomic<void *> g_gifTapUser{nullptr};
+     std::atomic<bool> g_softwareRaster{true};
++    std::atomic<Ps2GsReadbackFn> g_gsReadback{nullptr};
++    std::atomic<void *> g_gsReadbackUser{nullptr};
++}
++
++void ps2SetGsReadback(Ps2GsReadbackFn fn, void *user)
++{
++    g_gsReadbackUser.store(user, std::memory_order_relaxed);
++    g_gsReadback.store(fn, std::memory_order_release);
++}
++
++bool ps2GsReadback(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
++                   std::vector<uint8_t> &out)
++{
++    if (Ps2GsReadbackFn fn = g_gsReadback.load(std::memory_order_acquire))
++        return fn(sbp, sbw, spsm, ssax, ssay, rrw, rrh, out, g_gsReadbackUser.load(std::memory_order_relaxed));
++    return false;
+ }
+ 
+ void ps2SetGifTap(Ps2GifTapFn packetFn, Ps2GsRegTapFn regFn, void *user)

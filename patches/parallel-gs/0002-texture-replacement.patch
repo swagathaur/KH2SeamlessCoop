@@ -1,10 +1,14 @@
 kh2recomp: texture replacement hook (TextureReplacer): the application sees every
 completed host -> local transfer and can answer a texture lookup with its own image,
 sampled with normalized coordinates over the texel rectangle it stands for, bilinear
-(the draw's CBP is passed along to choose among palette variants).
+(the draw's CBP is passed along to choose among palette variants). GPU writes
+(rendering, local -> local copies) are reported so stale images are dropped, and
+primitives drawn with a replacement interpolate UVs per sample (TEX_REPLACED_BIT), so
+HD UI is not snapped to single-rate pixels. gs/shaders/slangmosh.hpp has to be
+regenerated after applying (slangmosh slangmosh.json -O --strip --namespace ParallelGS).
 
 diff --git a/gs/gs_interface.cpp b/gs/gs_interface.cpp
-index ea00016..4c08f15 100644
+index ea00016..c8ddba4 100644
 --- a/gs/gs_interface.cpp
 +++ b/gs/gs_interface.cpp
 @@ -315,6 +315,7 @@ void GSInterface::flush_render_pass(FlushReason reason)
@@ -97,13 +101,34 @@ index ea00016..4c08f15 100644
 +		// for, and painted to be filtered.
 +		const bool tex_is_replaced = tex_index < tex_replaced.size() && tex_replaced[tex_index];
 +		if (tex_is_replaced)
-+			p.tex |= TEX_SAMPLER_MAG_LINEAR_BIT | TEX_SAMPLER_MIN_LINEAR_BIT;
++			p.tex |= TEX_SAMPLER_MAG_LINEAR_BIT | TEX_SAMPLER_MIN_LINEAR_BIT | TEX_REPLACED_BIT;
 +
 +		if (!tex_is_replaced && ctx.tex1.desc.mmin_has_mipmap() && !hacks.disable_mipmaps)
  		{
  			p.tex2 = ctx.tex1.desc.LCM << TEX2_FIXED_LOD_OFFSET;
  			p.tex2 |= ctx.tex1.desc.L << TEX2_L_OFFSET;
-@@ -3015,6 +3059,13 @@ void GSInterface::flush_pending_transfer(bool keep_alive)
+@@ -2815,12 +2859,20 @@ void GSInterface::drawing_kick_append()
+ 		auto fb_rect = compute_fb_rect();
+ 		fb_rect.write_mask &= fb_instance.color_write_mask;
+ 		tracker.mark_fb_write(fb_rect);
++		if (replacer && fb_rect.write_mask)
++			replacer->on_gpu_write(fb_rect.base_page, fb_rect.page_width, fb_rect.page_height, fb_rect.page_stride,
++			                       fb_rect.write_mask);
+ 
+ 		if (fb_instance.z_sensitive)
+ 		{
+ 			auto z_rect = compute_z_rect();
+ 			if (fb_instance.z_write)
++			{
+ 				tracker.mark_fb_write(z_rect);
++				if (replacer)
++					replacer->on_gpu_write(z_rect.base_page, z_rect.page_width, z_rect.page_height, z_rect.page_stride,
++					                       z_rect.write_mask);
++			}
+ 			else
+ 				tracker.mark_fb_read(z_rect);
+ 		}
+@@ -3015,6 +3067,13 @@ void GSInterface::flush_pending_transfer(bool keep_alive)
  		transfer_state.copy.host_data_size_offset = transfer_state.last_flushed_qwords * sizeof(uint64_t);
  		transfer_state.copy.host_data_size_required = transfer_state.required_qwords * sizeof(uint64_t);
  
@@ -117,11 +142,21 @@ index ea00016..4c08f15 100644
  		// This is an arbitrarily chosen value to deal with known problematic games.
  		constexpr uint32_t CopyCacheHazardLimit = 400;
  
+@@ -3205,6 +3264,9 @@ void GSInterface::init_transfer()
+ 		                                  transfer_state.copy.bitbltbuf.desc.SPSM);
+ 
+ 		transfer_state.copy.needs_shadow_vram = tracker.mark_transfer_copy(dst_rect, src_rect);
++		if (replacer)
++			replacer->on_gpu_write(dst_rect.base_page, dst_rect.page_width, dst_rect.page_height, dst_rect.page_stride,
++			                       dst_rect.write_mask);
+ 		tracker.invalidate_texture_cache(render_pass.clut_instance);
+ 		renderer.copy_vram(transfer_state.copy, dst_rect);
+ 		invalidate_promoted_backbuffer(transfer_state.copy.bitbltbuf.desc.DBP / PGS_BLOCKS_PER_PAGE);
 diff --git a/gs/gs_interface.hpp b/gs/gs_interface.hpp
-index 9f05da8..1880333 100644
+index 9f05da8..a3967a1 100644
 --- a/gs/gs_interface.hpp
 +++ b/gs/gs_interface.hpp
-@@ -248,9 +248,34 @@ public:
+@@ -248,9 +248,41 @@ public:
  	virtual bool on_label(uint64_t payload) = 0;
  };
  
@@ -146,6 +181,13 @@ index 9f05da8..1880333 100644
 +	// The texture about to be sampled, and the texel rectangle it is read in.
 +	virtual bool find(const TEX0Bits &tex0, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
 +	                  TextureReplacement &replacement) = 0;
++	// GS memory the GPU is about to write (rendering, local -> local copies),
++	// in pages, and which bits of each word: what was uploaded there is gone.
++	virtual void on_gpu_write(uint32_t base_page, uint32_t page_width, uint32_t page_height, uint32_t page_stride,
++	                          uint32_t write_mask)
++	{
++		(void)base_page; (void)page_width; (void)page_height; (void)page_stride; (void)write_mask;
++	}
 +};
 +
  class GSInterface final
@@ -156,7 +198,7 @@ index 9f05da8..1880333 100644
  	GSInterface();
  	bool init(Vulkan::Device *device, const GSOptions &options);
  	void reset_context_state();
-@@ -323,6 +348,8 @@ private:
+@@ -323,6 +355,8 @@ private:
  	uint32_t vram_size = 0;
  	DebugMode debug_mode;
  	Hacks hacks;
@@ -165,3 +207,78 @@ index 9f05da8..1880333 100644
  
  	std::vector<uint32_t> sync_host_vram_blocks;
  	std::vector<uint32_t> sync_vram_host_pages;
+diff --git a/gs/shaders/data_structures.h b/gs/shaders/data_structures.h
+index 62882ab..7bb32c8 100644
+--- a/gs/shaders/data_structures.h
++++ b/gs/shaders/data_structures.h
+@@ -251,6 +251,9 @@ CONSTEXPR int TEX_MAX_MIP_LEVEL_BITS = 3;
+ CONSTEXPR int TEX_PER_SAMPLE_BIT = 1 << 24;
+ CONSTEXPR int TEX_SAMPLE_MAPPING_BIT = 1 << 25;
+ CONSTEXPR int TEX_SAMPLE_RESOLVED_BIT = 1 << 26;
++// kh2recomp: an application-supplied replacement image (higher resolution
++// than the texels it stands for): interpolate UVs per sample, filter it.
++CONSTEXPR int TEX_REPLACED_BIT = 1 << 27;
+ /////
+ 
+ // PrimitiveAttribute::tex2
+diff --git a/gs/shaders/triangle_setup.comp b/gs/shaders/triangle_setup.comp
+index 4cb4248..0c536e7 100644
+--- a/gs/shaders/triangle_setup.comp
++++ b/gs/shaders/triangle_setup.comp
+@@ -665,7 +665,8 @@ void main_inner(uint index)
+ 
+         // If we only deviate by one sub-texel, interpolation will very likely never hit that upper value.
+         // Since we snap down to the minimum value either way.
+-        if (half_texel_offset && no_effective_interpolation)
++        if (half_texel_offset && no_effective_interpolation &&
++            (primitive_attr.data[index].tex & TEX_REPLACED_BIT) == 0)
+             primitive_attr.data[index].tex &= ~TEX_SAMPLER_MAG_LINEAR_BIT;
+     }
+ 
+@@ -817,6 +818,23 @@ void main_inner(uint index)
+         }
+     }
+ 
++    // kh2recomp: a replacement image has more detail than the texels it
++    // stands for, so UI drawn with it is not snapped to single-rate pixels:
++    // UVs are interpolated per sample (coverage stays snapped for sprites),
++    // centred like the super-sampled texture path.
++    const bool replaced_texture = (primitive_attr.data[index].tex & TEX_REPLACED_BIT) != 0;
++    if (SAMPLING_RATE_Y_LOG2 != 0 && replaced_texture && !line)
++    {
++        primitive_attr.data[index].state &= ~(1u << STATE_BIT_SNAP_ATTRIBUTE);
++        vec2 bottom_right_sample =
++            float(1 << PGS_RASTER_SUBSAMPLE_BITS) *
++            get_average_sampling_offset(SAMPLING_RATE_X_LOG2, SAMPLING_RATE_Y_LOG2);
++        ivec2 rb = plane_b.xy;
++        ivec2 rc = plane_c.xy;
++        primitive_setup.data[index].error_i -= float(rb.x + rb.y) * bottom_right_sample.x * inv_area_scaled;
++        primitive_setup.data[index].error_j -= float(rc.x + rc.y) * bottom_right_sample.y * inv_area_scaled;
++    }
++
+     if (SAMPLING_RATE_Y_LOG2 != 0 && !sprite)
+     {
+         // Try to detect common patterns of flat UI primitives.
+@@ -840,7 +858,7 @@ void main_inner(uint index)
+             uint z_shift = bitfieldExtract(registers.packed_z_shift, 4 * int(rp_instance), 4) * 8;
+ 
+             // Don't demote lines unless we demote the entire render pass to single sampled.
+-            if (!line)
++            if (!line && !replaced_texture)
+                 primitive_attr.data[index].state |= 1u << STATE_BIT_SNAP_ATTRIBUTE;
+ 
+             // Need to clamp in case primitive Z overflows. In that case, we get saturation.
+diff --git a/gs/shaders/ubershader.comp b/gs/shaders/ubershader.comp
+index 33be934..afb0160 100644
+--- a/gs/shaders/ubershader.comp
++++ b/gs/shaders/ubershader.comp
+@@ -887,7 +887,8 @@ ShadeResultEarly shade_early(uint primitive_index)
+ 			i = bary.x;
+ 			j = bary.y;
+ 		}
+-		else if (HAS_TEXTURE_ARRAY && snap_state == SNAP_RASTER_BIT)
++		else if (snap_state == SNAP_RASTER_BIT &&
++		         (HAS_TEXTURE_ARRAY || (primitive_attr.data[primitive_index].tex & TEX_REPLACED_BIT) != 0))
+ 		{
+ 			// For SSAA textured sprites, we may snap coverage, but we want per-sample interpolation.
+ 			vec2 bary = evaluate_barycentric_ij(prim.b, prim.c, prim.inv_area,

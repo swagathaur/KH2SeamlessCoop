@@ -79,6 +79,8 @@ Program *g_uiProgram[2] = {nullptr, nullptr}; // [textured]
 // display. The menu itself is drawn by a callback (overlay_ui.cpp).
 std::function<void()> g_uiCallback;
 std::function<void()> g_hudCallback;
+std::function<void()> g_overlayCallback; // the runtime's own in-game menus (movie pause)
+std::atomic<bool> g_overlayActive{false};
 std::atomic<bool> g_hudVisible{false};
 std::function<void()> g_worldCallback;
 std::atomic<bool> g_worldActive{false};
@@ -957,7 +959,8 @@ bool uiBuild()
     const bool toast = now < g_toastUntil;
     const bool hud = g_hudVisible && g_hudCallback;
     const bool world = g_worldActive && g_worldCallback;
-    if (!g_menuOpen && !g_showFps && !toast && !hud && !world)
+    const bool overlay = g_overlayActive && g_overlayCallback;
+    if (!g_menuOpen && !g_showFps && !toast && !hud && !world && !overlay)
         return false;
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -989,6 +992,8 @@ bool uiBuild()
         g_worldCallback();
     if (hud)
         g_hudCallback();
+    if (overlay && !g_menuOpen)
+        g_overlayCallback();
     if (g_menuOpen && g_uiCallback)
         g_uiCallback();
     ImGui::Render();
@@ -1328,6 +1333,8 @@ void toast(const std::string &text, double seconds)
 
 void setUiCallback(std::function<void()> draw) { g_uiCallback = std::move(draw); }
 void setHudCallback(std::function<void()> draw) { g_hudCallback = std::move(draw); }
+void setOverlayCallback(std::function<void()> draw) { g_overlayCallback = std::move(draw); }
+void setOverlayActive(bool on) { g_overlayActive = on; }
 void setWorldCallback(std::function<void()> draw) { g_worldCallback = std::move(draw); }
 void setWorldOverlayActive(bool on) { g_worldActive = on; }
 void pictureRect(float &x, float &y, float &w, float &h)

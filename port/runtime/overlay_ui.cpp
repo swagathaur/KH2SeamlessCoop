@@ -559,6 +559,98 @@ void drawNameTags()
 }
 
 void onCombo() { kh2pgs::toggleMenu(); }
+
+// Pause menu for movies (the game's own pause only works in in-engine
+// cutscenes): Start pauses the movie and offers Continue / Skip, like the
+// event pause. Navigated with the pad or keyboard bindings, emulation paused.
+constexpr uint32_t kPadStart = 0x0008u, kPadUp = 0x0010u, kPadDown = 0x0040u;
+constexpr uint32_t kPadCircle = 0x2000u, kPadCross = 0x4000u;
+bool g_movieMenu = false;
+int g_movieChoice = 0; // 0 Continue, 1 Skip
+uint32_t g_menuPrevButtons = 0;
+
+void drawMovieMenu()
+{
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const ImVec2 size = ImGui::GetIO().DisplaySize;
+    dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(0, 0, 0, 110));
+    const float scale = std::max(1.0f, size.y / 540.0f);
+    const float fontSize = ImGui::GetFontSize() * 1.6f * scale;
+    const char *items[2] = {"Continue", "Skip Movie"};
+    const float lineH = fontSize * 1.7f;
+    const float w = fontSize * 9.0f, h = lineH * 2.0f + fontSize * 1.2f;
+    const ImVec2 p0(size.x * 0.5f - w * 0.5f, size.y * 0.5f - h * 0.5f), p1(p0.x + w, p0.y + h);
+    dl->AddRectFilledMultiColor(p0, p1, IM_COL32(20, 28, 60, 230), IM_COL32(20, 28, 60, 230),
+                                IM_COL32(6, 8, 20, 235), IM_COL32(6, 8, 20, 235));
+    dl->AddRect(p0, p1, IM_COL32(150, 170, 230, 200), 6.0f * scale, 0, 2.0f * scale);
+    ImFont *font = ImGui::GetFont();
+    for (int i = 0; i < 2; ++i)
+    {
+        const float y = p0.y + fontSize * 0.6f + lineH * i;
+        if (i == g_movieChoice)
+        {
+            dl->AddRectFilledMultiColor(ImVec2(p0.x + 6 * scale, y - fontSize * 0.25f),
+                                        ImVec2(p1.x - 6 * scale, y + fontSize * 1.25f), IM_COL32(90, 130, 230, 170),
+                                        IM_COL32(40, 60, 140, 40), IM_COL32(40, 60, 140, 40),
+                                        IM_COL32(90, 130, 230, 170));
+            // A pointer like the game's cursor hand.
+            const float cx = p0.x + fontSize * 0.9f, cy = y + fontSize * 0.5f;
+            dl->AddTriangleFilled(ImVec2(cx - fontSize * 0.35f, cy - fontSize * 0.3f),
+                                  ImVec2(cx - fontSize * 0.35f, cy + fontSize * 0.3f), ImVec2(cx + fontSize * 0.15f, cy),
+                                  IM_COL32(255, 255, 255, 255));
+        }
+        dl->AddText(font, fontSize, ImVec2(p0.x + fontSize * 1.6f, y),
+                    i == g_movieChoice ? IM_COL32(255, 255, 255, 255) : IM_COL32(170, 180, 205, 255), items[i]);
+    }
+}
+
+void tickMovieMenu()
+{
+    const uint32_t buttons = kh2input::rawButtons();
+    const uint32_t sticks = kh2input::rawSticks();
+    uint32_t held = buttons;
+    const uint8_t ly = uint8_t(sticks & 0xFF);
+    if (ly < 0x40)
+        held |= kPadUp;
+    else if (ly > 0xC0)
+        held |= kPadDown;
+    const uint32_t pressed = held & ~g_menuPrevButtons;
+    g_menuPrevButtons = held;
+    if (!g_movieMenu)
+    {
+        if (kh2movie::playing() && !kh2pgs::menuOpen() && (pressed & kPadStart) && !(buttons & 0x0001u))
+        {
+            g_movieMenu = true;
+            g_movieChoice = 0;
+            kh2pgs::setOverlayActive(true);
+            std::printf("[ui] movie paused\n");
+            std::fflush(stdout);
+        }
+        return;
+    }
+    bool close = !kh2movie::playing() || kh2pgs::menuOpen();
+    if (pressed & (kPadUp | kPadDown))
+        g_movieChoice ^= 1;
+    if (pressed & (kPadStart | kPadCross))
+        close = true;
+    if (pressed & kPadCircle)
+    {
+        if (g_movieChoice == 1)
+        {
+            std::printf("[ui] movie skipped from the pause menu\n");
+            kh2movie::skipCurrent();
+            kh2pgs::toast("Movie skipped");
+        }
+        close = true;
+    }
+    if (close)
+    {
+        std::printf("[ui] movie menu closed\n");
+        std::fflush(stdout);
+        g_movieMenu = false;
+        kh2pgs::setOverlayActive(false);
+    }
+}
 } // namespace
 
 void install(PS2Runtime &runtime, const std::string &iniPath, const Options &options)
@@ -570,16 +662,18 @@ void install(PS2Runtime &runtime, const std::string &iniPath, const Options &opt
     kh2pgs::setUiCallback(&draw);
     kh2pgs::setHudCallback(&drawHud);
     kh2pgs::setWorldCallback(&drawNameTags);
+    kh2pgs::setOverlayCallback(&drawMovieMenu);
     kh2input::setMenuComboCallback(&onCombo);
 }
 
 void tick()
 {
-    kh2input::setSuppressed(kh2pgs::menuOpen());
     if (!g_runtime)
         return;
+    tickMovieMenu();
+    kh2input::setSuppressed(kh2pgs::menuOpen() || g_movieMenu);
     kh2pgs::setWorldOverlayActive(g_opt.nameTags && kh2coop::active() && !kh2puppets::assignments().empty());
-    const bool paused = kh2pgs::menuOpen() || (g_opt.pauseUnfocused && !kh2pgs::windowFocused());
+    const bool paused = kh2pgs::menuOpen() || g_movieMenu || (g_opt.pauseUnfocused && !kh2pgs::windowFocused());
     if (paused != g_paused)
     {
         g_paused = paused;

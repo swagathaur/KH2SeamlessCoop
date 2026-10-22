@@ -83,6 +83,9 @@ void setWorldOverlayActive(bool on);
 void pictureRect(float &x, float &y, float &w, float &h);
 // Drawn every frame while F3's panel is on (menu open or not).
 void setHudCallback(std::function<void()> draw);
+// The runtime's own in-game menus (the movie pause menu), drawn while active.
+void setOverlayCallback(std::function<void()> draw);
+void setOverlayActive(bool on);
 bool hudVisible();
 void setHudVisible(bool on);
 bool menuOpen();

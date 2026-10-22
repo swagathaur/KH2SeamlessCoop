@@ -573,6 +573,8 @@ struct Harness
     double stallSceneSince = 0;
     bool stallReported = false;
     uint64_t presented = 0;
+    std::chrono::steady_clock::time_point lastPump{};
+    double pausedScriptFrames = 0.0; // see headlessPump
     int result = kExitStoppedEarly;
     std::vector<uint8_t> pixels;
     std::filesystem::path screenshotDir = "screenshots";
@@ -1145,6 +1147,16 @@ bool headlessPump(void *userData)
     const Options &o = *h.opt;
     const uint64_t frame = ps2PadCurrentGuestFrame();
     ++h.presented;
+    // While our own menu has the game paused the guest frame stands still; the
+    // --script steps then run on the wall clock (60 a second), so they can drive
+    // that menu.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (kh2ui::paused() && h.lastPump.time_since_epoch().count())
+            h.pausedScriptFrames += std::chrono::duration<double>(now - h.lastPump).count() * 60.0;
+        h.lastPump = now;
+    }
+    const uint64_t scriptFrame = frame + uint64_t(h.pausedScriptFrames);
     // No window, so the runtime's present loop never polls input; publishing an
     // idle host state is what merges the --input script in (ps2_pad.cpp).
     {
@@ -1155,10 +1167,10 @@ bool headlessPump(void *userData)
         uint32_t heldAll = held;
         uint32_t sticks = 0x80808080u;
         for (const Options::ScriptStep &st : o.script)
-            if (frame >= st.start && frame < st.start + st.frames)
+            if (scriptFrame >= st.start && scriptFrame < st.start + st.frames)
             {
                 heldAll |= st.buttons;
-                if (frame == st.start)
+                if (scriptFrame == st.start)
                     pressed |= st.buttons;
                 sticks = (uint32_t(st.rx) << 24) | (uint32_t(st.ry) << 16) | (uint32_t(st.lx) << 8) | st.ly;
             }
@@ -1168,7 +1180,9 @@ bool headlessPump(void *userData)
         pressed |= heldAll & ~lastHeld;
         lastHeld = heldAll;
         ps2PadPublishHostState(heldAll, pressed, sticks);
+        kh2input::setScriptRaw(heldAll, sticks);
     }
+    kh2ui::tick();
     kh2movie::poll(*h.runtime);
     kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
@@ -1445,7 +1459,7 @@ int main(int argc, char **argv)
         if (kh2patches::aspect() > 0.0f)
             kh2pgs::setAspect(kh2patches::aspect());
     }
-    if (gpu && !opt.headless)
+    if (gpu)
     {
         std::error_code ec;
         const auto exeDir = std::filesystem::absolute(argv[0], ec).parent_path();

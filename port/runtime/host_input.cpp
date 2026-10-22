@@ -54,6 +54,8 @@ std::atomic<uint16_t> g_rumbleSmall{0}, g_rumbleLarge{0};
 uint16_t g_rumbleSentSmall = 0, g_rumbleSentLarge = 0;
 std::atomic<bool> g_rumbleOn{true};
 std::atomic<bool> g_suppressed{false};
+std::atomic<uint32_t> g_rawHeld{0};   // buttons before suppression (our own menus read these)
+std::atomic<uint32_t> g_rawSticks{0x80808080u};
 void (*g_comboFn)() = nullptr;
 bool g_comboHeld = false;
 bool g_fastForward = false;
@@ -242,6 +244,13 @@ bool rumbleEnabled() { return g_rumbleOn; }
 void setConfirmOnBottom(bool on) { g_opt.confirmOnBottom = on; }
 bool confirmOnBottom() { return g_opt.confirmOnBottom; }
 void setSuppressed(bool on) { g_suppressed = on; }
+uint32_t rawButtons() { return g_rawHeld.load(); }
+uint32_t rawSticks() { return g_rawSticks.load(); }
+void setScriptRaw(uint32_t buttons, uint32_t sticks)
+{
+    g_rawHeld = buttons;
+    g_rawSticks = sticks;
+}
 void setKeyBindings(const kh2keys::Bindings &b)
 {
     std::lock_guard<std::mutex> lock(g_keysMutex);
@@ -411,6 +420,8 @@ void poll(bool keyboardFocus)
     if (combo && !g_comboHeld && g_comboFn)
         g_comboFn();
     g_comboHeld = combo;
+    g_rawHeld = held;
+    g_rawSticks = (uint32_t(rx) << 24) | (uint32_t(ry) << 16) | (uint32_t(lx) << 8) | ly;
     if (g_suppressed || combo)
     {
         held = 0;

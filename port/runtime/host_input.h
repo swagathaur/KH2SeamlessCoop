@@ -27,6 +27,12 @@ void setConfirmOnBottom(bool on);
 bool confirmOnBottom();
 // While suppressed (the settings menu is open) the game sees an idle pad.
 void setSuppressed(bool on);
+// The pad as the player holds it (PS2 button mask, active high, and the sticks
+// packed rx|ry|lx|ly), also while suppressed: for the runtime's own menus.
+uint32_t rawButtons();
+uint32_t rawSticks();
+// Headless runs: the --input script stands in for the player's pad there.
+void setScriptRaw(uint32_t buttons, uint32_t sticks);
 // Keyboard layout (key-* lines in kh2recomp.ini; the menu's Keyboard section).
 void setKeyBindings(const kh2keys::Bindings &b);
 kh2keys::Bindings keyBindings();

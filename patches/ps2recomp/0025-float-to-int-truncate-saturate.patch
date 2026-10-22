@@ -1,0 +1,59 @@
+fpu/vu0: float-to-int conversions match the hardware. CVT.W.S truncated with
+round-to-nearest (nearbyintf) instead of toward zero, and neither it nor
+VU0 VFTOI saturated: out-of-range values gave 0x80000000 (x86's "integer
+indefinite") where the PS2 gives INT32_MAX for positive values.
+
+diff --git a/ps2xRecomp/src/lib/fpu_translator.cpp b/ps2xRecomp/src/lib/fpu_translator.cpp
+index 6bc63a6..b1abed7 100644
+--- a/ps2xRecomp/src/lib/fpu_translator.cpp
++++ b/ps2xRecomp/src/lib/fpu_translator.cpp
+@@ -83,7 +83,13 @@ namespace ps2recomp
+             case COP1_S_FLOOR_W:
+                 return fmt::format("{{ int32_t tmp = FPU_FLOOR_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
+             case COP1_S_CVT_W:
+-                return fmt::format("{{ int32_t tmp = FPU_CVT_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
++                // The R5900 truncates (it has no other rounding mode) and
++                // saturates: |x| >= 2^31 (and NaN/infinity patterns) give
++                // INT32_MAX or INT32_MIN by sign.
++                return fmt::format("{{ uint32_t ps2_b; std::memcpy(&ps2_b, &ctx->f[{}], 4); int32_t tmp = "
++                                   "(ps2_b & 0x7F800000u) >= 0x4F000000u ? ((ps2_b & 0x80000000u) ? INT32_MIN : INT32_MAX) "
++                                   ": static_cast<int32_t>(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}",
++                                   fs, fs, fd);
+             case COP1_S_RSQRT:
+                 // fd = fs / sqrt(ft), like the VU's RSQRT.
+                 // As DIV.S/SQRT.S: a zero radicand gives +-FLT_MAX, a negative one |x|.
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 36e304d..87b57a9 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -759,7 +759,7 @@ namespace ps2recomp
+ 
+         return fmt::format("{{ __m128 src = ctx->vu0_vf[{}]; "
+                            "src = _mm_mul_ps(src, _mm_set1_ps({})); "
+-                           "__m128i res_i = _mm_cvttps_epi32(src); "
++                           "__m128i res_i = _mm_xor_si128(_mm_cvttps_epi32(src), _mm_castps_si128(_mm_cmpge_ps(src, _mm_set1_ps(2147483648.0f)))); "
+                            "__m128 res = _mm_castsi128_ps(res_i); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index c6b9507..7735161 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -191,6 +191,17 @@ void register_code_generator_tests()
+                  "ABS.S keeps its different fs operand encoding");
+     });
+ 
++    tc.Run("CVT.W.S truncates and saturates like the R5900", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++        R5900Decoder decoder;
++        // cvt.w.s $f2, $f4
++        const uint32_t raw = (OPCODE_COP1 << 26) | (COP1_S << 21) | (4u << 11) | (2u << 6) | COP1_S_CVT_W;
++        const auto code = gen.translateInstruction(decoder.decodeInstruction(0x1000, raw));
++        t.IsTrue(code.find("static_cast<int32_t>(ctx->f[4])") != std::string::npos, "truncates toward zero");
++        t.IsTrue(code.find("INT32_MAX") != std::string::npos && code.find("nearbyint") == std::string::npos,
++                 "saturates instead of rounding to nearest");
++    });
++
+     tc.Run("VU0 writes to VF0 do not stick", [](TestCase &t) {
+         CodeGenerator gen({}, {});
+         R5900Decoder decoder;

@@ -345,7 +345,13 @@ all of it after the Seifer cutscene in the Sandlot (event 78):
   saturate like the hardware.
 
 The status/MAC flags of VU0 macro arithmetic are still not computed, so code
-like the clip test above reads stale flags. `PS2X_FPU_LOG=1` prints the sites
+like the clip test above reads stale flags (0: nothing is culled). Computing
+them (tried as a patch) made the Struggle orbs' glow fill the screen: the
+effect meshes (`0x00217D80` and its siblings, `cfc2 vi17` & 0x11 after the
+w of `vmaddw`) are projected with a matrix whose w column is ~1e-15 noise, so
+some vertices took the "w <= 0" path (`sqc2 vf0`) and others got huge 1/w.
+With the flags at 0 those vertices land far off-screen. The real VU probably
+gets exact zeros there; until that is understood the flags stay unset. `PS2X_FPU_LOG=1` prints the sites
 of divisions by zero with their `$ra`.
 
 Diagnostics used for this: `KH2_PGS_TRACE_FBP=<fbp|999>:<from>:<lines>[:<to>]`

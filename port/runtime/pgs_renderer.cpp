@@ -128,8 +128,19 @@ void tapPacket(const uint8_t *data, uint32_t size, void *)
     if (size == 0)
         return;
     std::unique_lock<std::mutex> lock(g_queueMutex);
-    if (g_queue.size() > kQueueLimit)
-        g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; });
+    if (g_queue.size() > kQueueLimit &&
+        !g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; }))
+    {
+        // Nobody is drawing (shutting down, or the render thread is stuck):
+        // drop the backlog rather than crawl the guest along 100 ms a packet.
+        static bool reported = false;
+        if (!reported)
+        {
+            reported = true;
+            std::fprintf(stderr, "[pgs] GS queue full and not drained; dropping it\n");
+        }
+        g_queue.clear();
+    }
     const size_t at = g_queue.size();
     g_queue.resize(at + 4 + size);
     std::memcpy(g_queue.data() + at, &size, 4);

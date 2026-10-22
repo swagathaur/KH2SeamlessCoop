@@ -259,6 +259,43 @@ struct Region
 class Replacer final : public ParallelGS::TextureReplacer
 {
 public:
+    // The manifest entry these bytes start (n: bytes hashed for the key,
+    // size: bytes available), confirmed as far as possible; -1 if none.
+    int bestMatch(const uint8_t *bytes, size_t size, size_t n, size_t &matchLen) const
+    {
+        const auto range = m_byKey.equal_range(key64(bytes, n));
+        int match = -1;
+        matchLen = 0;
+        for (auto it = range.first; it != range.second; ++it)
+        {
+            const Entry &e = m_entries[size_t(it->second)];
+            if (e.bytes != n)
+                continue;
+            size_t agreed = n;
+            for (const auto &[len, hash] : e.checks)
+            {
+                if (len > size)
+                    break;
+                if (key64(bytes, len) != hash)
+                {
+                    agreed = 0;
+                    break;
+                }
+                agreed = len;
+            }
+            // Sure: agreed over 4 KiB (or everything available), or over all
+            // the file had after the texture's start.
+            const bool sure = agreed && (agreed >= std::min<size_t>(size, 4096) ||
+                                         e.checks.empty() || e.checks.back().first <= agreed);
+            if (sure && agreed > matchLen)
+            {
+                match = it->second;
+                matchLen = agreed;
+            }
+        }
+        return match;
+    }
+
     void on_upload(const ParallelGS::BITBLTBUFBits &b, const ParallelGS::TRXPOSBits &pos,
                    const ParallelGS::TRXREGBits &reg, const void *data, size_t size) override
     {
@@ -287,50 +324,36 @@ public:
                 ++i;
         }
         const auto *bytes = static_cast<const uint8_t *>(data);
-        const size_t n = std::min(size, kHashBytes);
-        const auto range = m_byKey.equal_range(key64(bytes, n));
-        int match = -1;
-        size_t matchLen = 0;
-        bool matchSure = false;
-        // Many textures start alike (transparent corners): the candidate that
-        // agrees over the longest prefix this upload covers wins.
-        for (auto it = range.first; it != range.second; ++it)
+        static const bool scan = std::getenv("KH2_HD_SCAN") != nullptr; // diagnostics: textures inside uploads
+        if (scan && size >= 1024)
         {
-            const Entry &e = m_entries[size_t(it->second)];
-            if (e.bytes != n)
-                continue;
-            size_t agreed = n;
-            for (const auto &[len, hash] : e.checks)
+            int found = 0;
+            for (size_t off = 16; off + kHashBytes <= size && found < 8; off += 16)
             {
-                if (len > size)
-                    break;
-                if (key64(bytes, len) != hash)
+                size_t agreed = 0;
+                const int m = bestMatch(bytes + off, size - off, kHashBytes, agreed);
+                if (m >= 0 && agreed >= 1024)
                 {
-                    agreed = 0;
-                    break;
+                    ++found;
+                    std::printf("[hd] scan: upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u (%zu bytes): %s at +0x%zx (%zu agree)\n",
+                                dbp, dbw, psm, w, h, pos.DSAX, pos.DSAY, size, m_entries[size_t(m)].source.c_str(), off,
+                                agreed);
                 }
-                agreed = len;
-            }
-            // Sure: agreed over 4 KiB (or the whole upload), or over everything
-            // the file had after the texture's start.
-            const bool sure = agreed && (agreed >= std::min<size_t>(size, 4096) ||
-                                         e.checks.empty() || e.checks.back().first <= agreed);
-            if (sure && agreed > matchLen)
-            {
-                match = it->second;
-                matchLen = agreed;
-                matchSure = true;
             }
         }
-        if (match < 0 || !matchSure)
+        const size_t n = std::min(size, kHashBytes);
+        size_t matchLen = 0;
+        const int match = bestMatch(bytes, size, n, matchLen);
+        if (match < 0)
             return;
-        // Never for a blank upload (cleared buffers look alike).
+        // The agreement has to include real content: blank stretches (cleared
+        // buffers, transparent corners) look alike everywhere.
         {
-            const size_t n2 = std::min<size_t>(size, 4096);
-            bool uniform = true;
-            for (size_t i = 1; i < n2 && uniform; ++i)
-                uniform = bytes[i] == bytes[0];
-            if (uniform)
+            const size_t n2 = std::min<size_t>(size, matchLen);
+            size_t differing = 0;
+            for (size_t i = 1; i < n2; ++i)
+                differing += bytes[i] != bytes[0];
+            if (differing * 64 < n2)
                 return;
         }
         const Entry &e = m_entries[size_t(match)];

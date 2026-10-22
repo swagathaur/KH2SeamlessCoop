@@ -177,13 +177,16 @@ python tools/egs_hd_extract.py "<game folder>\Image\dt" game\files\hd
 ```
 
 then start with `--hd-textures` (or `hd-textures = 1`; the settings menu has a
-switch to compare). Character models and maps are included. Each texture is
-recognised by the data the game sends to the GS, so this works with the
-English text on or off for the parts both versions share. Known limits: a
-texture the game draws with several palettes (recoloured enemies, say) shows
-the colours of the first one the PC has; the PC's button icons are laid out
-differently and are left out. The PC release has to stay installed where it
-was when the index was built. `--hd-log` lists what matched.
+switch to compare). Character models and maps are included, with their
+palette variants (recoloured enemies, the many textures packed into one
+map atlas). Each texture is recognised by the data the game sends to the
+GS, so this works with the English text on or off for the parts both
+versions share. Known limits: the PC's button icons are laid out
+differently and are left out, and textures the game builds in memory (the
+title logo's animation, say) stay as they are. The PC release has to stay
+installed where it was when the index was built; rebuild the index after
+updating this project (the format changes now and then). `--hd-log` lists
+what matched.
 
 ## Co-op (preview)
 

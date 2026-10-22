@@ -248,7 +248,10 @@ struct Entry
     // A model's or map's texture: its texture environment (palette variants
     // of one texture share the data and differ in CBP/CSA).
     bool variant = false;
-    uint32_t vtbp = 0, vcbp = 0, vcsa = 0;
+    uint32_t vtbp = 0, vcbp = 0, vcsa = 0, vtbw = 0; // vtbw 0: not known
+    // The part of the texture the image covers (its environment's CLAMP
+    // region; vw 0: all of it).
+    uint32_t vx = 0, vy = 0, vw = 0, vh = 0;
 };
 
 struct Region
@@ -309,17 +312,17 @@ public:
             {
                 if (len > size)
                     break;
+                // A later difference (the game edits some sheets in memory, e.g.
+                // the HUD's) leaves what agreed so far; a texture still has to
+                // agree over 4 KiB of real content to count.
                 if (key64(bytes, len) != hash)
-                {
-                    agreed = 0;
                     break;
-                }
                 agreed = std::max(agreed, len);
             }
             // Sure: agreed over 4 KiB (or everything available), or over all
             // the file had after the texture's start.
-            const bool sure = agreed && (agreed >= std::min<size_t>(size, 4096) ||
-                                         e.checks.empty() || e.checks.back().first <= agreed);
+            const bool sure = agreed >= std::min<size_t>(size, 4096) ||
+                              e.checks.empty() || e.checks.back().first <= agreed;
             if (sure && agreed > matchLen)
             {
                 match = it->second;
@@ -385,9 +388,32 @@ public:
                 }
             }
         }
+        // Diagnostics: KH2_HD_DUMP=<dbp>[:skip] writes 8 uploads there (after
+        // the first <skip>) to hd_dump_<dbp>_<n>.bin, to compare with files.
+        static const char *dumpEnv = std::getenv("KH2_HD_DUMP");
+        static const long dumpSkip = dumpEnv && std::strchr(dumpEnv, ':') ? std::atol(std::strchr(dumpEnv, ':') + 1) : 0;
+        if (dumpEnv && uint32_t(std::atoi(dumpEnv)) == dbp && m_dumpSeen++ >= dumpSkip && m_dumped < 8)
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "hd_dump_%u_%d.bin", dbp, m_dumped++);
+            if (FILE *f = std::fopen(name, "wb"))
+            {
+                std::fwrite(bytes, 1, size, f);
+                std::fclose(f);
+            }
+        }
         size_t matchLen = 0;
         std::vector<int> alts;
         const int match = bestMatch(bytes, size, matchLen, &alts);
+        // KH2_HD_TRACE: the first 2000 different uploads (by place and data).
+        static const bool traceUp = std::getenv("KH2_HD_TRACE") != nullptr;
+        if (traceUp && m_tracedUploads < 2000 &&
+            m_tracedKeys.insert(key64(bytes, std::min<size_t>(size, 4096)) ^ (uint64_t(dbp) << 40 | size)).second)
+        {
+            ++m_tracedUploads;
+            std::printf("[hd] trace upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u size %zu -> %s\n", dbp, dbw, psm, w, h,
+                        pos.DSAX, pos.DSAY, size, match >= 0 ? m_entries[size_t(match)].source.c_str() : "-");
+        }
         if (match < 0)
             return;
         // The agreement has to include real content: blank stretches (cleared
@@ -413,6 +439,30 @@ public:
     {
         if (!m_enabled || m_regions.empty())
             return false;
+        // Diagnostics: KH2_HD_ONLY=<lo>-<hi> replaces only textures with TBP0
+        // in that range (to find which one is wrong).
+        static const char *only = std::getenv("KH2_HD_ONLY");
+        static uint32_t onlyLo = 0, onlyHi = 0xFFFFFFFFu;
+        static const bool onlyParsed = only && std::sscanf(only, "%u-%u", &onlyLo, &onlyHi) == 2;
+        if (onlyParsed && (tex0.TBP0 < onlyLo || tex0.TBP0 > onlyHi))
+            return false;
+        static const bool trace = std::getenv("KH2_HD_TRACE") != nullptr;
+        if (trace)
+        {
+            const uint64_t k = uint64_t(tex0.TBP0) << 40 | uint64_t(tex0.PSM) << 32 | uint64_t(tex0.TW) << 28 |
+                               uint64_t(tex0.TH) << 24 | uint64_t(w) << 12 | h;
+            if (m_traced.size() < 2000 && m_traced.insert(k).second)
+            {
+                std::string nearby;
+                for (const Region &r : m_regions)
+                    if (tex0.TBP0 >= r.dbp && uint64_t(tex0.TBP0 - r.dbp) * 256u < std::max<uint64_t>(r.bytes, 256))
+                        nearby += " [" + std::to_string(r.dbp) + " psm " + std::to_string(r.psm) + " " + std::to_string(r.w) +
+                                "x" + std::to_string(r.h) + " " + m_entries[size_t(r.entry)].source + "]";
+                std::printf("[hd] trace tbp %u tbw %u psm 0x%02X tw/th %u/%u rect %u,%u %ux%u cbp %u csa %u;%s\n",
+                            uint32_t(tex0.TBP0), uint32_t(tex0.TBW), uint32_t(tex0.PSM), uint32_t(tex0.TW),
+                            uint32_t(tex0.TH), x, y, w, h, uint32_t(tex0.CBP), uint32_t(tex0.CSA), nearby.c_str());
+            }
+        }
         if (m_log)
         {
             const uint64_t k = uint64_t(tex0.TBP0) << 8 | uint64_t(tex0.PSM);
@@ -423,8 +473,46 @@ public:
         for (auto it = m_regions.rbegin(); it != m_regions.rend(); ++it)
         {
             const Region &r = *it;
-            if (r.dbp != tex0.TBP0)
+            const uint32_t knownTbw = m_entries[size_t(r.entry)].vtbw;
+            if (r.dbp != tex0.TBP0 || !directMatch(r, tex0, x, y) || (knownTbw && knownTbw != tex0.TBW))
+            {
+                // A sprite sheet: KH2 points TBP0 at a block inside it, or
+                // at its start with the sheet's width (a part of it).
+                int32_t sx = 0, sy = 0;
+                uint32_t sw = 0, sh = 0;
+                // A model's or map's texture is laid out with its own buffer
+                // width; read with another (another object's texture sharing
+                // the upload), the picture is not a part of it.
+                if ((!knownTbw || knownTbw == tex0.TBW) && insideSheet(r, tex0, sx, sy, sw, sh) &&
+                    x + uint32_t(sx) + w <= sw && y + uint32_t(sy) + h <= sh)
+                {
+                    const int chosen = pickVariant(r, tex0);
+                    Vulkan::ImageHandle img = image(chosen);
+                    if (!img)
+                        return false;
+                    out.image = img;
+                    out.x = -sx;
+                    out.y = -sy;
+                    out.width = sw;
+                    out.height = sh;
+                    traceHit(tex0, chosen, "sheet");
+                    if (m_log && m_loggedHits.insert(chosen).second)
+                        std::printf("[hd] replaced %s (sheet %ux%u, texture at %d,%d)\n",
+                                    m_entries[size_t(chosen)].path.c_str(), sw, sh, sx, sy);
+                    return true;
+                }
+                if (m_log && tex0.TBP0 > r.dbp && uint64_t(tex0.TBP0 - r.dbp) * 256u < r.bytes)
+                {
+                    const uint64_t k = uint64_t(tex0.TBP0) << 32 | uint64_t(tex0.PSM) << 24 | uint64_t(r.dbp);
+                    if (m_loggedMisses.insert(k).second)
+                        std::printf("[hd] inside but not used: tbp %u psm 0x%02X tbw %u tw/th %u/%u rect %u,%u %ux%u; "
+                                    "upload dbp %u dbw %u psm 0x%02X %ux%u (%s)\n",
+                                    uint32_t(tex0.TBP0), uint32_t(tex0.PSM), uint32_t(tex0.TBW), uint32_t(tex0.TW),
+                                    uint32_t(tex0.TH), x, y, w, h, r.dbp, r.dbw, r.psm, r.w, r.h,
+                                    m_entries[size_t(r.entry)].source.c_str());
+                }
                 continue;
+            }
             uint32_t rx = r.x, ry = r.y, rw = r.w, rh = r.h;
             bool ok = false;
             if (r.psm == tex0.PSM)
@@ -463,11 +551,21 @@ public:
             Vulkan::ImageHandle img = image(chosen);
             if (!img)
                 return false;
+            const Entry &ce = m_entries[size_t(chosen)];
+            if (ce.vw && ce.vh && ce.vx + ce.vw <= rw && ce.vy + ce.vh <= rh)
+            {
+                // The image is one part of an atlas.
+                rx += ce.vx;
+                ry += ce.vy;
+                rw = ce.vw;
+                rh = ce.vh;
+            }
             out.image = img;
             out.x = rx;
             out.y = ry;
             out.width = rw;
             out.height = rh;
+            traceHit(tex0, chosen, "direct");
             if (m_log && m_loggedHits.insert(chosen).second)
                 std::printf("[hd] replaced %s (%ux%u texels as psm 0x%02X, %ux%u image)\n",
                             m_entries[size_t(chosen)].path.c_str(), rw, rh, uint32_t(tex0.PSM), img->get_width(),
@@ -477,14 +575,89 @@ public:
         return false;
     }
 
+    // KH2_HD_TRACE: which image each texture (base, format, width) got.
+    void traceHit(const ParallelGS::TEX0Bits &tex0, int chosen, const char *how)
+    {
+        static const bool trace = std::getenv("KH2_HD_TRACE") != nullptr;
+        if (!trace)
+            return;
+        const uint64_t k = uint64_t(tex0.TBP0) << 40 | uint64_t(tex0.PSM) << 32 | uint64_t(tex0.TBW) << 24 |
+                           uint64_t(uint32_t(chosen) & 0xFFFFFF);
+        if (m_tracedHits.size() < 4000 && m_tracedHits.insert(k).second)
+            std::printf("[hd] trace hit tbp %u tbw %u psm 0x%02X tw/th %u/%u csa %u -> %s %s (%s)\n", uint32_t(tex0.TBP0),
+                        uint32_t(tex0.TBW), uint32_t(tex0.PSM), uint32_t(tex0.TW), uint32_t(tex0.TH),
+                        uint32_t(tex0.CSA), how, m_entries[size_t(chosen)].source.c_str(),
+                        m_entries[size_t(chosen)].path.c_str());
+    }
+
+    // The texture is the upload itself (same format), or all of a paletted
+    // texture sent as 32-bit blocks.
+    static bool directMatch(const Region &r, const ParallelGS::TEX0Bits &tex0, uint32_t x, uint32_t y)
+    {
+        if (r.psm == tex0.PSM)
+            return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+        if (r.x == 0 && r.y == 0 && (r.psm == 0x00 || r.psm == 0x01) && (tex0.PSM == 0x13 || tex0.PSM == 0x14))
+        {
+            const uint64_t tw = 1ull << uint32_t(tex0.TW), th = 1ull << uint32_t(tex0.TH);
+            return tw * th * storageBits(tex0.PSM) / 8u == uint64_t(r.w) * r.h * storageBits(r.psm) / 8u && x < tw &&
+                   y < th;
+        }
+        return false;
+    }
+
+    // A paletted texture whose TBP0 lies inside a 32-bit upload (a sheet):
+    // where it starts in the sheet, in its own texels, and the sheet's size.
+    static bool insideSheet(const Region &r, const ParallelGS::TEX0Bits &tex0, int32_t &x0, int32_t &y0,
+                            uint32_t &sheetW, uint32_t &sheetH)
+    {
+        if (!(r.psm == 0x00 || r.psm == 0x01) || r.x != 0 || r.y != 0 || !(tex0.PSM == 0x13 || tex0.PSM == 0x14))
+            return false;
+        const uint32_t tbp = tex0.TBP0;
+        const uint64_t upBytes = uint64_t(r.w) * r.h * 4u;
+        if (tbp < r.dbp || uint64_t(tbp - r.dbp) * 256u >= upBytes || !tex0.TBW)
+            return false;
+        // GS page geometry (texels) and block order within a page.
+        static const uint8_t kBlocks8[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21}, {2, 3, 6, 7, 18, 19, 22, 23},
+                                               {8, 9, 12, 13, 24, 25, 28, 29}, {10, 11, 14, 15, 26, 27, 30, 31}};
+        static const uint8_t kBlocks4[8][4] = {{0, 2, 8, 10}, {1, 3, 9, 11}, {4, 6, 12, 14}, {5, 7, 13, 15},
+                                               {16, 18, 24, 26}, {17, 19, 25, 27}, {20, 22, 28, 30}, {21, 23, 29, 31}};
+        const bool t8 = tex0.PSM == 0x13;
+        const uint32_t pageW = 128, pageH = t8 ? 64 : 128, blockW = t8 ? 16 : 32, blockH = 16;
+        sheetW = uint32_t(tex0.TBW) * 64u;
+        if (sheetW % pageW)
+            return false;
+        const uint32_t bpp = t8 ? 8 : 4;
+        sheetH = uint32_t(upBytes * 8u / bpp / sheetW);
+        const uint32_t d = tbp - r.dbp;
+        const uint32_t page = d / 32, block = d % 32;
+        const uint32_t pagesPerRow = sheetW / pageW;
+        int bx = -1, by = -1;
+        const int rows = t8 ? 4 : 8, cols = t8 ? 8 : 4;
+        for (int yy = 0; yy < rows && bx < 0; ++yy)
+            for (int xx = 0; xx < cols; ++xx)
+                if ((t8 ? kBlocks8[yy][xx] : kBlocks4[yy][xx]) == block)
+                {
+                    bx = xx;
+                    by = yy;
+                    break;
+                }
+        if (bx < 0)
+            return false;
+        x0 = int32_t((page % pagesPerRow) * pageW + uint32_t(bx) * blockW);
+        y0 = int32_t((page / pagesPerRow) * pageH + uint32_t(by) * blockH);
+        return uint32_t(x0) < sheetW && uint32_t(y0) < sheetH;
+    }
+
     // Of the entries with this data, the one whose texture environment has
     // the palette the game draws with: same CBP and CSA, or the same CBP
-    // relative to TBP0 (models are placed where there is room), or the first.
+    // relative to TBP0 (models are placed where there is room), or the same
+    // CSA (KH2's maps keep several textures in one 4-bit atlas, each part
+    // with its own CSA, and draw with the CLUT already loaded), or the first.
     int pickVariant(const Region &r, const ParallelGS::TEX0Bits &tex0) const
     {
         if (r.alts.empty())
             return r.entry;
-        int relative = -1;
+        int relative = -1, sameCsa = -1;
         auto consider = [&](int i) {
             const Entry &e = m_entries[size_t(i)];
             if (!e.variant || e.vcsa != tex0.CSA)
@@ -493,6 +666,8 @@ public:
                 return true;
             if (relative < 0 && int(e.vcbp) - int(e.vtbp) == int(tex0.CBP) - int(tex0.TBP0))
                 relative = i;
+            if (sameCsa < 0)
+                sameCsa = i;
             return false;
         };
         if (consider(r.entry))
@@ -500,7 +675,7 @@ public:
         for (int i : r.alts)
             if (consider(i))
                 return i;
-        return relative >= 0 ? relative : r.entry;
+        return relative >= 0 ? relative : sameCsa >= 0 ? sameCsa : r.entry;
     }
 
     // "pkg:<archive>:<entry offset>:<data offset>:<stored>:<real>:<type>"
@@ -602,7 +777,11 @@ public:
     std::atomic<bool> m_enabled{true};
     bool m_log = false;
     std::set<int> m_loggedUploads, m_loggedHits;
-    std::set<uint64_t> m_loggedMisses, m_loggedDrops, m_loggedFinds, m_scanned;
+    std::set<uint64_t> m_loggedMisses, m_loggedDrops, m_loggedFinds, m_scanned, m_traced;
+    int m_dumped = 0;
+    long m_dumpSeen = 0;
+    long m_tracedUploads = 0;
+    std::set<uint64_t> m_tracedKeys, m_tracedHits;
 };
 
 std::unique_ptr<Replacer> g_replacer;
@@ -649,7 +828,8 @@ size_t load(const std::filesystem::path &folder)
         if (std::sscanf(hashed.c_str(), "%zu@%zu", &bytes, &skip) < 1)
             continue;
         Entry e{path, source, bytes, skip, {}};
-        if (std::sscanf(variant.c_str(), "v:%u:%u:%u", &e.vtbp, &e.vcbp, &e.vcsa) == 3)
+        if (std::sscanf(variant.c_str(), "v:%u:%u:%u:%u:%u:%u:%u:%u", &e.vtbp, &e.vcbp, &e.vcsa, &e.vtbw, &e.vx, &e.vy,
+                        &e.vw, &e.vh) >= 3)
             e.variant = true;
         std::istringstream cs(checks);
         for (std::string item; std::getline(cs, item, ',');)

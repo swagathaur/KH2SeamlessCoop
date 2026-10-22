@@ -278,3 +278,26 @@ Japanese card already carries the English subtitle ("-THE USUAL SPOT-"). The
 PC release's map/us/<room>.bar holds only a 64x32 placeholder picture with a
 zeroed layout (the PC draws its cards from the remastered image itself), so
 it cannot be swapped in.
+
+## Model and map textures (BAR type 7)
+
+Header (9 ints): 0, colour count, upload count, environment count,
+Offset1 (one byte per environment), upload list (0x90 bytes each),
+environment list (GsInfo, 0xA0 bytes each), picture data, palette.
+
+- Each upload is a GIF packet (BITBLTBUF at +0x20, TRXREG at +0x40) and a
+  DMA REF tag at +0x70 whose address is the data's offset in the section.
+  Upload 0 is the palette.
+- Environment n is register writes: TEX0 at +0x70, CLAMP_1 at +0x80. It
+  samples upload `Offset1[n] + 1`: its TBP0 is that upload's DBP.
+- Maps pack many textures into one 4-bit 256x256 atlas. The environments
+  that share it differ in CSA (their own 16 colours) and in CLAMP: region
+  clamp or region repeat picks each one's rectangle. A map draws with the
+  CLUT already loaded, so CBP in TEX0 is often not the palette's.
+- The PC release's "-n.dds" images belong to environment n and cover only
+  its CLAMP rectangle (at the artists' scale). Their OriginalAssetOffset is
+  close to the data's offset but drifts (by 0x60 + n, or worse in big maps),
+  so the data is found through the upload list instead.
+- Some sections (BOB objects, SK0 sky) have environments whose texture is
+  not uploaded by their own list (animated or shared): those keep the PC's
+  offset.

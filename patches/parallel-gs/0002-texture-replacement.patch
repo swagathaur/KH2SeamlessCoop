@@ -1,9 +1,10 @@
 kh2recomp: texture replacement hook (TextureReplacer): the application sees every
 completed host -> local transfer and can answer a texture lookup with its own image,
-sampled with normalized coordinates over the texel rectangle it stands for, bilinear.
+sampled with normalized coordinates over the texel rectangle it stands for, bilinear
+(the draw's CBP is passed along to choose among palette variants).
 
 diff --git a/gs/gs_interface.cpp b/gs/gs_interface.cpp
-index ea00016..5eca654 100644
+index ea00016..4c08f15 100644
 --- a/gs/gs_interface.cpp
 +++ b/gs/gs_interface.cpp
 @@ -315,6 +315,7 @@ void GSInterface::flush_render_pass(FlushReason reason)
@@ -14,14 +15,18 @@ index ea00016..5eca654 100644
  	render_pass.tex_infos_has_super_samples = false;
  	render_pass.tex0_infos.clear();
  	render_pass.state_vector_map.clear();
-@@ -1592,11 +1593,18 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+@@ -1592,11 +1593,22 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
  
  	update_texture_page_rects();
  
 +	// kh2recomp: an application-supplied replacement image for this texture.
++	// It sees the draw's CBP (the cache key above leaves it out; the palette
++	// bank tells palettes apart), to pick among palette variants.
 +	TextureReplacement replacement = {};
++	TEX0Bits replacer_tex0 = desc.tex0.desc;
++	replacer_tex0.CBP = ctx.tex0.desc.CBP;
 +	const bool replaced = replacer && desc.rect.levels == 1 &&
-+	                      replacer->find(desc.tex0.desc, desc.rect.x, desc.rect.y,
++	                      replacer->find(replacer_tex0, desc.rect.x, desc.rect.y,
 +	                                     desc.rect.width, desc.rect.height, replacement) &&
 +	                      replacement.image && replacement.width && replacement.height;
 +
@@ -34,7 +39,7 @@ index ea00016..5eca654 100644
  	    get_bits_per_pixel(desc.tex0.desc.PSM) >= 8 &&
  	    PRIMType(prim.desc.PRIM) == PRIMType::Sprite &&
  	    tracker.texture_may_super_sample(state_tracker.tex.page_rects[0]))
-@@ -1701,7 +1709,11 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+@@ -1701,7 +1713,11 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
  			}
  		}
  
@@ -47,7 +52,7 @@ index ea00016..5eca654 100644
  		if (!image)
  		{
  			TRACE("CACHE IMAGE", desc);
-@@ -1790,6 +1802,26 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+@@ -1790,6 +1806,26 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
  		info.info.bias.x = -float(desc.rect.x) * info.info.sizes.z;
  		info.info.bias.y = -float(desc.rect.y) * info.info.sizes.w;
  
@@ -74,7 +79,7 @@ index ea00016..5eca654 100644
  		info.info.arrayed = int(desc.samples > 1);
  		info.info.flags = long_term_cache_texture ? TEX_INFO_LONG_TERM_REFERENCE : 0;
  		if (info.info.arrayed)
-@@ -1800,6 +1832,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
+@@ -1800,6 +1836,8 @@ uint32_t GSInterface::drawing_kick_update_texture(FBFeedbackMode feedback_mode,
  			info.info.flags |= TEX_INFO_FORCE_SAMPLE_MAPPING;
  
  		render_pass.tex_infos.push_back(info);
@@ -83,7 +88,7 @@ index ea00016..5eca654 100644
  		render_pass.tex0_infos.push_back(ctx.tex0.desc);
  		render_pass.held_images.push_back(std::move(image));
  	}
-@@ -1841,7 +1875,13 @@ void GSInterface::drawing_kick_update_state(FBFeedbackMode feedback_mode, const
+@@ -1841,7 +1879,13 @@ void GSInterface::drawing_kick_update_state(FBFeedbackMode feedback_mode, const
  			}
  		}
  
@@ -98,7 +103,7 @@ index ea00016..5eca654 100644
  		{
  			p.tex2 = ctx.tex1.desc.LCM << TEX2_FIXED_LOD_OFFSET;
  			p.tex2 |= ctx.tex1.desc.L << TEX2_L_OFFSET;
-@@ -3015,6 +3055,13 @@ void GSInterface::flush_pending_transfer(bool keep_alive)
+@@ -3015,6 +3059,13 @@ void GSInterface::flush_pending_transfer(bool keep_alive)
  		transfer_state.copy.host_data_size_offset = transfer_state.last_flushed_qwords * sizeof(uint64_t);
  		transfer_state.copy.host_data_size_required = transfer_state.required_qwords * sizeof(uint64_t);
  
@@ -113,10 +118,10 @@ index ea00016..5eca654 100644
  		constexpr uint32_t CopyCacheHazardLimit = 400;
  
 diff --git a/gs/gs_interface.hpp b/gs/gs_interface.hpp
-index 9f05da8..aa70d84 100644
+index 9f05da8..1880333 100644
 --- a/gs/gs_interface.hpp
 +++ b/gs/gs_interface.hpp
-@@ -248,9 +248,33 @@ public:
+@@ -248,9 +248,34 @@ public:
  	virtual bool on_label(uint64_t payload) = 0;
  };
  
@@ -127,8 +132,9 @@ index 9f05da8..aa70d84 100644
 +{
 +	Vulkan::ImageHandle image;
 +	// The region of the texture's own texel space (relative to TBP0) that the
-+	// image covers.
-+	uint32_t x, y, width, height;
++	// image covers (it may start before TBP0: a texture inside a sheet).
++	int32_t x, y;
++	uint32_t width, height;
 +};
 +
 +class TextureReplacer
@@ -150,7 +156,7 @@ index 9f05da8..aa70d84 100644
  	GSInterface();
  	bool init(Vulkan::Device *device, const GSOptions &options);
  	void reset_context_state();
-@@ -323,6 +347,8 @@ private:
+@@ -323,6 +348,8 @@ private:
  	uint32_t vram_size = 0;
  	DebugMode debug_mode;
  	Hacks hacks;

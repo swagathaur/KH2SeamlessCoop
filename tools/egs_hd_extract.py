@@ -15,8 +15,12 @@ when the game uploads it to the GS by a checksum of its first bytes, so the
 manifest (OUT_DIR/manifest.txt) lists, per image:
   <CRC-32 and Adler-32 of 256 bytes, hex> <bytes hashed>@<skip> <image path> <source file> <checks>
 (the 256 bytes start after any blank lead-in: <skip> bytes all alike), and
-for a model's or map's texture "v:<TBP0>:<CBP>:<CSA>" (its texture
-environment: palette variants share their data and differ there) or "-".
+for a model's or map's texture "v:<TBP0>:<CBP>:<CSA>:<TBW>:<x>:<y>:<w>:<h>"
+(its texture environment: palette variants share their data and differ
+there; maps keep several textures in one 4-bit atlas, one CSA and CLAMP
+region each, and the PC's image covers that region x,y wxh) or "-". A
+model's or map's texture data is found through the section's own upload
+list (texture_data), not the PC's offset, which drifts in big maps.
 where <checks> is len:hash,... for longer prefixes (1 KiB to 256 KiB, as far as
 the file goes): many textures start with the same transparent bytes, so the
 runtime confirms a hit with the longest prefix the upload covers.
@@ -51,9 +55,12 @@ def key64(data):
 
 
 def texture_envs(original):
-    """(TBP0, CBP, CSA) of every texture environment in a model's or map's
-    texture sections (BAR entries of type 7, in order): the "-<n>" images
-    count through them, which tells palette variants apart."""
+    """(TBP0, CBP, CSA, TBW, x, y, w, h) of every texture environment in a
+    model's or map's texture sections (BAR entries of type 7, in order): the
+    "-<n>" images count through them, which tells palette variants apart.
+    x, y, w, h is the part of the texture the environment's CLAMP lets it
+    read (maps keep several textures in one atlas, each with its own CSA and
+    region); the PC's image for the environment covers just that part."""
     out = []
     if original[:4] != b"BAR\x01":
         return out
@@ -65,10 +72,58 @@ def texture_envs(original):
         gs_count, env_off = struct.unpack_from("<i", original, off + 12)[0], struct.unpack_from("<i", original, off + 24)[0]
         for g in range(max(gs_count, 0)):
             at = off + env_off + g * 0xA0 + 0x70
-            if at + 8 > off + size:
+            if at + 0x18 > off + size:
                 break
             tex0 = struct.unpack_from("<Q", original, at)[0]
-            out.append((tex0 & 0x3FFF, (tex0 >> 37) & 0x3FFF, (tex0 >> 56) & 0x1F))
+            clamp = struct.unpack_from("<Q", original, at + 0x10)[0]
+            reg = struct.unpack_from("<Q", original, at + 0x18)[0] & 0xFF
+            tw, th = 1 << ((tex0 >> 26) & 15), 1 << ((tex0 >> 30) & 15)
+            x, y, w, h = 0, 0, tw, th
+            if reg == 0x08:  # CLAMP_1
+                def axis(mode, lo, hi, size):
+                    if mode == 2:  # region clamp
+                        return (lo, hi - lo + 1) if hi >= lo else (0, size)
+                    if mode == 3 and (lo + 1) & lo == 0:  # region repeat: (u & mask) | fix
+                        return hi, lo + 1
+                    return 0, size
+                x, w = axis(clamp & 3, (clamp >> 4) & 0x3FF, (clamp >> 14) & 0x3FF, tw)
+                y, h = axis((clamp >> 2) & 3, (clamp >> 24) & 0x3FF, (clamp >> 34) & 0x3FF, th)
+                if x + w > tw or y + h > th:
+                    x, y, w, h = 0, 0, tw, th
+            out.append((tex0 & 0x3FFF, (tex0 >> 37) & 0x3FFF, (tex0 >> 56) & 0x1F, (tex0 >> 14) & 0x3F,
+                        x, y, w, h))
+    return out
+
+
+def texture_data(original):
+    """Where each texture environment's picture is, as the game uploads it:
+    for every BAR entry of type 7, environment n (GsInfo n) samples upload
+    (TextureInfo) number Offset1[n] + 1 (upload 0 is the palette), whose
+    DMA reference tag (+0x70) points at its data in the section. The PC's
+    OriginalAssetOffset only approximates this (it drifts in big maps).
+    Returns [(file offset, bytes)] in the order of texture_envs, or []."""
+    out = []
+    if original[:4] != b"BAR\x01":
+        return out
+    count = struct.unpack_from("<I", original, 4)[0]
+    for i in range(count):
+        t, _, _, off, size = struct.unpack_from("<HH4sII", original, 16 + i * 16)
+        if t != 7 or size < 36:
+            continue
+        _, _, tcount, gcount, off1, tinf = struct.unpack_from("<6i", original, off)
+        uploads = []
+        for u in range(max(tcount, 0)):
+            at = off + tinf + u * 0x90 + 0x70
+            if at + 8 > off + size:
+                break
+            tag = struct.unpack_from("<Q", original, at)[0]
+            uploads.append((off + ((tag >> 32) & 0x7FFFFFFF), (tag & 0xFFFF) * 16))
+        for g in range(max(gcount, 0)):
+            if off + off1 + g >= off + size:
+                out.append(None)
+                continue
+            u = original[off + off1 + g] + 1
+            out.append(uploads[u] if u < len(uploads) else None)
     return out
 
 
@@ -154,6 +209,7 @@ def main():
                 original, assets = read_full(pkg, hed[md5][0], extract)
             files += 1
             envs = texture_envs(original)
+            datas = texture_data(original)
             for aname, orig_off, dpos, aclen, adlen, data in assets:
                 ext = os.path.splitext(aname)[1].lower()
                 if (name, aname) in EXCLUDE:
@@ -169,9 +225,13 @@ def main():
                 m = re.match(r"-(\d+)\.", aname)
                 variant = "-"
                 if m:
-                    at -= 16 * int(m.group(1))
-                    if int(m.group(1)) < len(envs):
-                        variant = "v:%d:%d:%d" % envs[int(m.group(1))]
+                    n = int(m.group(1))
+                    if n < len(datas) and datas[n] is not None:
+                        at = datas[n][0]
+                    else:
+                        at -= 16 * n
+                    if n < len(envs):
+                        variant = "v:%d:%d:%d:%d:%d:%d:%d:%d" % envs[n]
                     if at < 0:
                         skipped += 1
                         continue

@@ -13,7 +13,8 @@ Each remastered asset names the place in its original file the texture came
 from (OriginalAssetOffset, bit 29 set). The runtime recognises the texture
 when the game uploads it to the GS by a checksum of its first bytes, so the
 manifest (OUT_DIR/manifest.txt) lists, per image:
-  <CRC-32 and Adler-32 of the first 256 bytes, hex> <bytes hashed> <image path> <source file> <checks>
+  <CRC-32 and Adler-32 of 256 bytes, hex> <bytes hashed>@<skip> <image path> <source file> <checks>
+(the 256 bytes start after any blank lead-in: <skip> bytes all alike)
 where <checks> is len:hash,... for longer prefixes (1 KiB to 256 KiB, as far as
 the file goes): many textures start with the same transparent bytes, so the
 runtime confirms a hit with the longest prefix the upload covers.
@@ -25,20 +26,36 @@ Files under a language folder are written for the English text: msg/us/x is
 looked up as msg/jp/x would be (the runtime sees the bytes only, so this only
 matters for the names in the manifest).
 """
-import hashlib, os, struct, sys, zlib
+import hashlib, os, re, struct, sys, zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import egs_extract as E
 
 DEFAULT_PREFIXES = ["menu/", "field2d/", "file/", "msg/", "event/layout/", "msn/", "gumibattle/", "gumimenu/",
-                    "itempic/", "libretto", "minigame/", "remastered/", "dbg/", "effect/", "limit/", "title"]
-# map/ and obj/ have remastered textures too, but their originals sit inside
-# larger uploads (a model's or map's whole texture block goes up at once), so
-# they are not found by the start of an upload; not used yet.
+                    "itempic/", "libretto", "minigame/", "remastered/", "dbg/", "effect/", "limit/", "title",
+                    "map/", "obj/"]
+
+
+
+# Remastered images laid out differently from the texture they replace (the
+# PC draws them its own way): left out.
+EXCLUDE = {
+    ("msg/us/fontimage.bar", "US_fontimage_bar2.png"),  # button icons: the PC's own atlas
+}
 
 
 def key64(data):
     """CRC-32 (zlib) in the high half, Adler-32 in the low half."""
     return (zlib.crc32(data) & 0xFFFFFFFF) << 32 | (zlib.adler32(data) & 0xFFFFFFFF)
+
+
+def leading_blank(data, at, limit=65536):
+    """Bytes from at that repeat data[at], in whole 16-byte steps."""
+    first = data[at]
+    n = 0
+    end = min(len(data), at + limit)
+    while at + n + 16 <= end and data[at + n:at + n + 16] == bytes([first]) * 16:
+        n += 16
+    return n
 
 
 def read_full(pkg, off, want_data):
@@ -99,7 +116,8 @@ def main():
             archives.append((base, E.read_hed(base + ".hed")))
     os.makedirs(out, exist_ok=True)
     manifest = ["#archive %d %s" % (i, os.path.abspath(base + ".pkg")) for i, (base, _) in enumerate(archives)]
-    files = images = skipped = 0
+    files = images = skipped = dupes = 0
+    seen = set()
     for name in names:
         md5 = hashlib.md5(name.encode()).digest()
         for ai, (base, hed) in enumerate(archives):
@@ -113,14 +131,29 @@ def main():
             files += 1
             for aname, orig_off, dpos, aclen, adlen, data in assets:
                 ext = os.path.splitext(aname)[1].lower()
+                if (name, aname) in EXCLUDE:
+                    skipped += 1
+                    continue
                 if not (orig_off & 0x20000000) or ext not in (".png", ".dds"):
                     skipped += 1
                     continue
                 at = orig_off & 0x0FFFFFFF
+                # Model and map textures ("-<n>.dds"): the offset is the
+                # texture data's plus 16 * n (palette variants of one texture
+                # share the data, so the PC tells them apart that way).
+                m = re.match(r"-(\d+)\.", aname)
+                if m:
+                    at -= 16 * int(m.group(1))
+                    if at < 0:
+                        skipped += 1
+                        continue
                 chunk = original[at:at + 256]
                 if len(chunk) < 64:
                     skipped += 1
                     continue
+                # Keyed past a blank start (leading bytes all alike, in 16-byte
+                # steps), as the runtime does: blank starts are everywhere.
+                skip = leading_blank(original, at)
                 # A blank start (one byte value over 64 KiB) would also match
                 # the game's own empty buffers: leave those out.
                 head = original[at:at + 65536]
@@ -143,14 +176,23 @@ def main():
                 for n in (1024, 4096, 16384, 65536, 262144):
                     if at + n <= len(original):
                         checks.append("%d:%016x" % (n, key64(original[at:at + n])))
-                manifest.append("%016x %d %s %s %s" % (key64(chunk), len(chunk), rel.replace(os.sep, "/"), name,
+                keyed = original[at + skip:at + skip + 256]
+                if len(keyed) < 256 and skip:
+                    skipped += 1
+                    continue
+                ident = (key64(keyed), skip, tuple(checks))
+                if ident in seen:
+                    dupes += 1  # the same original bytes again (shared art): one image
+                    continue
+                seen.add(ident)
+                manifest.append("%016x %d@%d %s %s %s" % (key64(keyed), len(keyed), skip, rel.replace(os.sep, "/"), name,
                                                        ",".join(checks) or "-"))
                 images += 1
             break
     if not listing:
         with open(os.path.join(out, "manifest.txt"), "w") as f:
             f.write("\n".join(manifest) + "\n")
-    print(f"{files} files, {images} images, {skipped} skipped")
+    print(f"{files} files, {images} images, {skipped} skipped, {dupes} duplicates")
 
 
 if __name__ == "__main__":

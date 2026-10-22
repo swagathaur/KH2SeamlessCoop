@@ -242,7 +242,8 @@ struct Entry
 {
     std::string path;
     std::string source;
-    size_t bytes = 0;
+    size_t bytes = 0; // hashed for the key...
+    size_t skip = 0;  // ...after this many blank lead-in bytes
     std::vector<std::pair<size_t, uint64_t>> checks; // longer prefixes, shortest first
 };
 
@@ -259,19 +260,44 @@ struct Region
 class Replacer final : public ParallelGS::TextureReplacer
 {
 public:
-    // The manifest entry these bytes start (n: bytes hashed for the key,
-    // size: bytes available), confirmed as far as possible; -1 if none.
-    int bestMatch(const uint8_t *bytes, size_t size, size_t n, size_t &matchLen) const
+    // Leading bytes equal to the first, in whole 16-byte steps (as
+    // tools/egs_hd_extract.py's leading_blank).
+    static size_t leadingBlank(const uint8_t *bytes, size_t size)
     {
-        const auto range = m_byKey.equal_range(key64(bytes, n));
-        int match = -1;
+        const size_t end = std::min<size_t>(size, 65536);
+        size_t n = 0;
+        while (n + 16 <= end)
+        {
+            bool same = true;
+            for (size_t i = 0; i < 16 && same; ++i)
+                same = bytes[n + i] == bytes[0];
+            if (!same)
+                break;
+            n += 16;
+        }
+        return n;
+    }
+
+    // The manifest entry these bytes start (size: bytes available),
+    // confirmed as far as possible; -1 if none.
+    int bestMatch(const uint8_t *bytes, size_t size, size_t &matchLen) const
+    {
         matchLen = 0;
+        const size_t skip = leadingBlank(bytes, size);
+        if (skip + kHashBytes > size)
+            return -1;
+        const size_t n = kHashBytes;
+        const auto range = m_byKey.equal_range(key64(bytes + skip, n));
+        int match = -1;
+        // A key shared by many textures is a pattern, not a texture.
+        if (std::distance(range.first, range.second) > 32)
+            return -1;
         for (auto it = range.first; it != range.second; ++it)
         {
             const Entry &e = m_entries[size_t(it->second)];
-            if (e.bytes != n)
+            if (e.bytes != n || e.skip != skip)
                 continue;
-            size_t agreed = n;
+            size_t agreed = skip + n;
             for (const auto &[len, hash] : e.checks)
             {
                 if (len > size)
@@ -281,7 +307,7 @@ public:
                     agreed = 0;
                     break;
                 }
-                agreed = len;
+                agreed = std::max(agreed, len);
             }
             // Sure: agreed over 4 KiB (or everything available), or over all
             // the file had after the texture's start.
@@ -325,14 +351,18 @@ public:
         }
         const auto *bytes = static_cast<const uint8_t *>(data);
         static const bool scan = std::getenv("KH2_HD_SCAN") != nullptr; // diagnostics: textures inside uploads
-        if (scan && size >= 1024)
+        if (scan && size >= 1024 && m_scanned.insert(key64(bytes, std::min<size_t>(size, 4096)) ^ size).second)
         {
             int found = 0;
-            for (size_t off = 16; off + kHashBytes <= size && found < 8; off += 16)
+            for (size_t off = 16; off + kHashBytes <= size && found < 64; off += 16)
             {
                 size_t agreed = 0;
-                const int m = bestMatch(bytes + off, size - off, kHashBytes, agreed);
-                if (m >= 0 && agreed >= 1024)
+                const int m = bestMatch(bytes + off, size - off, agreed);
+                size_t differing = 0;
+                if (m >= 0)
+                    for (size_t i = 1; i < agreed; ++i)
+                        differing += bytes[off + i] != bytes[off];
+                if (m >= 0 && agreed >= 1024 && differing * 16 >= agreed)
                 {
                     ++found;
                     std::printf("[hd] scan: upload dbp %u dbw %u psm 0x%02X %ux%u at %u,%u (%zu bytes): %s at +0x%zx (%zu agree)\n",
@@ -341,9 +371,8 @@ public:
                 }
             }
         }
-        const size_t n = std::min(size, kHashBytes);
         size_t matchLen = 0;
-        const int match = bestMatch(bytes, size, n, matchLen);
+        const int match = bestMatch(bytes, size, matchLen);
         if (match < 0)
             return;
         // The agreement has to include real content: blank stretches (cleared
@@ -531,7 +560,7 @@ public:
     std::atomic<bool> m_enabled{true};
     bool m_log = false;
     std::set<int> m_loggedUploads, m_loggedHits;
-    std::set<uint64_t> m_loggedMisses, m_loggedDrops, m_loggedFinds;
+    std::set<uint64_t> m_loggedMisses, m_loggedDrops, m_loggedFinds, m_scanned;
 };
 
 std::unique_ptr<Replacer> g_replacer;
@@ -570,12 +599,14 @@ size_t load(const std::filesystem::path &folder)
         if (line.empty() || line[0] == '#')
             continue;
         std::istringstream ss(line);
-        std::string key, path, source, checks;
-        size_t bytes = 0;
-        if (!(ss >> key >> bytes >> path))
+        std::string key, path, source, checks, hashed;
+        if (!(ss >> key >> hashed >> path))
             continue;
         ss >> source >> checks;
-        Entry e{path, source, bytes, {}};
+        size_t bytes = 0, skip = 0;
+        if (std::sscanf(hashed.c_str(), "%zu@%zu", &bytes, &skip) < 1)
+            continue;
+        Entry e{path, source, bytes, skip, {}};
         std::istringstream cs(checks);
         for (std::string item; std::getline(cs, item, ',');)
         {

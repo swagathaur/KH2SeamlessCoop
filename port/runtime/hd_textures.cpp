@@ -339,7 +339,10 @@ public:
         for (size_t i = 0; i < m_regions.size();)
         {
             const Region &r = m_regions[i];
-            if (r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
+            // Small uploads (palettes) tucked into a texture's unused blocks
+            // do not end it; anything bigger, or at its base, does.
+            const bool tucked = size < 4096 && dbp != r.dbp;
+            if (!tucked && r.firstPage <= last && first <= r.lastPage && (r.mask & mask))
             {
                 if (m_log && m_loggedDrops.insert(uint64_t(r.entry) << 32 | dbp).second)
                     std::printf("[hd] %s dropped: upload dbp %u psm 0x%02X %ux%u over it\n",

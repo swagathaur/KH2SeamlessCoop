@@ -14,7 +14,9 @@ from (OriginalAssetOffset, bit 29 set). The runtime recognises the texture
 when the game uploads it to the GS by a checksum of its first bytes, so the
 manifest (OUT_DIR/manifest.txt) lists, per image:
   <CRC-32 and Adler-32 of 256 bytes, hex> <bytes hashed>@<skip> <image path> <source file> <checks>
-(the 256 bytes start after any blank lead-in: <skip> bytes all alike)
+(the 256 bytes start after any blank lead-in: <skip> bytes all alike), and
+for a model's or map's texture "v:<TBP0>:<CBP>:<CSA>" (its texture
+environment: palette variants share their data and differ there) or "-".
 where <checks> is len:hash,... for longer prefixes (1 KiB to 256 KiB, as far as
 the file goes): many textures start with the same transparent bytes, so the
 runtime confirms a hit with the longest prefix the upload covers.
@@ -46,6 +48,28 @@ EXCLUDE = {
 def key64(data):
     """CRC-32 (zlib) in the high half, Adler-32 in the low half."""
     return (zlib.crc32(data) & 0xFFFFFFFF) << 32 | (zlib.adler32(data) & 0xFFFFFFFF)
+
+
+def texture_envs(original):
+    """(TBP0, CBP, CSA) of every texture environment in a model's or map's
+    texture sections (BAR entries of type 7, in order): the "-<n>" images
+    count through them, which tells palette variants apart."""
+    out = []
+    if original[:4] != b"BAR\x01":
+        return out
+    count = struct.unpack_from("<I", original, 4)[0]
+    for i in range(count):
+        t, _, _, off, size = struct.unpack_from("<HH4sII", original, 16 + i * 16)
+        if t != 7 or size < 36:
+            continue
+        gs_count, env_off = struct.unpack_from("<i", original, off + 12)[0], struct.unpack_from("<i", original, off + 24)[0]
+        for g in range(max(gs_count, 0)):
+            at = off + env_off + g * 0xA0 + 0x70
+            if at + 8 > off + size:
+                break
+            tex0 = struct.unpack_from("<Q", original, at)[0]
+            out.append((tex0 & 0x3FFF, (tex0 >> 37) & 0x3FFF, (tex0 >> 56) & 0x1F))
+    return out
 
 
 def leading_blank(data, at, limit=65536):
@@ -129,6 +153,7 @@ def main():
                     break
                 original, assets = read_full(pkg, hed[md5][0], extract)
             files += 1
+            envs = texture_envs(original)
             for aname, orig_off, dpos, aclen, adlen, data in assets:
                 ext = os.path.splitext(aname)[1].lower()
                 if (name, aname) in EXCLUDE:
@@ -142,8 +167,11 @@ def main():
                 # texture data's plus 16 * n (palette variants of one texture
                 # share the data, so the PC tells them apart that way).
                 m = re.match(r"-(\d+)\.", aname)
+                variant = "-"
                 if m:
                     at -= 16 * int(m.group(1))
+                    if int(m.group(1)) < len(envs):
+                        variant = "v:%d:%d:%d" % envs[int(m.group(1))]
                     if at < 0:
                         skipped += 1
                         continue
@@ -180,13 +208,13 @@ def main():
                 if len(keyed) < 256 and skip:
                     skipped += 1
                     continue
-                ident = (key64(keyed), skip, tuple(checks))
+                ident = (key64(keyed), skip, tuple(checks), variant)
                 if ident in seen:
                     dupes += 1  # the same original bytes again (shared art): one image
                     continue
                 seen.add(ident)
-                manifest.append("%016x %d@%d %s %s %s" % (key64(keyed), len(keyed), skip, rel.replace(os.sep, "/"), name,
-                                                       ",".join(checks) or "-"))
+                manifest.append("%016x %d@%d %s %s %s %s" % (key64(keyed), len(keyed), skip, rel.replace(os.sep, "/"),
+                                                          name, ",".join(checks) or "-", variant))
                 images += 1
             break
     if not listing:

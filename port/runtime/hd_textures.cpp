@@ -245,6 +245,10 @@ struct Entry
     size_t bytes = 0; // hashed for the key...
     size_t skip = 0;  // ...after this many blank lead-in bytes
     std::vector<std::pair<size_t, uint64_t>> checks; // longer prefixes, shortest first
+    // A model's or map's texture: its texture environment (palette variants
+    // of one texture share the data and differ in CBP/CSA).
+    bool variant = false;
+    uint32_t vtbp = 0, vcbp = 0, vcsa = 0;
 };
 
 struct Region
@@ -255,6 +259,7 @@ struct Region
     uint32_t mask;
     int entry;
     uint64_t bytes;
+    std::vector<int> alts; // entries with the same data (palette variants)
 };
 
 class Replacer final : public ParallelGS::TextureReplacer
@@ -280,9 +285,11 @@ public:
 
     // The manifest entry these bytes start (size: bytes available),
     // confirmed as far as possible; -1 if none.
-    int bestMatch(const uint8_t *bytes, size_t size, size_t &matchLen) const
+    int bestMatch(const uint8_t *bytes, size_t size, size_t &matchLen, std::vector<int> *alts = nullptr) const
     {
         matchLen = 0;
+        if (alts)
+            alts->clear();
         const size_t skip = leadingBlank(bytes, size);
         if (skip + kHashBytes > size)
             return -1;
@@ -317,7 +324,11 @@ public:
             {
                 match = it->second;
                 matchLen = agreed;
+                if (alts)
+                    alts->clear();
             }
+            else if (sure && agreed == matchLen && alts)
+                alts->push_back(it->second);
         }
         return match;
     }
@@ -375,7 +386,8 @@ public:
             }
         }
         size_t matchLen = 0;
-        const int match = bestMatch(bytes, size, matchLen);
+        std::vector<int> alts;
+        const int match = bestMatch(bytes, size, matchLen, &alts);
         if (match < 0)
             return;
         // The agreement has to include real content: blank stretches (cleared
@@ -390,7 +402,7 @@ public:
         }
         const Entry &e = m_entries[size_t(match)];
         m_regions.push_back({dbp, dbw, psm, pos.DSAX, pos.DSAY, w, h, uint32_t(first), uint32_t(last), mask, match,
-                             uint64_t(size)});
+                             uint64_t(size), std::move(alts)});
         if (m_log && m_loggedUploads.insert(match).second)
             std::printf("[hd] upload %s: dbp %u dbw %u psm 0x%02X %ux%u at %u,%u (%zu bytes agree) -> %s\n",
                         e.source.c_str(), dbp, dbw, psm, w, h, pos.DSAX, pos.DSAY, matchLen, e.path.c_str());
@@ -447,7 +459,8 @@ public:
                 }
                 continue;
             }
-            Vulkan::ImageHandle img = image(r.entry);
+            const int chosen = pickVariant(r, tex0);
+            Vulkan::ImageHandle img = image(chosen);
             if (!img)
                 return false;
             out.image = img;
@@ -455,13 +468,39 @@ public:
             out.y = ry;
             out.width = rw;
             out.height = rh;
-            if (m_log && m_loggedHits.insert(r.entry).second)
+            if (m_log && m_loggedHits.insert(chosen).second)
                 std::printf("[hd] replaced %s (%ux%u texels as psm 0x%02X, %ux%u image)\n",
-                            m_entries[size_t(r.entry)].path.c_str(), rw, rh, uint32_t(tex0.PSM), img->get_width(),
+                            m_entries[size_t(chosen)].path.c_str(), rw, rh, uint32_t(tex0.PSM), img->get_width(),
                             img->get_height());
             return true;
         }
         return false;
+    }
+
+    // Of the entries with this data, the one whose texture environment has
+    // the palette the game draws with: same CBP and CSA, or the same CBP
+    // relative to TBP0 (models are placed where there is room), or the first.
+    int pickVariant(const Region &r, const ParallelGS::TEX0Bits &tex0) const
+    {
+        if (r.alts.empty())
+            return r.entry;
+        int relative = -1;
+        auto consider = [&](int i) {
+            const Entry &e = m_entries[size_t(i)];
+            if (!e.variant || e.vcsa != tex0.CSA)
+                return false;
+            if (e.vcbp == tex0.CBP)
+                return true;
+            if (relative < 0 && int(e.vcbp) - int(e.vtbp) == int(tex0.CBP) - int(tex0.TBP0))
+                relative = i;
+            return false;
+        };
+        if (consider(r.entry))
+            return r.entry;
+        for (int i : r.alts)
+            if (consider(i))
+                return i;
+        return relative >= 0 ? relative : r.entry;
     }
 
     // "pkg:<archive>:<entry offset>:<data offset>:<stored>:<real>:<type>"
@@ -602,14 +641,16 @@ size_t load(const std::filesystem::path &folder)
         if (line.empty() || line[0] == '#')
             continue;
         std::istringstream ss(line);
-        std::string key, path, source, checks, hashed;
+        std::string key, path, source, checks, hashed, variant;
         if (!(ss >> key >> hashed >> path))
             continue;
-        ss >> source >> checks;
+        ss >> source >> checks >> variant;
         size_t bytes = 0, skip = 0;
         if (std::sscanf(hashed.c_str(), "%zu@%zu", &bytes, &skip) < 1)
             continue;
         Entry e{path, source, bytes, skip, {}};
+        if (std::sscanf(variant.c_str(), "v:%u:%u:%u", &e.vtbp, &e.vcbp, &e.vcsa) == 3)
+            e.variant = true;
         std::istringstream cs(checks);
         for (std::string item; std::getline(cs, item, ',');)
         {

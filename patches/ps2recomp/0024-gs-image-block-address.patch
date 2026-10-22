@@ -1,0 +1,68 @@
+gs: sceGsExecLoadImage/sceGsExecStoreImage use the image's base pointer as
+the block address it is (sceGsSetDefLoad/StoreImage take words / 64). It was
+multiplied by 8 and wrapped: KH2's pause and battle captures of FBP 216
+(block 6912) read block 6144 instead, 96 lines higher, so the paused
+background was shifted down with garbage at the top.
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 9c54919..bed2a98 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -631,7 +631,8 @@ namespace ps2_stubs
+             return;
+         }
+ 
+-        uint32_t dbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
++        // sceGsSetDefLoadImage's dbp is already a GS block address (words / 64).
++        uint32_t dbp = static_cast<uint32_t>(img.vram_addr);
+         uint32_t dsax = static_cast<uint32_t>(img.x);
+         uint32_t dsay = static_cast<uint32_t>(img.y);
+ 
+@@ -696,7 +697,8 @@ namespace ps2_stubs
+             return;
+         }
+ 
+-        uint32_t sbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
++        // sceGsSetDefStoreImage's sbp is already a GS block address (words / 64).
++        uint32_t sbp = static_cast<uint32_t>(img.vram_addr);
+         uint64_t bitbltbuf = (static_cast<uint64_t>(sbp & 0x3FFFu) << 0) |
+                              (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
+                              (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index eb58207..02219fb 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -3848,6 +3848,33 @@ void register_ps2_gs_tests()
+                      "triangle fan quad should light at least one framebuffer row");
+         });
+ 
++        tc.Run("sceGsExecStoreImage and sceGsExecLoadImage take the base pointer as a block address", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            uint8_t *const rdram = runtime.memory().getRDRAM();
++            constexpr uint32_t kImageAddr = 0x4000u;
++            constexpr uint32_t kBufAddr = 0x6000u;
++            // KH2's pause capture: sbp 6912 (FBP 216), 512 wide.
++            const GsImageMem image{0u, 0u, 2u, 2u, 6912u, 8u, 0u};
++            writeGsImageTest(rdram, kImageAddr, image);
++
++            R5900Context storeCtx{};
++            setRegU32(storeCtx, 4, kImageAddr);
++            setRegU32(storeCtx, 5, kBufAddr);
++            ps2_stubs::sceGsExecStoreImage(rdram, &storeCtx, &runtime);
++            uint64_t bitbltbuf = 0u;
++            std::memcpy(&bitbltbuf, rdram + runtime.guestHeapBase() + 16u, sizeof(bitbltbuf));
++            t.Equals(static_cast<uint32_t>(bitbltbuf & 0x3FFFu), 6912u, "SBP is the block address given");
++
++            R5900Context loadCtx{};
++            setRegU32(loadCtx, 4, kImageAddr);
++            setRegU32(loadCtx, 5, kBufAddr);
++            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
++            std::memcpy(&bitbltbuf, rdram + runtime.guestHeapBase() + 16u, sizeof(bitbltbuf));
++            t.Equals(static_cast<uint32_t>((bitbltbuf >> 32) & 0x3FFFu), 6912u, "DBP is the block address given");
++        });
++
+         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
+         {
+             PS2Runtime runtime;

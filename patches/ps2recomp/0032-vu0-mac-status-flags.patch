@@ -1,0 +1,77 @@
+vu0: macro-mode VADD/VSUB/VMUL (and their ACC/field/Q/I forms) set the MAC
+flags and the status register (Z, S, sticky ZS/SS) for their fields, as the
+FMAC does. KH2 clip-tests with "vsub.xy vf0, a, b" and reads vi16; it read 0.
+
+diff --git a/ps2xRecomp/src/lib/code_generator.cpp b/ps2xRecomp/src/lib/code_generator.cpp
+index 5981f4c..9adca29 100644
+--- a/ps2xRecomp/src/lib/code_generator.cpp
++++ b/ps2xRecomp/src/lib/code_generator.cpp
+@@ -270,6 +270,19 @@ namespace ps2recomp
+             for (size_t at = code.find(from); at != std::string::npos; at = code.find(from, at + to.size()))
+                 code.replace(at, from.size(), to);
+         }
++        // MAC and status flags of the arithmetic (ps2_vu_saturate.h): games
++        // read them after a compare-by-subtraction ("vsub.xy vf0, a, b" and
++        // cfc2 vi16), e.g. KH2's clip tests.
++        {
++            const std::string from = "__m128 res = PS2_V";
++            const size_t at = code.find(from);
++            if (at != std::string::npos && code.find("_SAT(", at) != std::string::npos)
++            {
++                const size_t end = code.find("; ", at);
++                if (end != std::string::npos)
++                    code.insert(end + 2, fmt::format("PS2_VU0_FLAGS(ctx, res, 0x{:x}); ", inst.vectorInfo.vectorField & 0xF));
++            }
++        }
+         // VF0 is hardwired to (0, 0, 0, 1). Games write to it on purpose to
+         // set the flags without keeping a result (KH2: "vsub.xy vf0, vf4,
+         // vf11" to compare two points); the write must not stick, or every
+diff --git a/ps2xRuntime/include/ps2_vu_saturate.h b/ps2xRuntime/include/ps2_vu_saturate.h
+index 657f108..75d8957 100644
+--- a/ps2xRuntime/include/ps2_vu_saturate.h
++++ b/ps2xRuntime/include/ps2_vu_saturate.h
+@@ -18,3 +18,31 @@ inline __m128 ps2_vu_saturate(__m128 v)
+ #define PS2_VADD_SAT(a, b) ps2_vu_saturate(PS2_VADD(a, b))
+ #define PS2_VSUB_SAT(a, b) ps2_vu_saturate(PS2_VSUB(a, b))
+ #define PS2_VMUL_SAT(a, b) ps2_vu_saturate(PS2_VMUL(a, b))
++
++// MAC flags (Z in bits 0-3, S in 4-7, x the highest bit of each nibble) and the
++// status register (Z, S, and the sticky ZS, SS) for the fields in DEST
++// (x = 8, y = 4, z = 2, w = 1), as VU0's FMAC sets them. Overflow and
++// underflow flags are not tracked. (patch 0032)
++inline uint32_t ps2_vu_lanes_to_fields(int lanes)
++{
++    // movemask has x in bit 0; the VU's field order has x in bit 3.
++    static const uint8_t kReverse[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
++    return kReverse[lanes & 0xF];
++}
++// Z: exponent 0 (zero or denormal); S: the sign bit, also for -0 (as PCSX2).
++#define PS2_VU0_FLAGS(ctx, v, dest)                                                                    \
++    do                                                                                                 \
++    {                                                                                                  \
++        const __m128i ps2_bits = _mm_castps_si128(v);                                                  \
++        const __m128i ps2_exp = _mm_and_si128(ps2_bits, _mm_set1_epi32(0x7F800000));                   \
++        const uint32_t ps2_zero =                                                                      \
++            ps2_vu_lanes_to_fields(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(ps2_exp, _mm_setzero_si128())))) & (dest); \
++        const uint32_t ps2_sign = ps2_vu_lanes_to_fields(_mm_movemask_ps(v)) & (dest);                 \
++        (ctx)->vu0_mac_flags = ps2_zero | (ps2_sign << 4);                                            \
++        uint16_t ps2_status = static_cast<uint16_t>((ctx)->vu0_status & ~0xFu);                        \
++        if (ps2_zero)                                                                                  \
++            ps2_status |= 0x41u;                                                                       \
++        if (ps2_sign)                                                                                  \
++            ps2_status |= 0x82u;                                                                       \
++        (ctx)->vu0_status = ps2_status;                                                                \
++    } while (0)
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 7735161..dec6f3b 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -209,6 +209,8 @@ void register_code_generator_tests()
+         const auto code = gen.translateInstruction(decoder.decodeInstruction(0x1000, 0x4b8b202cu));
+         t.IsTrue(code.find("ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);") != std::string::npos,
+                  "VF0 is restored after an instruction that names it as destination");
++        t.IsTrue(code.find("PS2_VU0_FLAGS(ctx, res, 0xc);") != std::string::npos,
++                 "the subtraction sets the MAC and status flags for x and y");
+     });
+ 
+     tc.Run("VU0 macro arithmetic saturates like the VUs", [](TestCase &t) {

@@ -34,10 +34,11 @@ std::vector<std::vector<uint8_t>> hostCollect(const uint8_t *rdram, bool full);
 // Client: a StoryChunk from the host.
 void onChunk(const std::vector<uint8_t> &data);
 // Client, every host-loop iteration: start using the host's story once all of
-// it has arrived, apply what changed since, and (when `settle`, the player
-// being free to move) put back anything this game changed that the host's did
-// not. Returns true the iteration the host's story is first used.
-bool clientTick(uint8_t *rdram, bool settle);
+// it has arrived and `mayStart` (this game is past its title screen, in a
+// room), apply what changed since, and (when `settle`, the player being free
+// to move) put back anything this game changed that the host's did not.
+// Returns true the iteration the host's story is first used.
+bool clientTick(uint8_t *rdram, bool settle, bool mayStart);
 // The host's story is in use.
 bool active();
 

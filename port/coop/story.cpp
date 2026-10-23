@@ -270,13 +270,13 @@ void onChunk(const std::vector<uint8_t> &data)
         g_hostFull = true;
 }
 
-bool clientTick(uint8_t *rdram, bool settle)
+bool clientTick(uint8_t *rdram, bool settle, bool mayStart)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     uint8_t *save = rdram + kSave;
     if (!g_active)
     {
-        if (!g_hostFull)
+        if (!g_hostFull || !mayStart)
             return false;
         readBlock(save, g_own);
         std::memcpy(g_ownLocation, save + kSaveLocation, sizeof(g_ownLocation));

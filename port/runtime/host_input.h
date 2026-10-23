@@ -13,6 +13,9 @@ struct Options
     // Swap the face buttons so the bottom button (A / Cross position) is
     // Circle: KH2 Final Mix confirms with Circle, like other Japanese releases.
     bool confirmOnBottom = true;
+    // Which controller this window reads: -1 the first one found, 0.. the
+    // Nth connected one (local multiplayer: one per window), -2 none.
+    int controller = -1;
 };
 void init(const Options &options);
 // Sample controllers (always) and the keyboard (when our window has focus),
@@ -30,6 +33,9 @@ void setSuppressed(bool on);
 // Buttons (PS2 mask, e.g. 0x0008 Start) the game does not see while set: a
 // co-op client cannot open the cutscene's skip menu in the host's story.
 void setBlockedButtons(uint32_t mask);
+// The controller this window reads (Options::controller), now.
+void setController(int choice);
+int controller();
 // The pad as the player holds it (PS2 button mask, active high, and the sticks
 // packed rx|ry|lx|ly), also while suppressed: for the runtime's own menus.
 uint32_t rawButtons();

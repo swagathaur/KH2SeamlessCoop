@@ -45,6 +45,8 @@ double g_lastWarp = -100.0;
 double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
 bool g_followPending = false; // the host moved since we last followed
+int g_rejoins = 0;            // automatic joins after losing the host
+double g_lastRejoin = -100.0;
 const uint8_t *g_rdram = nullptr; // during tick(), for session callbacks
 uint64_t g_lastEnemyFrame = UINT64_MAX;
 // Partners (partners.h): heals for this player, our loadout as last sent.
@@ -219,7 +221,9 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     const bool cut = kh2skip::inCutscene(ram);
     if (!kh2story::active())
         kh2story::setReturnPlace({me.now.world, me.now.room, me.now.door});
-    if (kh2story::clientTick(ram, me.control == 0 && !jumping))
+    // In a room of the game (past the title screen and the new-game set-up)?
+    const bool inGame = me.player.valid && me.now.world != 0 && me.now.world != 0xFF;
+    if (kh2story::clientTick(ram, inGame && me.control == 0 && !jumping, inGame && me.control == 0 && !jumping))
     {
         addLog("playing in the host's story");
         g_storyWarp = true; // the room's programs are the host's now: load it again
@@ -234,6 +238,8 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     if (!g_haveHostScene)
         return;
     const uint8_t hw = g_hostScene[0], hr = g_hostScene[1];
+    if (hw == 0 || hw == 0xFF || me.now.world == 0 || me.now.world == 0xFF)
+        return; // the host (or we) between rooms or not in the game
     uint16_t hdoor, hbattle, hevent;
     std::memcpy(&hdoor, g_hostScene + 2, 2);
     std::memcpy(&hbattle, g_hostScene + 6, 2);
@@ -247,9 +253,25 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
         return;
     }
     const uint32_t hostKey = uint32_t(hw) << 24 | uint32_t(hr) << 16 | hevent;
+    const uint32_t myKey = uint32_t(me.now.world) << 24 | uint32_t(me.now.room) << 16 | me.now.event;
+    // A cutscene the host is not in, wherever we are: it ended or was
+    // skipped there, or our own game started one (its own story's, which is
+    // not the one being played). The host's game leads.
+    if (cut && !(hostCut && myKey == hostKey))
+    {
+        if (g_strayCutSince < 0)
+            g_strayCutSince = now();
+        if (now() - g_strayCutSince > 0.75 && now() - g_lastClientSkip > 3.0)
+        {
+            g_lastClientSkip = now();
+            if (kh2skip::skipCutscene(ram))
+                addLog(hostCut ? "skipped: the host is in another cutscene" : "skipped: the host is not watching this cutscene");
+        }
+    }
+    else
+        g_strayCutSince = -1.0;
     if (hw != me.now.world || hr != me.now.room)
     {
-        g_strayCutSince = -1.0;
         // Elsewhere while the host's cutscene starts: come and watch it.
         if (hostCut && !cut && me.control == 0 && !jumping && g_sceneStarted != hostKey &&
             now() - g_lastSceneWarp > 3.0)
@@ -261,7 +283,6 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
         }
         return;
     }
-    const uint32_t myKey = uint32_t(me.now.world) << 24 | uint32_t(me.now.room) << 16 | me.now.event;
     if (!hostCut)
         g_sceneStarted = 0xFFFFFFFFu;
     // The host's cutscene. One that starts with the room's event plays here
@@ -300,21 +321,6 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     }
     else
         g_battleDiffSince = -1.0;
-    // A cutscene the host is not in: it ended or was skipped there, or our
-    // game started one the host has not. The host's game leads.
-    if (cut && !(hostCut && myKey == hostKey))
-    {
-        if (g_strayCutSince < 0)
-            g_strayCutSince = now();
-        if (now() - g_strayCutSince > 0.75 && now() - g_lastClientSkip > 3.0)
-        {
-            g_lastClientSkip = now();
-            if (kh2skip::skipCutscene(ram))
-                addLog(hostCut ? "skipped: the host is in another cutscene" : "the host's cutscene is over: skipped here too");
-        }
-    }
-    else
-        g_strayCutSince = -1.0;
 }
 
 void makeSession()
@@ -430,6 +436,7 @@ bool host(const std::string &name, uint16_t port)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_opt.name = name;
+    g_opt.port = port;
     makeSession();
     if (!g_session->host(config(name, port)))
     {
@@ -443,6 +450,7 @@ bool join(const std::string &name, const std::string &address)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_opt.name = name;
+    g_opt.join = address;
     kh2net::Address a;
     if (!kh2net::Address::parse(address, kh2net::kDefaultPort, a))
     {
@@ -628,6 +636,30 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         g_opt.joinAtFrame = 0;
         join(g_opt.name, g_opt.join);
     }
+    // A client that lost the host (not one turned away) tries again for a
+    // minute: a game stalled by loading, a network hiccup.
+    {
+        bool retry = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_session && g_session->status() == kh2net::Session::Status::Failed && !g_opt.join.empty() &&
+                !g_opt.host && g_rejoins < 12 && now() - g_lastRejoin > 5.0)
+            {
+                const std::string &e = g_session->lastError();
+                retry = e.rfind("lost the host (timed out)", 0) == 0 || e.rfind("no answer", 0) == 0;
+            }
+        }
+        if (retry)
+        {
+            ++g_rejoins;
+            g_lastRejoin = now();
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                addLog("joining again (" + std::to_string(g_rejoins) + ")");
+            }
+            join(g_opt.name, g_opt.join);
+        }
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     uint8_t *ram = const_cast<uint8_t *>(rdram);
     kh2enemies::thawAfterSession(ram);
@@ -654,6 +686,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     g_rdram = nullptr;
     if (g_session->status() == kh2net::Session::Status::Failed && before != kh2net::Session::Status::Failed)
         addLog(g_session->lastError());
+    if (g_session->status() == kh2net::Session::Status::Connected)
+        g_rejoins = 0;
     if (!g_session->active())
     {
         endStory(ram);
@@ -701,7 +735,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         const kh2state::State me = kh2state::read(rdram);
         uint32_t jumping;
         std::memcpy(&jumping, rdram + kh2state::addr::MapJumpTask, 4);
-        if (hostState(host) && host.world != 0)
+        const bool meInGame = me.player.valid && me.now.world != 0 && me.now.world != 0xFF;
+        if (hostState(host) && host.world != 0 && host.world != 0xFF && meInGame)
         {
             // Follow the host when *they* move (and once on joining): in
             // between, a client may wander off on their own.

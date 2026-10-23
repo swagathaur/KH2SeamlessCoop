@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -52,6 +53,7 @@
 #include "partners.h"
 #include "hits.h"
 #include "story.h"
+#include "local_players.h"
 #include "net/nat.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
@@ -127,6 +129,7 @@ struct Options
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
     std::set<uint64_t> actorsAt;       // --actors-at: print the object list
     bool natTest = false;              // --nat-test
+    uint64_t arrangeAt = 0;            // --arrange-at: testing, Arrange windows at this frame
     uint64_t storySaveTest = 0;        // --story-save-test: make a save image and check whose story it holds
     std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
@@ -135,6 +138,10 @@ struct Options
     int asyncDma = -1;                 // --async-dma: VIF1/GIF DMA on a worker thread (PS2X_ASYNC_DMA); default 3
     bool fullscreen = false;
     unsigned windowW = 1280, windowH = 960;
+    int windowX = INT_MIN, windowY = INT_MIN; // --window-pos
+    int player = 1;                    // --player: local player number (local_players.h)
+    int pad = -1;                      // --pad: 1-4 the Nth controller, 0 none, -1 by player number
+    int localPlayers = 1;              // --local-players: start this many in all (host + windows)
     bool vsync = false;
     bool fsr = true;
     bool ssaaTextures = true;          // --no-ssaa-textures
@@ -228,6 +235,11 @@ void usage()
         "                          3 all, completing at once (default)\n"
         "  --fullscreen            start fullscreen (Alt+Enter or F11 toggles)\n"
         "  --window=WxH            window size (default 1280x960)\n"
+        "  --window-pos=X,Y        where the window goes (otherwise where it was last, per player)\n"
+        "  --local-players=N       local multiplayer: host, and open windows for players 2..N (max 3),\n"
+        "                          each with its own controller and memory card\n"
+        "  --player=N              this window is local player N (set by --local-players)\n"
+        "  --pad=N                 read the Nth connected controller (1-4; 0 none; default: the player number)\n"
         "  --vsync                 present in sync with the display's refresh\n"
         "  --no-fsr                bilinear upscale to the window instead of FSR 1 + sharpening\n"
         "  --no-ssaa-textures      super-sampling: let the game's full-screen effects drop to 1 sample\n"
@@ -403,6 +415,17 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             o.windowW = static_cast<unsigned>(std::stoul(v.substr(0, x)));
             o.windowH = static_cast<unsigned>(std::stoul(v.substr(x + 1)));
         }
+        else if (a.rfind("--window-pos=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t c = v.find(',');
+            if (c == std::string::npos) return false;
+            o.windowX = std::stoi(v.substr(0, c));
+            o.windowY = std::stoi(v.substr(c + 1));
+        }
+        else if (a.rfind("--player=", 0) == 0) o.player = std::clamp(std::stoi(value(a)), 1, 3);
+        else if (a.rfind("--pad=", 0) == 0) o.pad = std::clamp(std::stoi(value(a)), 0, 4);
+        else if (a.rfind("--local-players=", 0) == 0) o.localPlayers = std::clamp(std::stoi(value(a)), 1, 3);
         else if (a == "--vsync") o.vsync = true;
         else if (a == "--no-fsr") o.fsr = false;
         else if (a == "--no-ssaa-textures") o.ssaaTextures = false;
@@ -445,6 +468,7 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a.rfind("--host=", 0) == 0) { o.coop.host = true; o.coop.port = static_cast<uint16_t>(std::stoul(value(a))); }
         else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
         else if (a.rfind("--join-at=", 0) == 0) o.coop.joinAtFrame = std::stoull(value(a));
+        else if (a.rfind("--arrange-at=", 0) == 0) o.arrangeAt = std::stoull(value(a));
         else if (a.rfind("--story-save-test=", 0) == 0) o.storySaveTest = std::stoull(value(a));
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
         else if (a == "--follow-host") o.coop.followHost = true;
@@ -1000,6 +1024,8 @@ bool harnessTick(Harness &h, uint64_t frame)
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
     }
+    if (o.arrangeAt && due(o.arrangeAt))
+        std::printf("[local] arranged %d windows\n", kh2local::arrangeWindows());
     if (o.storySaveTest && due(o.storySaveTest))
         kh2story::testSave();
     if (hit(o.actorsAt) && frame != h.lastActorsFrame)
@@ -1440,6 +1466,8 @@ int main(int argc, char **argv)
         usage();
         return kExitUsage;
     }
+    kh2local::setPlayer(opt.player);
+    kh2local::setLaunchArgs(merged, argv[0]); // how this copy runs, for starting local players like it
     if (opt.natTest)
     {
         std::printf("%s", kh2net::probe().c_str());
@@ -1480,6 +1508,22 @@ int main(int argc, char **argv)
         g.windowed = !opt.headless;
         g.windowWidth = opt.windowW;
         g.windowHeight = opt.windowH;
+        if (opt.player > 1)
+            g.title = "Kingdom Hearts II Final Mix - Player " + std::to_string(opt.player);
+        int px, py, pw, ph;
+        if (opt.windowX != INT_MIN)
+        {
+            g.windowX = opt.windowX;
+            g.windowY = opt.windowY;
+        }
+        else if (!opt.headless && kh2local::loadPlace(opt.player, px, py, pw, ph))
+        {
+            g.windowX = px;
+            g.windowY = py;
+            g.windowOuterW = pw;
+            g.windowOuterH = ph;
+        }
+        kh2pgs::setWindowPlacedCallback([](int x, int y, int w, int h) { kh2local::savePlace(kh2local::player(), x, y, w, h); });
         g.fullscreen = opt.fullscreen;
         g.vsync = opt.vsync;
         g.fsr = opt.fsr;
@@ -1498,6 +1542,7 @@ int main(int argc, char **argv)
     }
     kh2input::Options inputOpt;
     inputOpt.confirmOnBottom = !opt.swapConfirm;
+    inputOpt.controller = opt.pad > 0 ? opt.pad - 1 : opt.pad == 0 ? -2 : opt.player > 1 ? opt.player - 1 : -1;
     kh2input::init(inputOpt);
     kh2input::setRumbleEnabled(!opt.noRumble);
     kh2input::setMouseCamera(!opt.noMouseCamera);
@@ -1535,6 +1580,13 @@ int main(int argc, char **argv)
     PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();
     if (!opt.iso.empty()) paths.cdImage = opt.iso;
     if (!opt.cdRoot.empty()) paths.cdRoot = opt.cdRoot;
+    if (opt.player > 1)
+    {
+        // Each local player has their own memory card.
+        std::error_code ec;
+        paths.mcRoot = std::filesystem::absolute(opt.elf, ec).parent_path() / kh2local::memoryCardFolder(opt.player);
+        std::filesystem::create_directories(paths.mcRoot, ec);
+    }
     PS2Runtime::setIoPaths(paths);
     std::printf("[kh2] cd root %s, cd image %s\n", paths.cdRoot.string().c_str(),
                 paths.cdImage.empty() ? "(none)" : paths.cdImage.string().c_str());
@@ -1609,6 +1661,18 @@ int main(int argc, char **argv)
     kh2story::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
     kh2coop::init(opt.coop);
+    if (opt.localPlayers > 1 && opt.player == 1)
+    {
+        // Local multiplayer: host (unless joining someone), then a window per player.
+        if (opt.coop.join.empty() && !kh2coop::active())
+            kh2coop::host(opt.coop.name, opt.coop.port);
+        for (int p = 2; p <= opt.localPlayers; ++p)
+        {
+            std::string err;
+            if (!kh2local::spawn(p, opt.coop.join.empty() ? "127.0.0.1:" + std::to_string(kh2coop::options().port) : opt.coop.join, "Player " + std::to_string(p), p - 1, err))
+                std::fprintf(stderr, "[local] player %d: %s\n", p, err.c_str());
+        }
+    }
     if (opt.speed != 1.0)
     {
         runtime.eeScheduler().setHostSpeed(opt.speed);

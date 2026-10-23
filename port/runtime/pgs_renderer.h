@@ -30,6 +30,11 @@ struct Options
     unsigned windowWidth = 1280;
     unsigned windowHeight = 960;
     bool fullscreen = false;
+    // Where the window goes (its outer frame, screen pixels); INT_MIN: let
+    // Windows place it. With a size here, windowWidth/Height are ignored.
+    int windowX = -2147483647 - 1, windowY = -2147483647 - 1;
+    int windowOuterW = 0, windowOuterH = 0;
+    std::string title = "Kingdom Hearts II Final Mix (native)";
     bool vsync = false;
     // Keep the software rasteriser running too (slow; for comparing output).
     bool keepSoftwareRaster = false;
@@ -116,4 +121,7 @@ void requestClose();
 // Window events since the last call (for the input layer).
 bool windowFocused();
 void *nativeWindow();
+// Called (on the window's thread) when the user has moved or resized the
+// window, and once when it closes, with its outer frame: x, y, width, height.
+void setWindowPlacedCallback(void (*fn)(int x, int y, int w, int h));
 } // namespace kh2pgs

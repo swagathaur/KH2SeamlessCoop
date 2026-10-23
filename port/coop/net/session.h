@@ -21,7 +21,7 @@ struct SessionConfig
     std::string name = "Player";
     uint32_t gameCrc = 0;      // players must run the same game build
     uint16_t port = kDefaultPort; // host: port to listen on; client: 0 = any
-    double timeout = 5.0;      // seconds of silence before a peer is dropped
+    double timeout = 15.0;     // seconds of silence before a peer is dropped (loading can stall a game a while)
     float simulatedLoss = 0;   // testing: drop this fraction of outgoing packets
     bool openPort = false;     // host: ask the router to forward the port (UPnP / NAT-PMP)
     bool discover = false;     // ask a public STUN server how the internet sees us (the game turns both on)

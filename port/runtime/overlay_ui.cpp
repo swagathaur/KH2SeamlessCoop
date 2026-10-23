@@ -22,6 +22,7 @@
 #include "hd_textures.h"
 #include "game_state.h"
 #include "coop.h"
+#include "local_players.h"
 #include "puppets.h"
 #include "partners.h"
 #include "host_input.h"
@@ -448,8 +449,72 @@ void draw()
     }
     drawKeyboard();
 
+    // Local multiplayer (local_players.h): a window per player on this PC.
+    ImGui::SeparatorText("Local players (this PC)");
+    {
+        const int me = kh2local::player();
+        const char *pads[] = {"The first one found", "Controller 1", "Controller 2", "Controller 3", "Controller 4",
+                              "None (keyboard only)"};
+        const int choice = kh2input::controller();
+        int item = choice == -1 ? 0 : choice == -2 ? 5 : choice + 1;
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::Combo("This window's controller", &item, pads, 6))
+            kh2input::setController(item == 0 ? -1 : item == 5 ? -2 : item - 1);
+        ImGui::SetItemTooltip("Each window reads its own controller, also when it is not the active window "
+                              "(the keyboard works in the active window)");
+        if (me > 1)
+            ImGui::TextWrapped("This window is local player %d (own memory card: %s). Close it to leave.", me,
+                               kh2local::memoryCardFolder(me).c_str());
+        else
+        {
+            const std::vector<int> playing = kh2local::running();
+            for (int p = 2; p <= 3; ++p)
+            {
+                if (std::find(playing.begin(), playing.end(), p) != playing.end())
+                {
+                    ImGui::BulletText("Player %d is playing (controller %d)", p, p);
+                    continue;
+                }
+                char label[40];
+                std::snprintf(label, sizeof(label), "Add player %d", p);
+                if (ImGui::Button(label))
+                {
+                    // In a session: the new window joins it (ours, or the one we
+                    // joined); otherwise we host first.
+                    const kh2coop::Options &co = kh2coop::options();
+                    if (!kh2coop::active() && !kh2coop::host(co.name, co.port))
+                        g_status = "Could not host: " + kh2coop::statusText();
+                    else
+                    {
+                        const std::string address =
+                            kh2coop::isHost() ? "127.0.0.1:" + std::to_string(co.port) : co.join;
+                        std::string err;
+                        g_status = kh2local::spawn(p, address, "Player " + std::to_string(p), p - 1, err)
+                                       ? "Player " + std::to_string(p) + " is starting (controller " +
+                                             std::to_string(p) + ")"
+                                       : "Player " + std::to_string(p) + ": " + err;
+                    }
+                }
+                ImGui::SetItemTooltip("Opens another game window for player %d, with controller %d and their own "
+                                      "memory card (%s); it joins this game. Its sound starts off (Volume, in its menu).",
+                                      p, p, kh2local::memoryCardFolder(p).c_str());
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+        }
+        if (ImGui::Button("Arrange windows"))
+        {
+            const int n = kh2local::arrangeWindows();
+            g_status = "Arranged " + std::to_string(n) + " window" + (n == 1 ? "" : "s");
+        }
+        ImGui::SetItemTooltip("Tile the game windows on this monitor (two side by side; three as one large and two "
+                              "small). Each window also remembers where you put it.");
+    }
+
     ImGui::Separator();
-    if (ImGui::Button("Save settings"))
+    if (kh2local::player() > 1)
+        ImGui::TextDisabled("Settings are saved from player 1's window.");
+    else if (ImGui::Button("Save settings"))
         g_status = save() ? "Saved to " + g_iniPath.filename().string() : "Could not write " + g_iniPath.string();
     ImGui::SameLine();
     if (ImGui::Button("Resume"))

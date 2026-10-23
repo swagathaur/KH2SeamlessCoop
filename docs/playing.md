@@ -312,3 +312,28 @@ host's story:
   them back to where they were when they joined.
 
 Two instances on one PC work too (`--join=127.0.0.1`).
+
+**Local multiplayer (split screen as windows).** Up to three players on one
+PC, each in a game window of their own that you can put wherever you like
+(side by side, one per monitor, ...):
+
+- Settings menu → **Local players** → **Add player 2** / **Add player 3**, or
+  start with `--local-players=2` (or 3). Each opens another copy of the game
+  that joins yours (hosting starts by itself if you were not already hosting
+  or joined to someone; if you joined someone else's game, the new window
+  joins it too). Everything co-op does applies: partners, shared story,
+  shared enemies.
+- **Controllers:** player N reads the Nth connected controller, whether or
+  not their window is the active one (the keyboard goes to the active
+  window). Each window's menu can pick another (**This window's
+  controller**), or start with `--pad=N`.
+- **Saves:** each local player has their own memory card: `mc0` for player
+  1, `mc0-p2` and `mc0-p3` next to the game for the others.
+- **Windows:** each one remembers where you put it and its size, per player
+  (`kh2recomp-windows.ini`). **Arrange windows** tiles them on the current
+  monitor: two side by side, three as one large and two small.
+- The extra windows start with their sound off (turn it up with their
+  menu's Volume), take their settings from player 1 (only player 1's window
+  saves settings), and close when player 1's does.
+- Running two or three copies of the game needs a strong CPU: each is a
+  whole PS2 game.

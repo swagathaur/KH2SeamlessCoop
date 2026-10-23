@@ -23,6 +23,7 @@
 #include "hd_textures.h"
 
 #include <algorithm>
+#include <climits>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -524,6 +525,13 @@ HWND g_hwnd = nullptr;
 std::atomic<bool> g_focused{false};
 std::atomic<uint32_t> g_clientW{0}, g_clientH{0};
 bool g_fullscreen = false;
+void (*g_placedFn)(int, int, int, int) = nullptr;
+void reportPlacement()
+{
+    RECT r;
+    if (g_placedFn && g_hwnd && !g_fullscreen && !IsIconic(g_hwnd) && GetWindowRect(g_hwnd, &r))
+        g_placedFn(r.left, r.top, r.right - r.left, r.bottom - r.top);
+}
 WINDOWPLACEMENT g_windowedPlacement{sizeof(WINDOWPLACEMENT)};
 
 void toggleFullscreen()
@@ -558,8 +566,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_CLOSE:
+        reportPlacement();
         g_closed = true;
         return 0;
+    case WM_EXITSIZEMOVE:
+        reportPlacement();
+        break;
     case WM_SIZE:
         g_clientW = LOWORD(lp);
         g_clientH = HIWORD(lp);
@@ -622,9 +634,29 @@ bool createWindow()
     RegisterClassExW(&wc);
     RECT r{0, 0, (LONG)g_opt.windowWidth, (LONG)g_opt.windowHeight};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Kingdom Hearts II Final Mix (native)", WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst,
-                             nullptr);
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (g_opt.windowOuterW > 100 && g_opt.windowOuterH > 100)
+    {
+        w = g_opt.windowOuterW;
+        h = g_opt.windowOuterH;
+    }
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (g_opt.windowX != INT_MIN && g_opt.windowY != INT_MIN)
+    {
+        // Only where a monitor still is (a saved place on an unplugged screen).
+        const RECT want{g_opt.windowX, g_opt.windowY, g_opt.windowX + w, g_opt.windowY + h};
+        if (MonitorFromRect(&want, MONITOR_DEFAULTTONULL))
+        {
+            x = g_opt.windowX;
+            y = g_opt.windowY;
+        }
+    }
+    std::wstring title(g_opt.title.size() + 1, L'\0');
+    title.resize(size_t(MultiByteToWideChar(CP_UTF8, 0, g_opt.title.c_str(), -1, title.data(), int(title.size())) > 0
+                            ? std::wcslen(title.c_str())
+                            : 0));
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, title.empty() ? L"Kingdom Hearts II Final Mix (native)" : title.c_str(),
+                             WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr, inst, nullptr);
     if (!g_hwnd)
         return false;
     ShowWindow(g_hwnd, SW_SHOW);
@@ -1610,6 +1642,15 @@ bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height)
         p |= 0xFF000000u;
     }
     return true;
+}
+
+void setWindowPlacedCallback(void (*fn)(int, int, int, int))
+{
+#if defined(_WIN32)
+    g_placedFn = fn;
+#else
+    (void)fn;
+#endif
 }
 
 bool windowFocused()

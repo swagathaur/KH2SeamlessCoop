@@ -246,6 +246,7 @@ add_executable(kh2recomp
     port/runtime/cd_callback.cpp
     port/runtime/movie_eof.cpp
     port/runtime/cutscene_skip.cpp
+    port/runtime/local_players.cpp
     port/runtime/english_text.cpp
     port/runtime/gpu_sync.cpp
     port/runtime/file_override.cpp

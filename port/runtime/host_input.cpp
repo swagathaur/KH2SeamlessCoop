@@ -49,6 +49,8 @@ constexpr uint32_t PAD_TRIANGLE = 0x1000u, PAD_CIRCLE = 0x2000u, PAD_CROSS = 0x4
 Options g_opt;
 uint32_t g_prevHeld = 0;
 int g_pad = -1; // XInput user index in use
+std::atomic<int> g_padChoice{-1}; // -1 the first controller; 0.. the Nth connected one; -2 none
+int g_padChoiceSeen = -1;
 unsigned g_scanTick = 0;
 std::atomic<uint16_t> g_rumbleSmall{0}, g_rumbleLarge{0};
 uint16_t g_rumbleSentSmall = 0, g_rumbleSentLarge = 0;
@@ -103,13 +105,27 @@ bool sdlPoll(uint32_t &held, uint8_t &lx, uint8_t &ly, uint8_t &rx, uint8_t &ry)
         std::lock_guard<std::mutex> lock(g_nameMutex);
         g_padName.clear();
     }
+    const int choice = g_padChoice.load();
+    if (choice != g_padChoiceSeen && g_sdlPad)
+    {
+        SDL_CloseGamepad(g_sdlPad); // another controller was chosen
+        g_sdlPad = nullptr;
+        std::lock_guard<std::mutex> lock(g_nameMutex);
+        g_padName.clear();
+    }
+#if !defined(_WIN32)
+    g_padChoiceSeen = choice; // (on Windows, poll() notes it after the XInput side has seen it too)
+#endif
+    if (choice == -2)
+        return false;
     if (!g_sdlPad && (g_sdlScan++ % 60) == 0)
     {
         int count = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&count);
-        if (ids && count > 0)
+        const int want = choice < 0 ? 0 : choice;
+        if (ids && count > want)
         {
-            g_sdlPad = SDL_OpenGamepad(ids[0]);
+            g_sdlPad = SDL_OpenGamepad(ids[want]);
             if (g_sdlPad)
             {
                 const char *name = SDL_GetGamepadName(g_sdlPad);
@@ -236,6 +252,7 @@ float mouseSensitivity() { return g_mouseSensitivity; }
 void init(const Options &options)
 {
     g_opt = options;
+    g_padChoice = options.controller;
 #if defined(KH2_HAVE_SDL3)
     sdlInit();
 #endif
@@ -246,6 +263,8 @@ void setConfirmOnBottom(bool on) { g_opt.confirmOnBottom = on; }
 bool confirmOnBottom() { return g_opt.confirmOnBottom; }
 void setSuppressed(bool on) { g_suppressed = on; }
 void setBlockedButtons(uint32_t mask) { g_blocked = mask; }
+void setController(int choice) { g_padChoice = choice; }
+int controller() { return g_padChoice.load(); }
 uint32_t rawButtons() { return g_rawHeld.load(); }
 uint32_t rawSticks() { return g_rawSticks.load(); }
 void setScriptRaw(uint32_t buttons, uint32_t sticks)
@@ -321,15 +340,25 @@ void poll(bool keyboardFocus)
 #if defined(_WIN32)
     // Look for a pad now and then rather than every call: XInputGetState on an
     // empty slot is slow. (Not when SDL has a pad: it would be the same one.)
-    if (!sdlPad && g_pad < 0 && (g_scanTick++ % 120) == 0)
+    const int choice = g_padChoice.load();
+    if (choice != g_padChoiceSeen)
     {
+        g_pad = -1; // another controller was chosen: look again now
+        g_scanTick = 0;
+    }
+    if (!sdlPad && g_pad < 0 && choice != -2 && (g_scanTick++ % 120) == 0)
+    {
+        // The Nth connected controller (the first by default).
+        int seen = 0;
+        const int want = choice < 0 ? 0 : choice;
         for (DWORD i = 0; i < XUSER_MAX_COUNT && g_pad < 0; ++i)
         {
             XINPUT_STATE st{};
-            if (XInputGetState(i, &st) == ERROR_SUCCESS)
+            if (XInputGetState(i, &st) == ERROR_SUCCESS && seen++ == want)
                 g_pad = static_cast<int>(i);
         }
     }
+    g_padChoiceSeen = choice;
     if (!sdlPad && g_pad >= 0)
     {
         XINPUT_STATE st{};

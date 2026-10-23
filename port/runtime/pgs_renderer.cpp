@@ -1068,6 +1068,75 @@ void present()
 #endif
 } // namespace
 
+
+// Compiled GPU pipelines persist across runs in pipeline_cache.bin next to the
+// executable: paraLLEl-GS compiles a pipeline the first time a new blend or
+// texture setup appears, stalling the frame by 10-170 ms (the "Stalled
+// compile" warnings). With the cache only the first ever run pays for it.
+std::string pipelineCachePath()
+{
+#if defined(_WIN32)
+    char buf[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string path(buf, n);
+    const size_t slash = path.find_last_of("\\/");
+    path = slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+    return path + "pipeline_cache.bin";
+#else
+    return "pipeline_cache.bin";
+#endif
+}
+size_t g_pipelineCacheSaved = 0;
+std::chrono::steady_clock::time_point g_pipelineCacheCheck{};
+
+void loadPipelineCache()
+{
+    std::vector<uint8_t> data;
+    if (FILE *f = std::fopen(pipelineCachePath().c_str(), "rb"))
+    {
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (size > 0)
+        {
+            data.resize(size_t(size));
+            if (std::fread(data.data(), 1, data.size(), f) != data.size())
+                data.clear();
+        }
+        std::fclose(f);
+    }
+    g_device->init_pipeline_cache(data.empty() ? nullptr : data.data(), data.size());
+    g_pipelineCacheSaved = data.size();
+    std::printf("[pgs] pipeline cache: %zu bytes loaded\n", data.size());
+}
+
+// Writes the cache if it grew (at most every 20 s unless forced).
+void savePipelineCache(bool force)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - g_pipelineCacheCheck < std::chrono::seconds(20))
+        return;
+    g_pipelineCacheCheck = now;
+    const size_t size = g_device->get_pipeline_cache_size();
+    if (!size || size == g_pipelineCacheSaved)
+        return;
+    std::vector<uint8_t> data(size);
+    if (!g_device->get_pipeline_cache_data(data.data(), data.size()))
+        return;
+    const std::string path = pipelineCachePath(), tmp = path + ".tmp";
+    if (FILE *f = std::fopen(tmp.c_str(), "wb"))
+    {
+        const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+        std::fclose(f);
+        if (ok)
+        {
+            std::remove(path.c_str());
+            if (std::rename(tmp.c_str(), path.c_str()) == 0)
+                g_pipelineCacheSaved = size;
+        }
+    }
+}
+
 bool init(const Options &options)
 {
     g_opt = options;
@@ -1112,6 +1181,7 @@ bool init(const Options &options)
         g_headlessDevice->set_context(*g_context);
         g_device = g_headlessDevice.get();
     }
+    loadPipelineCache();
     g_device->init_frame_contexts(12);
 
     ResourceLayout layout;
@@ -1186,6 +1256,7 @@ void shutdown()
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     g_device->wait_idle();
+    savePipelineCache(true);
     if (g_gs)
         g_gs->set_texture_replacer(nullptr);
     kh2hd::detach();
@@ -1264,6 +1335,7 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
         std::lock_guard<std::mutex> lock(g_mutex);
         registerThread();
         drainQueue();
+        savePipelineCache(false);
         g_gs->flush();
         // KH2_PGS_VRAM_DUMP=<tick>[,<tick>...]: writes paraLLEl-GS's VRAM
         // (4 MB, swizzled) to vram_<tick>.bin. Diagnostics only.

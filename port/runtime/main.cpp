@@ -114,6 +114,7 @@ struct Options
     bool skipMovies = false;           // --skip-movies
     double speed = 1.0;                // --speed: guest time vs wall time, 0 = as fast as possible
     unsigned profileMs = 0;            // --profile: sampling interval, 0 = off
+    uint64_t profileFrom = 0, profileTo = 0; // --profile-from=F[:T]: only sample guest frames F..T
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
@@ -199,6 +200,7 @@ void usage()
         "  --skip-movies           end each movie as soon as it starts (debugging)\n"
         "  --speed=X               run guest time X times real time (0 = unpaced, as fast as possible)\n"
         "  --profile[=MS]          sample host threads every MS ms (default 1) and print hot functions\n"
+        "  --profile-from=F[:T]    with --profile: only sample from guest frame F (to T)\n"
         "  --dma-log=FRAME,COUNT   decode COUNT GIF-channel DMA chains from this guest frame on\n"
         "  --ee-dump=A,B,..        at these guest frames print EE threads, semaphores and event flags\n"
         "  --watch=ADDR[,ADDR..]   print these guest words (hex and as float) on every status line\n"
@@ -315,6 +317,13 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a.rfind("--trace=", 0) == 0) o.trace = value(a);
         else if (a.rfind("--dma-log=", 0) == 0) o.dmaLog = value(a);
         else if (a == "--profile") o.profileMs = 1;
+        else if (a.rfind("--profile-from=", 0) == 0)
+        {
+            const std::string v = value(a);
+            o.profileFrom = std::stoull(v);
+            if (const size_t c = v.find(':'); c != std::string::npos)
+                o.profileTo = std::stoull(v.substr(c + 1));
+        }
         else if (a == "--skip-movies") o.skipMovies = true;
         else if (a.rfind("--speed=", 0) == 0) o.speed = std::stod(value(a));
         else if (a.rfind("--profile=", 0) == 0) o.profileMs = std::max(1, std::stoi(value(a)));
@@ -956,6 +965,16 @@ bool harnessTick(Harness &h, uint64_t frame)
         }
         std::fflush(stdout);
     }
+    if (o.profileMs && o.profileFrom && due(o.profileFrom))
+    {
+        kh2prof::setRecording(true);
+        std::printf("[profile] recording from frame %llu\n", (unsigned long long)frame);
+    }
+    if (o.profileMs && o.profileTo && due(o.profileTo))
+    {
+        kh2prof::setRecording(false);
+        std::printf("[profile] stopped at frame %llu\n", (unsigned long long)frame);
+    }
     if (o.skipCutscenesUntil && due(o.skipCutscenesUntil))
         kh2skip::setAutoSkip(false);
     // KH2_RAM_DUMP=<frame>[,<frame>...]: writes the 32 MB of guest RAM to
@@ -1488,7 +1507,11 @@ int main(int argc, char **argv)
         std::printf("[harness] host speed %s\n", opt.speed > 0.0 ? std::to_string(opt.speed).c_str() : "unpaced");
     }
     if (opt.profileMs)
+    {
         kh2prof::start(opt.profileMs);
+        if (opt.profileFrom)
+            kh2prof::setRecording(false);
+    }
     // Always: a hang (no host-loop progress for this long) leaves every
     // thread's stack in the log and in crashes\hang-<time>.txt.
     kh2watch::start(opt.watchdog ? opt.watchdog : 15);

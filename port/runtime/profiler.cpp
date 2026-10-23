@@ -36,6 +36,7 @@ namespace kh2prof
 namespace
 {
 std::atomic<bool> g_running{false};
+std::atomic<bool> g_recording{true}; // --profile-from: off until that frame
 std::thread g_thread;
 unsigned g_intervalMs = 1;
 std::unordered_map<DWORD, std::unordered_map<DWORD64, uint32_t>> g_samples; // thread -> ip -> count
@@ -59,6 +60,11 @@ void sampler(DWORD self)
                 if (te.th32OwnerProcessID == pid && te.th32ThreadID != self)
                     threads.push_back(te.th32ThreadID);
             CloseHandle(snap);
+        }
+        if (!g_recording.load(std::memory_order_relaxed))
+        {
+            Sleep(g_intervalMs);
+            continue;
         }
         for (DWORD tid : threads)
         {
@@ -124,6 +130,8 @@ void printTop(const std::map<std::string, uint64_t> &bySym, uint64_t total, int 
                     rows[i].second.c_str());
 }
 } // namespace
+
+void setRecording(bool on) { g_recording = on; }
 
 void start(unsigned intervalMs)
 {
@@ -202,6 +210,7 @@ void stopAndReport()
 namespace kh2prof
 {
 void start(unsigned) { std::printf("[profile] not supported on this platform\n"); }
+void setRecording(bool) {}
 void stopAndReport() {}
 } // namespace kh2prof
 

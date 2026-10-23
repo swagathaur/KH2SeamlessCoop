@@ -875,6 +875,153 @@ public:
     }
 
     // An image's pixels, RGBA with the GS's alpha (0x80 opaque).
+    // The PC's model textures put flat filler between UV islands and a dark
+    // ring around each one, about a disc texel inside the island edges the
+    // disc's UVs were made for; sampled with those UVs, mouths, noses and
+    // other island borders show dark seams. Pushes the island colours a few
+    // pixels out over the filler and the ring (alpha is kept).
+    // KH2_HD_SEAMS=0 turns it off.
+    static void repairSeams(std::vector<uint8_t> &rgba, int w, int h)
+    {
+        const size_t n = size_t(w) * size_t(h);
+        if (n < 64 * 64)
+            return;
+        auto key = [&](size_t i) { return uint32_t(rgba[i * 4]) << 16 | uint32_t(rgba[i * 4 + 1]) << 8 | rgba[i * 4 + 2]; };
+        auto at = [&](int x, int y) { return size_t(std::clamp(y, 0, h - 1)) * size_t(w) + size_t(std::clamp(x, 0, w - 1)); };
+        std::vector<uint8_t> flat(n, 0), gut(n, 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const uint32_t k = key(size_t(y) * size_t(w) + size_t(x));
+                bool f = true;
+                for (int dy = -1; dy <= 1 && f; ++dy)
+                    for (int dx = -1; dx <= 1 && f; ++dx)
+                        f = key(at(x + dx, y + dy)) == k;
+                flat[size_t(y) * size_t(w) + size_t(x)] = f;
+            }
+        // Flat pixels and the edge pixels of the same colour around them.
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const size_t i = size_t(y) * size_t(w) + size_t(x);
+                if (flat[i])
+                {
+                    gut[i] = 1;
+                    continue;
+                }
+                const uint32_t k = key(i);
+                for (int dy = -1; dy <= 1 && !gut[i]; ++dy)
+                    for (int dx = -1; dx <= 1 && !gut[i]; ++dx)
+                    {
+                        const int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= w || yy >= h)
+                            continue;
+                        const size_t j = size_t(yy) * size_t(w) + size_t(xx);
+                        gut[i] = flat[j] && key(j) == k;
+                    }
+            }
+        // Keep big mid-tone regions only: compression leaves small flat
+        // blocks inside paintings, and black or white flat areas (checks,
+        // ink) are part of the picture.
+        const size_t minArea = std::max<size_t>(64, n / 4096);
+        std::vector<int32_t> stack;
+        std::vector<uint8_t> seen(n, 0);
+        std::vector<size_t> members;
+        for (size_t s = 0; s < n; ++s)
+        {
+            if (!gut[s] || seen[s])
+                continue;
+            members.clear();
+            const uint32_t k = key(s);
+            stack.push_back(int32_t(s));
+            seen[s] = 1;
+            while (!stack.empty())
+            {
+                const size_t i = size_t(stack.back());
+                stack.pop_back();
+                members.push_back(i);
+                const int x = int(i % size_t(w)), y = int(i / size_t(w));
+                const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+                for (int d = 0; d < 4; ++d)
+                {
+                    if (nx[d] < 0 || ny[d] < 0 || nx[d] >= w || ny[d] >= h)
+                        continue;
+                    const size_t j = size_t(ny[d]) * size_t(w) + size_t(nx[d]);
+                    if (gut[j] && !seen[j] && key(j) == k)
+                    {
+                        seen[j] = 1;
+                        stack.push_back(int32_t(j));
+                    }
+                }
+            }
+            const float lum = 0.299f * float(rgba[s * 4]) + 0.587f * float(rgba[s * 4 + 1]) + 0.114f * float(rgba[s * 4 + 2]);
+            if (members.size() < minArea || lum <= 24.0f || lum >= 232.0f)
+                for (size_t i : members)
+                    gut[i] = 0;
+        }
+        // Unknown: the filler and a one-pixel ring of island around it.
+        std::vector<uint8_t> known(n, 1);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const size_t i = size_t(y) * size_t(w) + size_t(x);
+                if (gut[i])
+                {
+                    known[i] = 0;
+                    continue;
+                }
+                for (int dy = -1; dy <= 1 && known[i]; ++dy)
+                    for (int dx = -1; dx <= 1 && known[i]; ++dx)
+                    {
+                        const int xx = x + dx, yy = y + dy;
+                        if (xx >= 0 && yy >= 0 && xx < w && yy < h && gut[size_t(yy) * size_t(w) + size_t(xx)])
+                            known[i] = 0;
+                    }
+            }
+        // Grow the islands outwards, a pixel per pass.
+        const int passes = std::clamp(std::max(w, h) / 128, 3, 12);
+        std::vector<uint8_t> next;
+        std::vector<size_t> grown;
+        for (int p = 0; p < passes; ++p)
+        {
+            next = rgba;
+            grown.clear();
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const size_t i = size_t(y) * size_t(w) + size_t(x);
+                    if (known[i])
+                        continue;
+                    unsigned sum[3] = {0, 0, 0}, cnt = 0;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            const int xx = x + dx, yy = y + dy;
+                            if ((dx || dy) && xx >= 0 && yy >= 0 && xx < w && yy < h)
+                            {
+                                const size_t j = size_t(yy) * size_t(w) + size_t(xx);
+                                if (known[j])
+                                {
+                                    for (int c = 0; c < 3; ++c)
+                                        sum[c] += rgba[j * 4 + size_t(c)];
+                                    ++cnt;
+                                }
+                            }
+                        }
+                    if (!cnt)
+                        continue;
+                    for (int c = 0; c < 3; ++c)
+                        next[i * 4 + size_t(c)] = uint8_t((sum[c] + cnt / 2) / cnt);
+                    grown.push_back(i);
+                }
+            if (grown.empty())
+                break;
+            rgba.swap(next);
+            for (size_t i : grown)
+                known[i] = 1;
+        }
+    }
+
     bool pixels(int entry, int &w, int &h, std::vector<uint8_t> &rgba)
     {
         const std::string &ref = m_entries[size_t(entry)].path;
@@ -912,6 +1059,23 @@ public:
             std::fprintf(stderr, "[hd] cannot load %s\n", path.c_str());
             return false;
         }
+        // Debugging: KH2_HD_DUMP_ENTRY=<text> writes the decoded images whose source
+        // contains <text> to scratch/hd_<entry>_<w>x<h>.rgba.
+        if (const char *want = std::getenv("KH2_HD_DUMP_ENTRY"))
+            if (m_entries[size_t(entry)].source.find(want) != std::string::npos)
+            {
+                char name[128];
+                std::snprintf(name, sizeof(name), "scratch/hd_%d_%dx%d.rgba", entry, w, h);
+                if (FILE *f = std::fopen(name, "wb"))
+                {
+                    std::fwrite(rgba.data(), 1, rgba.size(), f);
+                    std::fclose(f);
+                    std::printf("[hd] wrote %s (%s)\n", name, m_entries[size_t(entry)].path.c_str());
+                }
+            }
+        static const bool seams = [] { const char *e = std::getenv("KH2_HD_SEAMS"); return !e || *e != '0'; }();
+        if (seams && m_entries[size_t(entry)].source.rfind("obj/", 0) == 0)
+            repairSeams(rgba, w, h);
         static const bool tint = std::getenv("KH2_HD_TINT") != nullptr; // debugging: replaced = red
         for (size_t i = 0, n = size_t(w) * size_t(h); i < n; ++i)
         {

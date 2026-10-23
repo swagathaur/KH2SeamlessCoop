@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "protocol.h"
+#include "nat.h"
 #include "udp_socket.h"
 
 namespace kh2net
@@ -22,6 +23,8 @@ struct SessionConfig
     uint16_t port = kDefaultPort; // host: port to listen on; client: 0 = any
     double timeout = 5.0;      // seconds of silence before a peer is dropped
     float simulatedLoss = 0;   // testing: drop this fraction of outgoing packets
+    bool openPort = false;     // host: ask the router to forward the port (UPnP / NAT-PMP)
+    bool discover = false;     // ask a public STUN server how the internet sees us (the game turns both on)
 };
 
 struct PeerInfo
@@ -69,6 +72,16 @@ public:
     std::vector<PeerInfo> roster() const;
     const std::string &lastError() const { return m_error; }
     uint16_t port() const { return m_socket.localPort(); }
+    // How the internet sees this session's socket (STUN), once known.
+    const Address &publicAddress() const { return m_public; }
+    // The address to give other players: the router's forwarded port when it
+    // opened one, else the STUN answer (invalid until one is known).
+    Address shareAddress() const;
+    // Host: what the router said about forwarding the port.
+    PortMapper::Status portMapping() const { return m_mapper.status(); }
+    // Host: let a player in whose router does not let us in on its own (hole
+    // punching): send to their public address for 30 s while they join.
+    void invite(const Address &player);
 
     std::function<void(const PlayerState &)> onState;
     std::function<void(const EnemyStates &)> onEnemies; // clients
@@ -98,6 +111,22 @@ private:
     double m_connectStart = 0, m_lastConnectSend = -1e9;
     double m_now = 0;
     std::vector<RosterEntry> m_roster;
+    // NAT traversal (nat.h).
+    struct StunServers;
+    void stunStep(double now);
+    void startDiscovery();
+    PortMapper m_mapper;
+    std::shared_ptr<StunServers> m_stunServers;
+    Address m_public;
+    uint8_t m_stunTx[12] = {};
+    int m_stunTries = 0;
+    double m_stunNext = 0;
+    struct Invite
+    {
+        Address address;
+        double until = 0, next = 0;
+    };
+    std::vector<Invite> m_invites;
     uint32_t m_rng = 0x12345678u;
 };
 } // namespace kh2net

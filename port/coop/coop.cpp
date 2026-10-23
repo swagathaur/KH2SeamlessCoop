@@ -410,6 +410,8 @@ kh2net::SessionConfig config(const std::string &name, uint16_t port)
     c.gameCrc = kGameCrc;
     c.port = port;
     c.simulatedLoss = g_opt.simulatedLoss;
+    c.openPort = g_opt.openPort;
+    c.discover = true;
     return c;
 }
 } // namespace
@@ -796,6 +798,55 @@ std::string statusText()
     default:
         return "Not connected";
     }
+}
+
+NatInfo natInfo()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    NatInfo n;
+    if (!g_session)
+        return n;
+    using S = kh2net::Session::Status;
+    n.hosting = g_session->status() == S::Hosting;
+    n.connecting = g_session->status() == S::Connecting;
+    if (g_session->publicAddress().valid())
+        n.mine = g_session->publicAddress().str();
+    if (n.hosting)
+    {
+        const kh2net::Address share = g_session->shareAddress();
+        if (share.valid() && share.ip != 0)
+            n.share = share.str();
+        const kh2net::PortMapper::Status pm = g_session->portMapping();
+        using M = kh2net::PortMapper::State;
+        switch (pm.state)
+        {
+        case M::Idle:
+            n.router = "Not asking the router to open the port (forward UDP " + std::to_string(g_session->port()) +
+                       " yourself, or use Let in)";
+            break;
+        case M::Working:
+            n.router = "Asking the router to open the port...";
+            break;
+        case M::Mapped:
+            n.router = "The router opened the port (" + pm.method + ")" + (pm.detail.empty() ? "" : ": " + pm.detail);
+            break;
+        case M::Failed:
+            n.router = "The router did not open the port (" + pm.detail + "). Players outside your network: "
+                       "forward UDP " + std::to_string(g_session->port()) + " on the router, or use Let in";
+            break;
+        }
+    }
+    return n;
+}
+
+bool letIn(const std::string &address)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    kh2net::Address a;
+    if (!g_session || !g_session->isHost() || !kh2net::Address::parse(address, kh2net::kDefaultPort, a))
+        return false;
+    g_session->invite(a);
+    return true;
 }
 
 std::vector<RemotePlayer> remotes()

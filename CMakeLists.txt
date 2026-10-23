@@ -273,6 +273,7 @@ add_executable(kh2recomp
     port/coop/net/protocol.cpp
     port/coop/net/channel.cpp
     port/coop/net/session.cpp
+    port/coop/net/nat.cpp
     ${KH2_PATCH_SOURCES}
     "${KH2_GENERATED_DIR}/overlays/overlay_registry.cpp")
 target_include_directories(kh2recomp PRIVATE port/runtime port/coop ${KH2_RUNTIME_INCLUDES}
@@ -302,10 +303,10 @@ option(KH2_BUILD_TESTS "Build the tests that need no game (co-op network, key bi
 if(KH2_BUILD_TESTS)
     enable_testing()
     add_executable(coop_net_test tests/coop_net_test.cpp
-        port/coop/net/udp_socket.cpp port/coop/net/protocol.cpp port/coop/net/channel.cpp port/coop/net/session.cpp)
+        port/coop/net/udp_socket.cpp port/coop/net/protocol.cpp port/coop/net/channel.cpp port/coop/net/session.cpp port/coop/net/nat.cpp)
     target_include_directories(coop_net_test PRIVATE port/coop/net)
     if(WIN32)
-        target_link_libraries(coop_net_test PRIVATE ws2_32)
+        target_link_libraries(coop_net_test PRIVATE ws2_32 iphlpapi)
     endif()
     add_test(NAME coop_net COMMAND coop_net_test)
     add_executable(key_bindings_test tests/key_bindings_test.cpp port/runtime/key_bindings.cpp)
@@ -313,7 +314,7 @@ if(KH2_BUILD_TESTS)
     add_test(NAME key_bindings COMMAND key_bindings_test)
 endif()
 if(WIN32)
-    target_link_libraries(kh2recomp PRIVATE ws2_32)
+    target_link_libraries(kh2recomp PRIVATE ws2_32 iphlpapi)
 endif()
 if(KH2_SDL3)
     target_link_libraries(kh2recomp PRIVATE SDL3::SDL3-static)

@@ -14,6 +14,7 @@
 // (writeEnemyStates; host only), Roster, GameEvent (origin u8, type u16,
 // data; GameEventType below).
 //   Disconnect sender u8
+//   Punch      (nothing): hole punching, see nat.h
 #pragma once
 
 #include <cstdint>
@@ -24,7 +25,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 4;
+constexpr uint8_t kProtocolVersion = 5;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -36,6 +37,7 @@ enum class PacketKind : uint8_t
     Reject = 3,
     Data = 4,
     Disconnect = 5,
+    Punch = 6, // no body: opens the sender's router toward us (hole punching); ignored
 };
 
 enum class RejectReason : uint8_t

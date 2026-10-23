@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <mutex>
+#include <thread>
 
 #include "channel.h"
 
@@ -10,7 +13,7 @@ namespace kh2net
 namespace
 {
 constexpr double kConnectRetry = 0.25;
-constexpr double kConnectGiveUp = 10.0;
+constexpr double kConnectGiveUp = 30.0; // time for the host to let us in (hole punching)
 
 void header(ByteWriter &w, PacketKind kind)
 {
@@ -19,6 +22,14 @@ void header(ByteWriter &w, PacketKind kind)
     w.u8(static_cast<uint8_t>(kind));
 }
 } // namespace
+
+// STUN server addresses, looked up on a thread of their own (name lookups
+// can take a while; the game loop must not wait).
+struct Session::StunServers
+{
+    std::mutex mutex;
+    std::vector<Address> list;
+};
 
 struct Session::Peer
 {
@@ -65,6 +76,9 @@ bool Session::host(const SessionConfig &config)
     }
     m_status = Status::Hosting;
     m_localId = 0;
+    if (config.openPort)
+        m_mapper.start(m_socket.localPort());
+    startDiscovery();
     m_roster = {RosterEntry{0, config.name}};
     log("hosting on port " + std::to_string(m_socket.localPort()));
     return true;
@@ -84,6 +98,7 @@ bool Session::join(const SessionConfig &config, const Address &hostAddress)
     m_nonce = m_rng | 1u;
     m_hostAddress = hostAddress;
     m_status = Status::Connecting;
+    startDiscovery();
     m_connectStart = -1; // set on the first update
     m_lastConnectSend = -1e9;
     log("joining " + hostAddress.str());
@@ -104,6 +119,10 @@ void Session::leave()
     m_peers.clear();
     m_roster.clear();
     m_socket.close();
+    m_mapper.stop();
+    m_stunServers.reset();
+    m_public = Address{};
+    m_invites.clear();
     if (m_status != Status::Failed)
         m_status = Status::Offline;
 }
@@ -209,6 +228,24 @@ void Session::update(double now)
     if (!m_socket.isOpen())
         return;
     receiveAll(now);
+    stunStep(now);
+    for (size_t i = m_invites.size(); i-- > 0;)
+    {
+        Invite &inv = m_invites[i];
+        if (now > inv.until || std::any_of(m_peers.begin(), m_peers.end(), [&](const auto &p) { return p->address == inv.address; }))
+        {
+            m_invites.erase(m_invites.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (now >= inv.next)
+        {
+            inv.next = now + 0.25;
+            std::vector<uint8_t> pkt;
+            ByteWriter w(pkt);
+            header(w, PacketKind::Punch);
+            sendRaw(inv.address, pkt);
+        }
+    }
 
     if (m_status == Status::Connecting)
     {
@@ -254,12 +291,89 @@ void Session::update(double now)
         }
 }
 
+void Session::startDiscovery()
+{
+    m_public = Address{};
+    m_stunTries = 0;
+    m_stunNext = 0;
+    m_stunServers.reset();
+    if (!m_config.discover)
+        return;
+    auto servers = std::make_shared<StunServers>();
+    m_stunServers = servers;
+    std::thread([servers] {
+        for (const std::string &name : stun::servers())
+        {
+            Address a;
+            if (Address::parse(name, 3478, a))
+            {
+                std::lock_guard<std::mutex> lock(servers->mutex);
+                servers->list.push_back(a);
+            }
+        }
+    }).detach();
+}
+
+void Session::stunStep(double now)
+{
+    // Up to 3 tries with each server, half a second apart, until one answers.
+    if (!m_stunServers || m_public.valid() || now < m_stunNext || m_stunTries >= 9)
+        return;
+    Address server;
+    {
+        std::lock_guard<std::mutex> lock(m_stunServers->mutex);
+        if (m_stunServers->list.empty())
+            return; // still looking them up
+        server = m_stunServers->list[static_cast<size_t>(m_stunTries / 3) % m_stunServers->list.size()];
+    }
+    if (m_stunTries % 3 == 0)
+        for (uint8_t &b : m_stunTx)
+        {
+            m_rng = m_rng * 1664525u + 1013904223u;
+            b = static_cast<uint8_t>(m_rng >> 24);
+        }
+    ++m_stunTries;
+    m_stunNext = now + 0.5;
+    const std::vector<uint8_t> req = stun::bindingRequest(m_stunTx);
+    m_socket.send(server, req.data(), req.size());
+}
+
+Address Session::shareAddress() const
+{
+    const PortMapper::Status pm = m_mapper.status();
+    if (pm.state == PortMapper::State::Mapped && pm.external.ip != 0)
+        return pm.external;
+    if (pm.state == PortMapper::State::Mapped && m_public.valid())
+        return Address{m_public.ip, pm.external.port}; // the router did not say its address
+    return m_public;
+}
+
+void Session::invite(const Address &player)
+{
+    if (!isHost() || !player.valid())
+        return;
+    m_invites.push_back(Invite{player, m_now + 30.0, 0});
+    log("letting in " + player.str() + " (30 s)");
+}
+
 void Session::receiveAll(double now)
 {
     uint8_t buf[2048];
     Address from;
     for (int n; (n = m_socket.receive(from, buf, sizeof(buf))) >= 0;)
     {
+        if (stun::looksLikeStun(buf, static_cast<size_t>(n)))
+        {
+            Address mapped;
+            uint8_t tx[12];
+            if (!m_public.valid() && stun::parseResponse(buf, static_cast<size_t>(n), mapped, tx) &&
+                std::memcmp(tx, m_stunTx, sizeof(tx)) == 0)
+            {
+                m_public = mapped;
+                log("the internet sees this session as " + mapped.str());
+            }
+            continue;
+        }
         ByteReader r(buf, static_cast<size_t>(n));
         if (r.u16() != kMagic)
             continue;
@@ -323,6 +437,8 @@ void Session::receiveAll(double now)
                 handleData(**peerIt, r, now);
             }
             break;
+        case PacketKind::Punch:
+            break; // it got here: that was the point
         case PacketKind::Disconnect:
             if (peerIt != m_peers.end())
             {

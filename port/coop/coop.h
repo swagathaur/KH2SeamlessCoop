@@ -19,6 +19,7 @@ struct Options
     uint64_t joinAtFrame = 0;  // testing: join once the game reaches this frame
     uint16_t port = kh2net::kDefaultPort;
     float simulatedLoss = 0;
+    bool openPort = true;       // host: ask the router to forward the port (UPnP / NAT-PMP)
     bool followHost = false;    // clients warp to the host's room when it changes
     bool sharedEnemies = true;  // clients follow the host's enemies (enemies.h)
     bool sharedStory = true;    // clients play in the host's story, rooms and cutscenes (story.h)
@@ -69,6 +70,17 @@ bool sharedStory();
 bool active();
 bool isHost();
 std::string statusText();
+// Getting through routers (net/nat.h), for the menu.
+struct NatInfo
+{
+    bool hosting = false, connecting = false;
+    std::string share;     // host: the address to give the others ("" until known)
+    std::string router;    // host: what the router said about forwarding the port
+    std::string mine;      // this player's public address (STUN), "" until known
+};
+NatInfo natInfo();
+// Host: let in a player whose router keeps us out (hole punching, 30 s).
+bool letIn(const std::string &address);
 std::vector<RemotePlayer> remotes();
 std::vector<std::string> recentLog();
 const Options &options();

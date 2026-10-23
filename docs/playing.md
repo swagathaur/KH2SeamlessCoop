@@ -260,8 +260,21 @@ stand-in partner that copies you, a second behind, in the first companion's
 place without a network.
 
 - **Host**: settings menu (F1) → Co-op → **Host**, or start with `--host`
-  (UDP port 27552; `--host=PORT` for another). Others need to reach that port:
-  same network, or forward it on your router.
+  (UDP port 27552; `--host=PORT` for another). The game asks your router to
+  open that port (UPnP or NAT-PMP, which most home routers have on; it is
+  closed again when you stop hosting; `--no-upnp` to not ask), and asks a
+  public STUN server how the internet sees you: the menu then shows **the
+  address to give the others** (with a Copy button) and what the router said.
+  If the router would not open the port, forward UDP 27552 to this PC
+  yourself, or let players in one by one (below).
+- **Let in** (when someone cannot get in): while joining, a player's Co-op
+  menu shows *their* address. They send it to you, you type it under **Let
+  in**, and they press **Join** again within 30 seconds: both games send to
+  each other at once, which gets through most home routers (hole punching).
+  Some mobile and carrier-grade networks map every connection differently
+  and cannot be punched through; one of the two needs a forwarded port then.
+- `--nat-test` prints what your router supports and how the internet sees
+  you, without opening anything.
 - **Join**: menu → Co-op → type the host's address → **Join**, or
   `--join=1.2.3.4` (`:PORT` if not the default). `--name=Riku` sets your name.
 - Everyone must run the same game build; the host checks.

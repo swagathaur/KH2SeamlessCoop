@@ -52,6 +52,7 @@
 #include "partners.h"
 #include "hits.h"
 #include "story.h"
+#include "net/nat.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
@@ -125,6 +126,7 @@ struct Options
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
     std::set<uint64_t> actorsAt;       // --actors-at: print the object list
+    bool natTest = false;              // --nat-test
     uint64_t storySaveTest = 0;        // --story-save-test: make a save image and check whose story it holds
     std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
@@ -271,6 +273,8 @@ void usage()
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
         "  --no-shared-enemies     co-op client: keep your own enemies instead of the host's\n"
         "  --no-shared-story       co-op client: keep your own story instead of playing in the host's\n"
+        "  --no-upnp               co-op host: do not ask the router to open the port (UPnP / NAT-PMP)\n"
+        "  --nat-test              print what the router and a STUN server say (no port is opened), then exit\n"
         "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
         "  --mash-until=FRAME      stop --mash at this guest frame\n"
         "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
@@ -446,6 +450,8 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a == "--follow-host") o.coop.followHost = true;
         else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
         else if (a == "--no-shared-story") o.coop.sharedStory = false;
+        else if (a == "--no-upnp") o.coop.openPort = false;
+        else if (a == "--nat-test") o.natTest = true;
         else if (a == "--mark-actors") o.markActors = true;
         else if (a == "--no-settings") {} // handled before parsing
         else if (a.rfind("--hurt-enemies=", 0) == 0)
@@ -1364,7 +1370,7 @@ std::vector<std::string> readSettings(const char *argv0)
             // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
             static const std::set<std::string> kSwitches = {
                 "backbuffer-promotion", "english", "follow-host", "hd-log", "hd-textures", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mipmaps", "no-mouse-camera",
-                "no-name-tags", "no-rumble", "no-shared-enemies", "no-shared-story", "no-ssaa-textures", "pause-unfocused", "profile", "show-fps",
+                "no-name-tags", "no-rumble", "no-shared-enemies", "no-shared-story", "no-ssaa-textures", "no-upnp", "pause-unfocused", "profile", "show-fps",
                 "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
             const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
             const bool off = val == "0" || val == "false" || val == "no" || val == "off";
@@ -1433,6 +1439,12 @@ int main(int argc, char **argv)
     {
         usage();
         return kExitUsage;
+    }
+    if (opt.natTest)
+    {
+        std::printf("%s", kh2net::probe().c_str());
+        std::fflush(stdout);
+        return 0;
     }
     if (opt.listPatches)
     {

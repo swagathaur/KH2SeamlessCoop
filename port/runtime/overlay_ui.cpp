@@ -331,13 +331,49 @@ void draw()
             std::snprintf(address, sizeof(address), "%s", kh2coop::options().join.c_str());
         }
         ImGui::TextUnformatted(kh2coop::statusText().c_str());
-        if (!kh2coop::active())
+        // Getting through routers (net/nat.h).
+        const kh2coop::NatInfo nat = kh2coop::natInfo();
+        if (nat.hosting)
+        {
+            ImGui::TextWrapped("%s", nat.router.c_str());
+            if (!nat.share.empty())
+            {
+                ImGui::Text("Address to give the others: %s", nat.share.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Copy##share"))
+                    ImGui::SetClipboardText(nat.share.c_str());
+            }
+            else
+                ImGui::TextDisabled("Finding your public address...");
+            static char invite[64] = "";
+            ImGui::SetNextItemWidth(180);
+            ImGui::InputTextWithHint("##invite", "their address", invite, sizeof(invite));
+            ImGui::SameLine();
+            if (ImGui::Button("Let in") && invite[0])
+                kh2coop::letIn(invite);
+            ImGui::SetItemTooltip("If someone cannot get in: they send you the address their Co-op menu shows while "
+                                  "joining, you press Let in, and they press Join again (within 30 s)");
+        }
+        if (nat.connecting)
+        {
+            if (!nat.mine.empty())
+            {
+                ImGui::TextWrapped("Your address: %s. If joining does not work, send it to the host to Let in.",
+                                   nat.mine.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Copy##mine"))
+                    ImGui::SetClipboardText(nat.mine.c_str());
+            }
+            if (ImGui::Button("Cancel"))
+                kh2coop::leave();
+        }
+        if (!kh2coop::active() && !nat.connecting)
         {
             ImGui::InputText("Your name", name, sizeof(name));
             if (ImGui::Button("Host"))
                 kh2coop::host(name, kh2coop::options().port);
-            ImGui::SetItemTooltip("Others join with your IP address (port %u, UDP, must be reachable)",
-                                  unsigned(kh2coop::options().port));
+            ImGui::SetItemTooltip("Others join with the address shown once hosting (UDP port %u; the router is asked "
+                                  "to open it)", unsigned(kh2coop::options().port));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(180);
             ImGui::InputTextWithHint("##addr", "host IP[:port]", address, sizeof(address));

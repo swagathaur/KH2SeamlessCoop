@@ -10,8 +10,8 @@
 //
 //  - Look: the companion's objentry record (and its weapon's) is dressed in
 //    the other player's model, motion set and weapon, as puppets.cpp does for
-//    NPCs. It takes effect when the room's objects are next made (the next
-//    room change).
+//    NPCs. It takes effect when the room's objects are next made: the next
+//    room change, or a reload of the room coop.cpp makes when someone joins.
 //  - Control: its AI is switched off (object +0x10C |= 0x200000, the "may
 //    act" check), and its position, facing and motion follow the other
 //    player's, through the puppets' matrix hook (overrides channel 1).
@@ -86,4 +86,8 @@ void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp);
 // the puppets).
 std::vector<Link> links();
 bool linked(uint8_t playerId);
+// A partner in our room still wears the companion's own look: true once,
+// when the room should be reloaded to show theirs (coop.cpp does that when
+// the player is free to move, and puts them back where they stood).
+bool takeRefreshRequest();
 } // namespace kh2partner

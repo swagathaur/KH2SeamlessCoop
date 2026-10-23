@@ -233,8 +233,10 @@ they take the place of your first companion (Donald, or whoever the world
 puts in that slot; a second player takes the second companion's place), in
 the way Dark Souls III's seamless co-op puts a friend in your world:
 
-- They look like themselves, with their own weapon, from the next room you
-  enter (the companion's files are swapped when a room loads).
+- They look like themselves, with their own weapon. When someone joins (or
+  changes look, e.g. a drive form), the room reloads once you are free to
+  move and out of battle, and puts you back where you stood.
+- While they are in another room, your companion waits out of sight.
 - The companion stops acting on its own: it stands, walks and moves where
   that player does in their game, playing their motions.
 - The party HUD shows their HP and MP. Healing them works as healing a party

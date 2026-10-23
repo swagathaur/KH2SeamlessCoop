@@ -50,6 +50,16 @@ bool g_resendLoadout = false;
 bool g_testPartner = false;
 std::deque<kh2partner::Remote> g_echo;
 bool g_partnersReset = false; // undo the partners on the next tick (session over)
+// Reloading the room so partners show their own look (partners.h): wanted,
+// then the map jump under way, then the player put back where they stood.
+struct Refresh
+{
+    bool wanted = false, jumping = false, sawJump = false;
+    uint8_t world = 0, room = 0;
+    float pos[4] = {0, 0, 0, 1}, dir[4] = {0, 0, 1, 0};
+    double since = 0, landed = 0;
+};
+Refresh g_refresh;
 
 
 double now()
@@ -291,6 +301,8 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::PartnerHeal), data);
         addLog("healed player " + std::to_string(h.playerId + 1) + " for " + std::to_string(h.hp) + " HP");
     }
+    if (kh2partner::takeRefreshRequest())
+        g_refresh.wanted = true;
     for (const kh2partner::Heal &h : g_healsIn)
         kh2partner::applyHeal(ram, h.hp, h.mp);
     g_healsIn.clear();
@@ -309,6 +321,55 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
     }
 }
 
+// Reload the room (same room, same door) when the player is free to move, and
+// put them back where they were once it has loaded.
+void stepRefresh(uint8_t *ram)
+{
+    Refresh &r = g_refresh;
+    if (!r.wanted && !r.jumping)
+        return;
+    const kh2state::State st = kh2state::read(ram);
+    uint32_t task = 0, player = 0;
+    std::memcpy(&task, ram + kh2state::addr::MapJumpTask, 4);
+    std::memcpy(&player, ram + kh2state::addr::PlayerPtr, 4);
+    if (r.wanted && !r.jumping)
+    {
+        if (!st.player.valid || st.control != 0 || st.battle != 0 || task || st.now.world == 0)
+            return;
+        r.wanted = false;
+        r.jumping = true;
+        r.sawJump = false;
+        r.world = st.now.world;
+        r.room = st.now.room;
+        std::memcpy(r.pos, ram + ((player + kh2state::addr::ObjPos) & 0x01FFFFFFu), sizeof(r.pos));
+        std::memcpy(r.dir, ram + ((player + kh2state::addr::ObjDir) & 0x01FFFFFFu), sizeof(r.dir));
+        r.since = now();
+        addLog("reloading the room to show your partners");
+        warpLocked(st.now.world, st.now.room, st.now.door);
+        return;
+    }
+    if (task)
+        r.sawJump = true;
+    if (now() - r.since > 20.0)
+    {
+        r.jumping = false; // gave up
+        return;
+    }
+    if (!r.sawJump || task || !st.player.valid || st.now.world != r.world || st.now.room != r.room)
+    {
+        r.landed = 0;
+        return;
+    }
+    // Let the room finish placing everyone first.
+    if (r.landed == 0)
+        r.landed = now();
+    if (now() - r.landed < 0.3)
+        return;
+    std::memcpy(ram + ((player + kh2state::addr::ObjPos) & 0x01FFFFFFu), r.pos, sizeof(r.pos));
+    std::memcpy(ram + ((player + kh2state::addr::ObjDir) & 0x01FFFFFFu), r.dir, sizeof(r.dir));
+    r.jumping = false;
+}
+
 void tick(const uint8_t *rdram, uint64_t guestFrame)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -323,6 +384,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         if (g_testPartner)
             updatePartners(ram, guestFrame);
     }
+    stepRefresh(ram);
     if (!g_session)
     {
         kh2puppets::update(rdram, {});

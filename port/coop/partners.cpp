@@ -194,7 +194,10 @@ struct State
     int slot = 0;
     uint16_t companionEntry = 0, companionWeapon = 0;
     uint32_t object = 0;         // the companion object we drive
-    bool dressedAtCreation = false;
+    uint16_t lookAtCreation = 0;  // whose look its entry had when the object was made (0: its own)
+    bool dressedAtCreation = false; // ... and that is the player's current look
+    uint16_t modelSeen = 0;
+    bool refreshAsked = false;   // we asked for the room to be reloaded for this object
     uint32_t flagsBefore = 0;
     uint16_t motion = 0xFFFF;
     uint16_t weaponSeen = 0;
@@ -207,6 +210,7 @@ struct State
 };
 std::map<uint8_t, State> g_states; // under g_mutex
 std::vector<Link> g_links;          // under g_mutex
+bool g_wantRefresh = false;         // under g_mutex
 
 void releaseObject(uint8_t *rdram, State &s)
 {
@@ -344,6 +348,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     }
 
     g_links.clear();
+    g_wantRefresh = false;
     for (size_t i = 0; i < order.size(); ++i)
     {
         const Remote &r = *order[i];
@@ -356,7 +361,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
                 c = &x;
 
         // Was the object made in a player's look? (Asked before dressing now.)
-        const bool wasDressed = c && dressedAs(c->entry) != 0;
+        const uint16_t lookNow = c ? dressedAs(c->entry) : 0;
         // Look: the companion's entry (and weapon) wear the player's.
         if (c && c->entry != s.companionEntry)
         {
@@ -388,20 +393,41 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             if (obj)
             {
                 s.flagsBefore = rd<uint32_t>(rdram, obj + kObjFlags);
-                s.dressedAtCreation = wasDressed;
+                s.lookAtCreation = lookNow;
+                s.refreshAsked = false;
                 std::printf("[partner] player %u is %s (party slot %d, %s)\n", r.playerId + 1, c->name, s.slot,
-                            s.dressedAtCreation ? "in their own look" : "their look from the next room on");
+                            lookNow ? "in a partner's look" : "their look from the next room on");
                 std::fflush(stdout);
             }
         }
 
+        if (r.model && r.model != s.modelSeen)
+        {
+            s.modelSeen = r.model; // a new look (a drive form): worth another reload
+            s.refreshAsked = false;
+        }
+        // Their current look (a drive form changes it) against the object's.
+        s.dressedAtCreation = obj && s.lookAtCreation && s.lookAtCreation == r.model;
         const bool here = obj && r.present && r.world == st.now.world && r.room == st.now.room;
+        // Elsewhere (another room, loading): the companion waits out of sight,
+        // still and out of reach, rather than acting in a look its AI does not
+        // know.
+        const bool away = obj && s.lookAtCreation && !here;
         if (obj)
         {
             uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
-            const uint32_t want = here ? (flags | kNoAct) : ((flags & ~kNoAct) | (s.flagsBefore & kNoAct));
+            const uint32_t want = (here || away) ? (flags | kNoAct) : ((flags & ~kNoAct) | (s.flagsBefore & kNoAct));
             if (want != flags)
                 wr<uint32_t>(rdram, obj + kObjFlags, want);
+        }
+        if (away && st.player.valid)
+        {
+            kh2puppets::Override o;
+            o.object = obj;
+            o.pos[0] = st.player.pos[0];
+            o.pos[1] = st.player.pos[1] + 50000.0f; // far below (up is -y)
+            o.pos[2] = st.player.pos[2];
+            overrides.push_back(o);
         }
         if (here)
         {
@@ -452,6 +478,10 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
 
         if (st.now.world != 0 && st.now.world < 19)
             syncRecord(rdram, s, r, st.now.world);
+
+        // In our room in the old look: a reload of the room shows theirs now.
+        if (here && !s.dressedAtCreation && r.model && dressedAs(s.companionEntry) == r.model && !s.refreshAsked)
+            g_wantRefresh = true;
 
         Link l;
         l.playerId = r.playerId;
@@ -532,6 +562,18 @@ std::vector<Link> links()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_links;
+}
+
+bool takeRefreshRequest()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_wantRefresh)
+        return false;
+    g_wantRefresh = false;
+    for (auto &[id, s] : g_states)
+        if (s.object && !s.dressedAtCreation)
+            s.refreshAsked = true;
+    return true;
 }
 
 bool linked(uint8_t playerId)

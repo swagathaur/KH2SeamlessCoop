@@ -1,0 +1,23 @@
+runtime: PS2X_WRITE_WATCH_MAX sets how many watched writes are reported
+(default 400).
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 5f8c02a..0339591 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -37,8 +37,13 @@ uint32_t g_ps2WriteWatchEnd = ps2WriteWatchParse(true);
+ void ps2ReportGuestWrite(uint32_t guestAddr, uint32_t size, uint64_t valueLo, uint64_t valueHi, const char *op,
+                          const R5900Context *ctx)
+ {
+-    static std::atomic<int> s_reports{0};
+-    if (s_reports.fetch_add(1) >= 400)
++    // PS2X_WRITE_WATCH_MAX: how many writes to report (default 400).
++    static const long s_max = [] {
++        const char *m = std::getenv("PS2X_WRITE_WATCH_MAX");
++        return m ? std::strtol(m, nullptr, 10) : 400L;
++    }();
++    static std::atomic<long> s_reports{0};
++    if (s_reports.fetch_add(1) >= s_max)
+         return;
+     std::fprintf(stderr, "[write-watch] %s %08X size %u value %016llX%s%016llX pc=%08X ra=%08X\n", op, guestAddr, size,
+                  (unsigned long long)valueHi, size > 8 ? ":" : "", (unsigned long long)valueLo, ctx ? ctx->pc : 0u,

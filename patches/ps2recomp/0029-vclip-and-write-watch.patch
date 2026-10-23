@@ -1,0 +1,117 @@
+vu0: VCLIP compares against |w| and orders the flags as the VU does (+x in
+bit 0, -x in bit 1, ...). runtime: PS2X_WRITE_WATCH=<hex addr>[:<hex len>]
+reports every guest store into that range with its code address and $ra
+(the store hooks were empty stubs).
+
+diff --git a/ps2xRecomp/src/lib/vu_translator.cpp b/ps2xRecomp/src/lib/vu_translator.cpp
+index d0fc95d..f223a8f 100644
+--- a/ps2xRecomp/src/lib/vu_translator.cpp
++++ b/ps2xRecomp/src/lib/vu_translator.cpp
+@@ -268,15 +268,16 @@ namespace ps2recomp
+ 
+                     return fmt::format(
+                         "{{ __m128 fs = ctx->vu0_vf[{}]; "
+-                        "__m128 ft = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {}); "
++                        // patch 0029: against |w|, and +x in bit 0, -x in bit 1, ... as the VU.
++                        "__m128 ft = _mm_and_ps(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {}), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); "
+                         "__m128 neg_ft = _mm_xor_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x80000000))); "
+                         "__m128 gt = _mm_cmpgt_ps(fs, ft); "
+                         "__m128 lt = _mm_cmplt_ps(fs, neg_ft); "
+                         "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); "
+                         "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); "
+-                        "uint32_t flags = ((lt_mask & 0x1) << 0) | ((gt_mask & 0x1) << 1) | "
+-                        "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | "
+-                        "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); "
++                        "uint32_t flags = ((gt_mask & 0x1) << 0) | ((lt_mask & 0x1) << 1) | "
++                        "((gt_mask & 0x2) << 1) | ((lt_mask & 0x2) << 2) | "
++                        "((gt_mask & 0x4) << 2) | ((lt_mask & 0x4) << 3); "
+                         "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
+                         inst.rd, inst.rt, inst.rt, shuffle_pattern);
+                 }
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index e34b0ba..5e5efb8 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -257,6 +257,13 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
+     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
+ }
+ 
++// patch 0029: a guest-memory write watch for hunting corruption.
++// PS2X_WRITE_WATCH=<hex addr>[:<hex len>] reports every store that touches
++// that range (the code address and $ra, the value) to stderr.
++extern uint32_t g_ps2WriteWatchBegin, g_ps2WriteWatchEnd; // physical, [begin, end); end 0: off
++void ps2ReportGuestWrite(uint32_t guestAddr, uint32_t size, uint64_t valueLo, uint64_t valueHi, const char *op,
++                         const R5900Context *ctx);
++
+ inline void ps2TraceGuestWrite(uint8_t *rdram,
+                                uint32_t guestAddr,
+                                uint32_t size,
+@@ -266,13 +273,9 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
+                                const R5900Context *ctx)
+ {
+     (void)rdram;
+-    (void)guestAddr;
+-    (void)size;
+-    (void)valueLo;
+-    (void)valueHi;
+-    (void)op;
+-    (void)ctx;
+-    // TODO we dont need this anymore so on next release it will be deleted
++    const uint32_t a = guestAddr & PS2_RAM_MASK;
++    if (a < g_ps2WriteWatchEnd && a + size > g_ps2WriteWatchBegin) [[unlikely]]
++        ps2ReportGuestWrite(guestAddr, size, valueLo, valueHi, op, ctx);
+ }
+ 
+ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
+@@ -282,11 +285,9 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
+                                     const R5900Context *ctx)
+ {
+     (void)rdram;
+-    (void)guestAddr;
+-    (void)size;
+-    (void)op;
+-    (void)ctx;
+-    // TODO we dont need this anymore so on next release it will be deleted
++    const uint32_t a = guestAddr & PS2_RAM_MASK;
++    if (a < g_ps2WriteWatchEnd && a + size > g_ps2WriteWatchBegin) [[unlikely]]
++        ps2ReportGuestWrite(guestAddr, size, 0, 0, op, ctx);
+ }
+ 
+ class PS2Runtime
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 1534085..5f8c02a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -18,6 +18,32 @@
+ #include "runtime/ps2_native_iop.h"
+ 
+ #include <iostream>
++
++// patch 0029: PS2X_WRITE_WATCH (see ps2TraceGuestWrite).
++static uint32_t ps2WriteWatchParse(bool end)
++{
++    const char *e = std::getenv("PS2X_WRITE_WATCH");
++    if (!e || !*e)
++        return 0;
++    unsigned long long a = std::strtoull(e, nullptr, 16), n = 4;
++    if (const char *c = std::strchr(e, ':'))
++        n = std::strtoull(c + 1, nullptr, 16);
++    a &= PS2_RAM_MASK;
++    return end ? static_cast<uint32_t>(a + (n ? n : 4)) : static_cast<uint32_t>(a);
++}
++uint32_t g_ps2WriteWatchBegin = ps2WriteWatchParse(false);
++uint32_t g_ps2WriteWatchEnd = ps2WriteWatchParse(true);
++
++void ps2ReportGuestWrite(uint32_t guestAddr, uint32_t size, uint64_t valueLo, uint64_t valueHi, const char *op,
++                         const R5900Context *ctx)
++{
++    static std::atomic<int> s_reports{0};
++    if (s_reports.fetch_add(1) >= 400)
++        return;
++    std::fprintf(stderr, "[write-watch] %s %08X size %u value %016llX%s%016llX pc=%08X ra=%08X\n", op, guestAddr, size,
++                 (unsigned long long)valueHi, size > 8 ? ":" : "", (unsigned long long)valueLo, ctx ? ctx->pc : 0u,
++                 ctx ? static_cast<uint32_t>(_mm_cvtsi128_si32(ctx->r[31])) : 0u);
++}
+ #include <fstream>
+ #include <algorithm>
+ #include <array>

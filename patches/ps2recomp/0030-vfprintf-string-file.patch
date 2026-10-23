@@ -1,0 +1,45 @@
+libc: the vfprintf stub writes into newlib string FILEs. newlib's vsprintf
+(KH2: 0x301550) formats through vfprintf with a FILE on its stack (__SSTR);
+the stub only knew host files and returned -1, so callers that add the
+terminator at buf[len] wrote it at buf[-1]. In KH2 that cleared a byte of
+a heap header and loading a save crashed in operator delete[].
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+index 4fbee0a..924529d 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+@@ -1146,6 +1146,34 @@ namespace ps2_stubs
+         const std::string formatOwned = readPs2CStringBounded(rdram, runtime, format_addr, 1024);
+         int ret = -1;
+ 
++        // patch 0030: newlib's vsprintf/vsnprintf hand vfprintf a string FILE
++        // on the guest stack (_p @0, _w @8, _flags @0xC with __SSTR 0x200):
++        // format into its buffer and advance _p, as newlib's __sprint does.
++        // Returning -1 here made KH2 write its terminator at buf[-1], over a
++        // heap header (loading a save crashed in operator delete).
++        uint16_t guestFlags = 0;
++        if (!fp && format_addr != 0 && file_handle >= 0x1000u && (file_handle & 3u) == 0u &&
++            (file_handle & PS2_RAM_MASK) + 0x10u <= PS2_RAM_SIZE)
++            std::memcpy(&guestFlags, getConstMemPtr(rdram, file_handle + 0xCu), sizeof(guestFlags));
++        if (!fp && (guestFlags & 0x200u))
++        {
++            const std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
++            uint32_t p = 0;
++            int32_t w = 0;
++            std::memcpy(&p, getConstMemPtr(rdram, file_handle), sizeof(p));
++            std::memcpy(&w, getConstMemPtr(rdram, file_handle + 8u), sizeof(w));
++            const uint32_t room = w > 0 ? static_cast<uint32_t>(w) : 0u;
++            const uint32_t n = std::min<uint32_t>(room, static_cast<uint32_t>(rendered.size()));
++            for (uint32_t i = 0; i < n; ++i)
++                *getMemPtr(rdram, p + i) = static_cast<uint8_t>(rendered[i]);
++            p += n;
++            w -= static_cast<int32_t>(n);
++            std::memcpy(getMemPtr(rdram, file_handle), &p, sizeof(p));
++            std::memcpy(getMemPtr(rdram, file_handle + 8u), &w, sizeof(w));
++            setReturnS32(ctx, static_cast<int32_t>(rendered.size()));
++            return;
++        }
++
+         if (fp && format_addr != 0)
+         {
+             std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);

@@ -374,6 +374,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     uint8_t *ram = const_cast<uint8_t *>(rdram);
+    kh2enemies::thawAfterSession(ram);
     if (g_partnersReset)
     {
         g_partnersReset = false;

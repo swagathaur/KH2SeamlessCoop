@@ -47,8 +47,10 @@ struct Damage
 // Client, once a host-loop iteration: follow the host's enemies; returns the
 // damage this machine's player did since last time, for the host.
 std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, double now);
-// Forget everything (session ended).
+// Forget everything (session ended). The enemies whose AI we turned off get
+// it back on the next thawAfterSession() (host loop, with the guest's memory).
 void reset();
+void thawAfterSession(uint8_t *rdram);
 
 // Encoding of the EnemyDamage game event.
 std::vector<uint8_t> encodeDamage(uint8_t world, uint8_t room, const Damage &d);

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -18,6 +19,20 @@ constexpr uint32_t kObjSheet = 0x48C;      // YS::SHEET*
 constexpr uint32_t kObjSpawnRecord = 0x81C; // UNIT_DATA_OBJ* (the room's spawn entry)
 constexpr uint32_t kRecordSerial = 0x1E;
 constexpr uint32_t kVtableAddHp = 0x78;   // (obj, amount, sheet index, flag)
+constexpr uint32_t kObjFlags = 0x10C;      // 0x200000: may not act (its AI does nothing)
+constexpr uint32_t kNoAct = 0x200000u;
+constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION*, id, blend, start)
+
+// Clients' copies of the host's enemies are puppets: their own AI is off and
+// they play the host's motions (KH2_ENEMY_AI=1 keeps their AI, as before).
+bool puppetEnemies()
+{
+    static const bool keepAi = [] {
+        const char *e = std::getenv("KH2_ENEMY_AI");
+        return e && *e == '1';
+    }();
+    return !keepAi;
+}
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
 {
@@ -37,8 +52,16 @@ struct Follow
     bool placed = false;
     int32_t expectedHp = -1; // what our copy should have, as far as we know
     bool killed = false;
+    uint32_t object = 0;     // our copy
+    bool frozen = false;     // we turned its AI off
+    uint32_t flagsBefore = 0;
+    uint16_t motion = 0xFFFF; // the host's motion we last started on it
+    int sinceMotion = 0;
+    double holdUntil = 0;    // our player just hit it: let its own reaction play
+    bool holding = false;
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
+std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
 uint16_t g_followRoom = 0xFFFF;
 size_t g_lastSentCount = SIZE_MAX, g_lastFollowCount = SIZE_MAX; // for the log
 
@@ -63,6 +86,28 @@ void postAddHp(uint32_t obj, int32_t amount)
             return std::nullopt;
         return kh2guest::Call{fn, {obj, static_cast<uint32_t>(amount), 0u, 0u}, {}};
     });
+}
+// Give the enemies we froze their AI back (host data gone or stale).
+void thawAll(uint8_t *rdram)
+{
+    std::vector<uint32_t> live;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        live.push_back(a.address);
+    for (auto &[serial, f] : g_follow)
+    {
+        if (!f.frozen)
+            continue;
+        f.frozen = false;
+        f.motion = 0xFFFF;
+        bool there = false;
+        for (uint32_t a : live)
+            there = there || a == f.object;
+        if (!there)
+            continue;
+        const uint32_t flags = rd<uint32_t>(rdram, f.object + kObjFlags);
+        const uint32_t back = (flags & ~kNoAct) | (f.flagsBefore & kNoAct);
+        std::memcpy(rdram + ((f.object + kObjFlags) & 0x01FFFFFFu), &back, 4);
+    }
 }
 } // namespace
 
@@ -166,6 +211,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             std::fflush(stdout);
         }
         g_lastFollowCount = 0;
+        thawAll(rdram);
         kh2puppets::setOverrides({});
         return damage;
     }
@@ -176,6 +222,12 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             if (x.serial == e.serial && x.entry == e.entry)
                 h = &x;
         Follow &f = g_follow[e.serial];
+        if (f.object != e.object)
+        {
+            f.object = e.object;
+            f.frozen = false;
+            f.motion = 0xFFFF;
+        }
         if (!h)
         {
             // Gone on the host (dead and removed) after we had seen it there.
@@ -194,8 +246,14 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         if (f.expectedHp >= 0 && e.hp < f.expectedHp)
         {
             damage.push_back(Damage{e.serial, f.expectedHp - e.hp});
-            std::printf("[enemies] hit %04X #%d for %d\n", e.entry, e.serial, f.expectedHp - e.hp);
+            std::printf("[enemies] hit %04X #%d for %d (motion %u)\n", e.entry, e.serial, f.expectedHp - e.hp,
+                        e.motion);
             std::fflush(stdout);
+            // The hit's reaction (flinch, knock-back) is our copy's own, made
+            // by the game's damage code: give it time before the host's
+            // motion is put back.
+            f.holdUntil = now + 0.6;
+            f.holding = true;
         }
         int32_t hp = e.hp;
         if (h->hp <= 0)
@@ -235,6 +293,35 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             std::memcpy(o.pos, f.shown, sizeof(o.pos));
             o.yaw = f.yaw;
             overrides.push_back(o);
+            if (puppetEnemies())
+            {
+                // Its AI off; it does what the host's does.
+                const uint32_t flags = rd<uint32_t>(rdram, e.object + kObjFlags);
+                if (!f.frozen)
+                {
+                    f.frozen = true;
+                    f.flagsBefore = flags;
+                }
+                if (!(flags & kNoAct))
+                {
+                    const uint32_t v = flags | kNoAct;
+                    std::memcpy(rdram + ((e.object + kObjFlags) & 0x01FFFFFFu), &v, 4);
+                }
+                ++f.sinceMotion;
+                if (now < f.holdUntil)
+                    continue; // (the override above is already in the list)
+                if (f.holding)
+                {
+                    f.holding = false;
+                    f.motion = 0xFFFF; // back to the host's motion
+                }
+                if (h->motion != f.motion || (e.motion != h->motion && f.sinceMotion > 20))
+                {
+                    f.motion = h->motion;
+                    f.sinceMotion = 0;
+                    kh2guest::postCall({kMotionChange, {e.object + kh2state::addr::ObjMotion, h->motion}, {4.0f, 0.0f}});
+                }
+            }
         }
     }
     if (overrides.size() != g_lastFollowCount)
@@ -251,6 +338,9 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
 void reset()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
+    for (const auto &[serial, f] : g_follow)
+        if (f.frozen)
+            g_thaw.emplace_back(f.object, f.flagsBefore);
     g_host = {};
     g_hostTime = -1;
     g_follow.clear();
@@ -277,5 +367,26 @@ bool decodeDamage(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &roo
     d.serial = static_cast<int16_t>(r.u16());
     d.amount = r.i32();
     return r.ok();
+}
+void thawAfterSession(uint8_t *rdram)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_thaw.empty())
+        return;
+    std::vector<uint32_t> live;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        live.push_back(a.address);
+    for (const auto &[obj, before] : g_thaw)
+    {
+        bool there = false;
+        for (uint32_t a : live)
+            there = there || a == obj;
+        if (!there)
+            continue;
+        const uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
+        const uint32_t back = (flags & ~kNoAct) | (before & kNoAct);
+        std::memcpy(rdram + ((obj + kObjFlags) & 0x01FFFFFFu), &back, 4);
+    }
+    g_thaw.clear();
 }
 } // namespace kh2enemies

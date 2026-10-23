@@ -56,6 +56,8 @@ constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = o
 constexpr uint32_t kVtableLeave = 0x20; // obj->vtable[+0x20](obj): leave (what trap_obj_leave_force calls)
 std::atomic<Mode> g_mode{Mode::Spawn};
 
+bool ensurePrivateTable(uint8_t *rdram);
+
 // Spawning, as a guest job (one call per frame): allocate a spawn record and
 // an empty unit group from the room's heap (AREA::Alloc; what a room's spawn
 // list would give YS::UNIT_DATA_OBJ::appear), call the object factory, and
@@ -77,6 +79,8 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
     std::memcpy(st->pos, pos, sizeof(st->pos));
     st->yaw = yaw;
     kh2guest::post([st, entry, done](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
+        if (st->step == 0)
+            ensurePrivateTable(env.rdram); // the game looks the entry up by id
         switch (st->step++)
         {
         case 0:
@@ -126,6 +130,13 @@ void postLeave(uint32_t obj)
     kh2guest::post([obj](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
             return std::nullopt;
+        // Only while it is still in the object list: a room change may have
+        // removed it since this was queued, and leaving twice frees it twice.
+        bool live = false;
+        for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+            live = live || a.address == obj;
+        if (!live)
+            return std::nullopt;
         uint32_t vt = 0, fn = 0;
         std::memcpy(&vt, env.host(obj), 4);
         if (vt >= 0x00100000u && vt < 0x02000000u)
@@ -140,12 +151,22 @@ void postLeave(uint32_t obj)
 // objentry record is dressed in the remote player's model and motion set
 // names (the record's +0x08 and +0x28, 32 bytes each) before its files are
 // requested and the object is made: the NPC class's code with the player's
-// look and motions. Each puppet slot has its own record (entries the game
-// uses only in a few cutscenes), put back when the puppet goes.
-constexpr uint32_t kPuppetEntries[kMaxPuppets] = {0x084C, 0x084D}; // B_EX110_RTN, B_EX170_RTN
+// look and motions.
+//
+// The records are our own: the game looks entries up (Tz::JmInfo::
+// GetCharaData, 0x0016E920 -> 0x001D3408) in up to three tables whose
+// pointers are at 0x01D5BA10 (only the first, 00objentry.bin, is used), each
+// "u32 3, u32 count, then sorted 0x60-byte records" searched by id. A third
+// table at 0x01E4D000, in the gap the game never touches below the runtime's
+// heap, holds two records copied from the townsfolk class's B_EX110_RTN
+// (0x084C) with private ids, so no entry the game itself uses is changed.
+constexpr uint32_t kPuppetEntries[kMaxPuppets] = {0x7F00, 0x7F01};
+constexpr uint32_t kTemplateEntry = 0x084C; // B_EX110_RTN: type 15, "npc, no collision"
+constexpr uint32_t kPrivateTable = 0x01E4D000u;
+constexpr uint32_t kTableSlot = kh2state::addr::Obj0Ptr + 8; // the third table
 constexpr uint32_t kEntrySize = 0x60, kEntryLook = 0x08, kEntryLookSize = 0x40;
 
-uint32_t entryRecord(const uint8_t *rdram, uint32_t id)
+uint32_t primaryRecord(const uint8_t *rdram, uint32_t id)
 {
     uint32_t table, count;
     std::memcpy(&table, rdram + (kh2state::addr::Obj0Ptr & 0x01FFFFFFu), 4);
@@ -161,6 +182,42 @@ uint32_t entryRecord(const uint8_t *rdram, uint32_t id)
             return rec;
     }
     return 0;
+}
+
+// Our table in place and registered (any thread; idempotent). False until
+// 00objentry.bin is loaded.
+bool ensurePrivateTable(uint8_t *rdram)
+{
+    uint32_t slot;
+    std::memcpy(&slot, rdram + kTableSlot, 4);
+    if (slot && slot != kPrivateTable)
+        return false; // someone else's (never seen)
+    uint32_t head[2];
+    std::memcpy(head, rdram + kPrivateTable, 8);
+    if (slot == kPrivateTable && head[0] == 3 && head[1] == kMaxPuppets)
+        return true;
+    const uint32_t tmpl = primaryRecord(rdram, kTemplateEntry);
+    if (!tmpl)
+        return false;
+    const uint32_t newHead[2] = {3, kMaxPuppets};
+    std::memcpy(rdram + kPrivateTable, newHead, 8);
+    for (uint32_t i = 0; i < kMaxPuppets; ++i)
+    {
+        uint8_t *rec = rdram + kPrivateTable + 8 + i * kEntrySize;
+        std::memcpy(rec, rdram + (tmpl & 0x01FFFFFFu), kEntrySize);
+        std::memcpy(rec, &kPuppetEntries[i], 4);
+    }
+    const uint32_t table = kPrivateTable;
+    std::memcpy(rdram + kTableSlot, &table, 4);
+    return true;
+}
+
+uint32_t entryRecord(const uint8_t *rdram, uint32_t id)
+{
+    for (uint32_t i = 0; i < kMaxPuppets; ++i)
+        if ((id & 0xFFFF) == kPuppetEntries[i])
+            return ensurePrivateTable(const_cast<uint8_t *>(rdram)) ? kPrivateTable + 8 + i * kEntrySize : 0;
+    return primaryRecord(rdram, id);
 }
 
 struct Dress
@@ -338,13 +395,16 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
         if (!keep)
         {
             std::printf("[puppets] player %u releases %s\n", s.playerId + 1, s.name);
+            bool there = false;
             if (s.spawned && s.object && (sameRoom || !tg))
+                for (const kh2state::ActorInfo &a : haveActors())
+                    there = there || a.address == s.object;
+            if (there)
             {
-                // Ours and still in this room: make it leave.
+                // Ours and still in the object list: make it leave. (The
+                // record keeps their look; the entry is ours alone.)
                 postLeave(s.object);
             }
-            if (s.spawned)
-                postDress(s.entry, 0);
             s = Slot{};
             continue;
         }
@@ -455,7 +515,9 @@ void requestPreload(uint32_t entryId)
     constexpr uint32_t kEntryRequest = 0x0016ED50; // (entry id, -1, 0x1E)
     constexpr uint32_t kCacheFlush = 0x00170888;   // YS::CACHE_BUFF::Flush(TASK*)
     auto step = std::make_shared<int>(0);
-    kh2guest::post([entryId, step](const kh2guest::Env &, uint32_t, bool) -> std::optional<kh2guest::Call> {
+    kh2guest::post([entryId, step](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
+        if (*step == 0)
+            ensurePrivateTable(env.rdram);
         switch ((*step)++)
         {
         case 0:

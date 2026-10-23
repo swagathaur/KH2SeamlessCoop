@@ -436,3 +436,45 @@ flags `0x817` and `0x8AA`.
 The decomp's `functions.tsv` names are worth checking first:
 `YS::PARTY`, `kn::Friend` (the companion AI), `YS::MEMBER`, `YS::FRIEND`,
 `YS::CHANGEFORM`, `YS::SACRIFICE`.
+
+## Object entries, puppets and damage
+
+**objentry lookup.** `Tz::JmInfo::GetCharaData` (`0x0016E920`) masks the id
+with `0x0FFFFFFF`, handles a few special ids, then `0x001D3408` binary-
+searches up to three tables whose pointers are at `0x01D5BA10` (only the
+first, `00objentry.bin`, is set by the game): each is `u32 3, u32 count`, then
+sorted `0x60`-byte records compared on the full id (`0x003216B8`). The puppets
+register a third table at `0x01E4D000` (`0x01E4C868`-`0x01E50000` is used by
+neither the game nor the runtime, whose heap starts at `0x01E50000`) holding
+copies of `B_EX110_RTN` (`0x084C`) as ids `0x7F00`/`0x7F01`, so dressing them
+changes no record the game's own events use. An object keeps its record
+pointer at `+0x08` (its destructor `0x0016B5B8` reads the record's `+0x54`).
+
+**Removing a spawned object twice** (its leave method, vtable, after the room
+change had already destroyed it) crashes later in the motion teardown
+(`0x00180CE0` calls a stale callback at MOTION `+0x194`). puppets.cpp now only
+asks an object to leave while it is still in the object list, checked again
+when the guest job runs.
+
+**Spawn records** (`UNIT_DATA_OBJ`, object `+0x81C`, `0x40` bytes): entry id,
+position, rotation (`+0x14` yaw), serial `+0x1E`, a message id for townsfolk at
+`+0x28`, and the reaction command the object offers at `+0x2C` (what the HUD
+shows: in Twilight Town 02-04 the Struggle signs `W_EX010_U0/V0/W0_RTN` offer
+`0x022B`-`0x022D`). `--actors-at` prints them.
+
+**DAMAGE** (`YS::BTLOBJ::_OVR_exec_damage`, `0x00186148`, called through the
+target's vtable, hands it to the battle overlay's handler 6 through
+`0x00196AA0`): `+0x00` hit direction (float4), `+0x10` attacker, `+0x14`
+target, `+0x18` flags (bit 0 handled), `+0x1C` the ATTACK, `+0x20` its
+parameters (`+0x0C` a knock-back strength, `0x7FFF` none), `+0x26`/`+0x27`
+reaction types (`YS::DAMAGE::GetReactionType`), `+0x28` the amount, `+0x58`/
+`+0x5C` the ATTACK again. `KH2_DAMAGE_LOG=1` (port/coop/hits.cpp) logs every
+one. Replaying a remote player's hit on the host would need an ATTACK of the
+host's own, which is why the host only takes the HP so far.
+
+**Enemy puppets.** With an enemy's "may act" bit set (object `+0x10C |=
+0x200000`) its AI does nothing, but `YS::MOTION::change` still plays any
+motion on it, the motion's hit boxes still hit, and the game's own damage code
+still hurts it and plays its reaction: so a client can mirror the host's
+enemies by motion alone and still land hits on them (Seifer, Twilight Town
+02-04).

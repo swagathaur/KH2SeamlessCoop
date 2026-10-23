@@ -219,13 +219,18 @@ or show players by moving an NPC already in the room instead
 (`--puppet-mode=borrow`). Each puppet has its player's name over it (Co-op →
 **Name tags**, or `--no-name-tags`). Puppets do not fight or take hits yet.
 
-**Shared enemies** (first version). In the host's room, a client's enemies
-stand where the host's are and never have more HP than the host's; a hit a
-client lands is sent to the host and counts there, so everyone's hits wear
-the same enemies down, and an enemy the host's game kills dies for everyone.
-The enemies' AI still runs on each machine (an enemy may swing at you from
-where the host sees it). Co-op → **Shared enemies** turns it off on a client
-(`--no-shared-enemies`).
+**Shared enemies.** In the host's room the host's game runs the enemies. A
+client's copies are puppets of the host's: their own AI is off, and they
+stand, turn and move (attack, block, flinch) exactly as the host's do, so an
+enemy swings at you where and when it swings for the host, and its attacks
+hit whoever is in their way on each machine. A hit a client lands is handled by
+that client's game as usual (spark, sound, reaction; the host's motion is
+put back 0.6 s later), is sent to the host and counts there, so everyone's hits wear the same enemies down; an
+enemy the host's game kills dies for everyone. On the host, a client's hit
+shows as the enemy's HP going down (the flinch is not replayed there yet).
+Co-op → **Shared enemies** turns sharing off on a client
+(`--no-shared-enemies`); `KH2_ENEMY_AI=1` keeps the client's own enemy AI
+running as the first version did.
 
 **Partners: the other players in your party.** Each player keeps their own
 game: their own story, inventory, equipment and choices. When someone joins,

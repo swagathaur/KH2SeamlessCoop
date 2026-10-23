@@ -50,6 +50,7 @@
 #include "coop.h"
 #include "puppets.h"
 #include "partners.h"
+#include "hits.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
@@ -1005,8 +1006,22 @@ bool harnessTick(Harness &h, uint64_t frame)
                 std::memcpy(v, ram + sheet, sizeof(v));
                 std::snprintf(hp, sizeof(hp), " hp %d/%d min %d", v[0], v[1], v[2]);
             }
-            std::printf("[actors]   %08X %04X %-24s %-18s %.0f,%.0f,%.0f%s\n", a.address, a.entryId, a.name,
-                        kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2], hp);
+            // Its spawn record (UNIT_DATA_OBJ at +0x81C): serial, +0x28 (a message id for
+            // townsfolk), the reaction command it offers (+0x2C, what the HUD shows), +0x1C.
+            char unit[48] = "";
+            uint32_t rec = 0;
+            std::memcpy(&rec, ram + ((a.address + 0x81C) & 0x01FFFFFFu), 4);
+            if (rec >= 0x00100000u && rec < 0x02000000u)
+            {
+                uint16_t f[4];
+                std::memcpy(&f[0], ram + rec + 0x1E, 2);
+                std::memcpy(&f[1], ram + rec + 0x28, 2);
+                std::memcpy(&f[2], ram + rec + 0x2C, 2);
+                std::memcpy(&f[3], ram + rec + 0x1C, 2);
+                std::snprintf(unit, sizeof(unit), " [#%d msg %04X react %04X %04X]", int16_t(f[0]), f[1], f[2], f[3]);
+            }
+            std::printf("[actors]   %08X %04X %-24s %-18s %.0f,%.0f,%.0f%s%s\n", a.address, a.entryId, a.name,
+                        kh2state::actorTypeName(a.type), a.pos[0], a.pos[1], a.pos[2], hp, unit);
         }
         std::fflush(stdout);
     }
@@ -1569,6 +1584,7 @@ int main(int argc, char **argv)
     kh2movie::setSkip(opt.skipMovies);
     kh2puppets::install(runtime);
     kh2partner::install(runtime);
+    kh2hits::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
     kh2coop::init(opt.coop);
     if (opt.speed != 1.0)

@@ -44,6 +44,7 @@ uint64_t g_lastSentFrame = UINT64_MAX;
 double g_lastWarp = -100.0;
 double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
+bool g_followPending = false; // the host moved since we last followed
 const uint8_t *g_rdram = nullptr; // during tick(), for session callbacks
 uint64_t g_lastEnemyFrame = UINT64_MAX;
 // Partners (partners.h): heals for this player, our loadout as last sent.
@@ -245,12 +246,21 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
         warpLocked(hw, hr, hdoor);
         return;
     }
+    const uint32_t hostKey = uint32_t(hw) << 24 | uint32_t(hr) << 16 | hevent;
     if (hw != me.now.world || hr != me.now.room)
     {
-        g_strayCutSince = -1.0; // following the host takes us there
+        g_strayCutSince = -1.0;
+        // Elsewhere while the host's cutscene starts: come and watch it.
+        if (hostCut && !cut && me.control == 0 && !jumping && g_sceneStarted != hostKey &&
+            now() - g_lastSceneWarp > 3.0)
+        {
+            g_sceneStarted = hostKey;
+            g_lastSceneWarp = now();
+            addLog("joining the host's cutscene");
+            warpLocked(hw, hr, hdoor, hbattle, hevent);
+        }
         return;
     }
-    const uint32_t hostKey = uint32_t(hw) << 24 | uint32_t(hr) << 16 | hevent;
     const uint32_t myKey = uint32_t(me.now.world) << 24 | uint32_t(me.now.room) << 16 | me.now.event;
     if (!hostCut)
         g_sceneStarted = 0xFFFFFFFFu;
@@ -693,16 +703,23 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         std::memcpy(&jumping, rdram + kh2state::addr::MapJumpTask, 4);
         if (hostState(host) && host.world != 0)
         {
+            // Follow the host when *they* move (and once on joining): in
+            // between, a client may wander off on their own.
             const uint16_t key = uint16_t(host.world << 8 | host.room);
             if (key != g_hostRoomSeen)
             {
                 g_hostRoomSeen = key;
                 g_hostRoomSince = now();
+                g_followPending = true;
             }
             const bool elsewhere = host.world != me.now.world || host.room != me.now.room;
-            if (elsewhere && me.control == 0 && !jumping && now() - g_hostRoomSince > 1.0 && now() - g_lastWarp > 5.0)
+            if (!elsewhere)
+                g_followPending = false;
+            else if (g_followPending && me.control == 0 && !jumping && now() - g_hostRoomSince > 1.0 &&
+                     now() - g_lastWarp > 5.0)
             {
                 g_lastWarp = now();
+                g_followPending = false;
                 warpLocked(host.world, host.room, host.door);
             }
         }

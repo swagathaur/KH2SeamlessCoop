@@ -236,7 +236,8 @@ running as the first version did.
 **Partners: the other players in your party.** Each player keeps their own
 game: their own story, inventory, equipment and choices. When someone joins,
 they take the place of your first companion (Donald, or whoever the world
-puts in that slot; a second player takes the second companion's place), in
+puts in that slot); with three players, the one with the lower number takes
+the first companion's place and the other the second (Goofy's), in
 the way Dark Souls III's seamless co-op puts a friend in your world:
 
 - They look like themselves, with their own weapon. When someone joins (or
@@ -293,8 +294,10 @@ host's story:
   the rooms seen and each world's party. The client keeps their own level,
   HP, items, equipment, abilities, munny and drive forms (and what they earn
   while connected).
-- The client goes wherever the host goes, and into the host's battles: the
-  host's enemies are there for them too.
+- When the host moves to another room, the clients follow (once they are
+  free to move); in between, a client may wander off on their own. The
+  host's cutscenes and battles bring them back: the host's enemies are there
+  for them too.
 - Cutscenes are the host's. A cutscene that starts as a room's event begins
   for the client as well (the room loads again with it), and ends for them
   when it ends for the host, watched through or skipped. A cutscene a script

@@ -399,3 +399,40 @@ comes from 0x108730 followed by MSCAL 0. Textures come from `param+0x24`
 code starts at 0x58, selects optional passes from bits of VU word 9.x, skins
 vertices against up to 4 matrices per influence count, and kicks at 0xCA8,
 0xE88, 0x1660 and 0x2300. `tools/vu_disasm.py` disassembles it.
+
+## The party (co-op partners)
+
+**Party slots** run *down* from the player's: the player's stats are at
+`0x01C6C750`, the first companion's at `0x01C6C750 - 0x268`, the second's at
+`- 0x4D0` (each object's `YS::SHEET*` at `+0x48C` points at its slot). In
+Hollow Bastion the objects are `P_EX100` (Sora, objentry `0x54`), `P_EX020`
+(Donald, `0x5C`) and `P_EX030` (Goofy, `0x5D`), with weapons `W_EX010`
+(`0x67`), `W_EX020` (`0x6C`), `W_EX030` (`0x6D`). A weapon object's owner is
+at `+0x570`.
+
+**Save data** (`0x0032BB30`, layout as OpenKH's `SaveDataFinalMix`): 13
+character records of `0x114` bytes from `+0x24F0` (0 Sora, 1 Donald, 2 Goofy,
+...; weapon u16, HP/MP bytes at +4..+7, armour, accessories and items from
++0x10, abilities from +0x54); the party per world at `+0x3534` (4 bytes:
+player, companions; `0x12` = none); item counts at `+0x3580`. Writing a
+world's party there before a map jump brings those members into the room:
+`--poke=2280:0032F074:00010212 --warp-test=2300:04:08:65535:65535` puts Sora,
+Donald and Goofy in Hollow Bastion from a new game (the partner tests).
+
+**Drive forms and party members.** `FUN_001C9958(form, part)` says whether a
+form needs the member in party part `part`: Valor (1) part 3, Wisdom (2) part
+2, Limit (3) nobody, Master, Final, Anti (4-6) everyone. `FUN_001C99B0(form)`
+(the command's availability, via `FUN_001C9B38` for command type 4; also
+`YS::FORM_LEVEL::CheckMaster`) returns 0 when every member the form needs is
+there and able (`FUN_0017E358`), 2 when none is. `FUN_001C9860(form)`, from
+the form change (`FUN_001B6AB8`), calls `YS::SACRIFICE::Start(FRIEND*,
+float)` (`0x001C9780`) for each member the form needs: that is the party
+cost. Summons use `FUN_001C98F0` (both members) and
+`YS::FRIEND::can_summon_sacrifice`. Form → item: `YS::ITEM::FormToItem`
+(table `0x0036D458`): Valor `0x1A`, Wisdom `0x1B`, Limit `0x233`, Master
+`0x1F`, Final `0x1D`, Anti `0x1E`. `YS::PROGRESS::CanDrive` checks progress
+flags `0x817` and `0x8AA`.
+
+The decomp's `functions.tsv` names are worth checking first:
+`YS::PARTY`, `kn::Friend` (the companion AI), `YS::MEMBER`, `YS::FRIEND`,
+`YS::CHANGEFORM`, `YS::SACRIFICE`.

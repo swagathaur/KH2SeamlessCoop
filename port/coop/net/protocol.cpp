@@ -17,6 +17,9 @@ void writePlayerState(ByteWriter &w, const PlayerState &s)
     w.f32(s.animTime);
     w.i32(s.hp);
     w.i32(s.maxHp);
+    w.i32(s.mp);
+    w.i32(s.maxMp);
+    w.u16(s.weapon);
     w.u8(s.flags);
 }
 
@@ -81,6 +84,9 @@ bool readPlayerState(ByteReader &r, PlayerState &s)
     s.animTime = r.f32();
     s.hp = r.i32();
     s.maxHp = r.i32();
+    s.mp = r.i32();
+    s.maxMp = r.i32();
+    s.weapon = r.u16();
     s.flags = r.u8();
     return r.ok();
 }

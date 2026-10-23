@@ -227,6 +227,30 @@ The enemies' AI still runs on each machine (an enemy may swing at you from
 where the host sees it). Co-op → **Shared enemies** turns it off on a client
 (`--no-shared-enemies`).
 
+**Partners: the other players in your party.** Each player keeps their own
+game: their own story, inventory, equipment and choices. When someone joins,
+they take the place of your first companion (Donald, or whoever the world
+puts in that slot; a second player takes the second companion's place), in
+the way Dark Souls III's seamless co-op puts a friend in your world:
+
+- They look like themselves, with their own weapon, from the next room you
+  enter (the companion's files are swapped when a room loads).
+- The companion stops acting on its own: it stands, walks and moves where
+  that player does in their game, playing their motions.
+- The party HUD shows their HP and MP. Healing them works as healing a party
+  member does (Cure, items): the HP your game gives them is sent to their
+  game. Damage your enemies do to them is ignored; their own game decides
+  what hurts them.
+- The party menu shows their equipment, items and abilities. You cannot
+  change them: an edit is undone, and so is what it did to your inventory.
+- Drive forms do not send them away (nor your other companion) while a
+  partner is linked: forms cost no party members in co-op.
+
+Without a companion in the room (Roxas' days, solo segments), a partner shows
+up as an NPC copy as before. `--partner-test=FRAME` (testing) puts a
+stand-in partner that copies you, a second behind, in the first companion's
+place without a network.
+
 - **Host**: settings menu (F1) → Co-op → **Host**, or start with `--host`
   (UDP port 27552; `--host=PORT` for another). Others need to reach that port:
   same network, or forward it on your router.

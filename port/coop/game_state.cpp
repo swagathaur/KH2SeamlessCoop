@@ -64,7 +64,7 @@ State read(const uint8_t *ram)
     s.now.event = rd<uint16_t>(ram, addr::Now + 8);
     for (int i = 0; i < 3; ++i)
     {
-        const uint32_t b = addr::Slot1 + addr::SlotStride * uint32_t(i);
+        const uint32_t b = addr::Slot1 - addr::SlotStride * uint32_t(i); // companions below the player
         Unit &u = s.party[i];
         u.hp = rd<int32_t>(ram, b + addr::SlotHp);
         u.maxHp = rd<int32_t>(ram, b + addr::SlotMaxHp);

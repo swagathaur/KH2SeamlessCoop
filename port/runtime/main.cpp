@@ -49,6 +49,7 @@
 #include "game_state.h"
 #include "coop.h"
 #include "puppets.h"
+#include "partners.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
@@ -170,6 +171,9 @@ struct Options
     bool english = false;                  // --english: game/files/english
     struct Teleport { uint64_t frame; float pos[3]; };
     std::vector<Teleport> teleports; // --teleport=FRAME:X,Y,Z
+    struct Poke { uint64_t frame; uint32_t addr; std::vector<uint8_t> bytes; };
+    std::vector<Poke> pokes; // --poke=FRAME:ADDR:HEXBYTES
+    uint64_t partnerTestAt = 0; // --partner-test=FRAME
 };
 
 void usage()
@@ -248,6 +252,9 @@ void usage()
         "                          default) or by moving an NPC already in the room ('borrow')\n"
         "  --no-name-tags          co-op: no names over other players\n"
         "  --teleport=FRAME:X,Y,Z  testing: put the player at this position at FRAME\n"
+        "  --poke=FRAME:ADDR:HEX   testing: write these bytes (hex) to guest address ADDR (hex) at FRAME\n"
+        "  --partner-test=FRAME    testing: from FRAME, a stand-in co-op partner copying you takes the\n"
+        "                          first companion's place (no network)\n"
         "  --menu-at=F,..:S        testing (windowed): open the settings menu at these frames for S seconds\n"
         "  --ff-at=A-B,..          testing (windowed): fast-forward from frame A to B\n"
         "  --skip-cutscenes        skip every in-engine cutscene (hold B to skip one)\n"
@@ -470,6 +477,21 @@ bool parseUnchecked(int argc, char **argv, Options &o)
                 if (dash == std::string::npos) return false;
                 o.ffAt.emplace_back(std::stoull(r.substr(0, dash)), std::stoull(r.substr(dash + 1)));
             }
+        }
+        else if (a.rfind("--partner-test=", 0) == 0) o.partnerTestAt = std::stoull(value(a));
+        else if (a.rfind("--poke=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t c1 = v.find(':'), c2 = v.find(':', c1 == std::string::npos ? 0 : c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos)
+                return false;
+            Options::Poke pk{};
+            pk.frame = std::stoull(v.substr(0, c1));
+            pk.addr = static_cast<uint32_t>(std::stoul(v.substr(c1 + 1, c2 - c1 - 1), nullptr, 16));
+            const std::string hex = v.substr(c2 + 1);
+            for (size_t i = 0; i + 1 < hex.size(); i += 2)
+                pk.bytes.push_back(static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+            o.pokes.push_back(pk);
         }
         else if (a.rfind("--teleport=", 0) == 0)
         {
@@ -1048,6 +1070,18 @@ bool harnessTick(Harness &h, uint64_t frame)
             }
             std::fflush(stdout);
         }
+    if (o.partnerTestAt && due(o.partnerTestAt))
+    {
+        kh2coop::setTestPartner(true);
+        std::printf("[harness] stand-in partner on\n");
+    }
+    for (const auto &pk : o.pokes)
+        if (due(pk.frame))
+        {
+            uint8_t *ram = h.runtime->memory().getRDRAM();
+            std::memcpy(ram + (pk.addr & 0x01FFFFFFu), pk.bytes.data(), pk.bytes.size());
+            std::printf("[harness] poked %zu bytes at %08X\n", pk.bytes.size(), pk.addr);
+        }
     for (const auto &t : o.teleports)
         if (due(t.frame))
         {
@@ -1534,6 +1568,7 @@ int main(int argc, char **argv)
     std::fflush(stdout);
     kh2movie::setSkip(opt.skipMovies);
     kh2puppets::install(runtime);
+    kh2partner::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
     kh2coop::init(opt.coop);
     if (opt.speed != 1.0)

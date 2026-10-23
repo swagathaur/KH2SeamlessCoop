@@ -23,6 +23,7 @@
 #include "game_state.h"
 #include "coop.h"
 #include "puppets.h"
+#include "partners.h"
 #include "host_input.h"
 #include "movie_eof.h"
 #include "cutscene_skip.h"
@@ -346,8 +347,15 @@ void draw()
         }
         else
         {
+            const std::vector<kh2partner::Link> links = kh2partner::links();
             for (const kh2coop::RemotePlayer &r : kh2coop::remotes())
-                ImGui::BulletText("%s  %.0f ms", r.name.c_str(), r.rttMs);
+            {
+                const char *where = "";
+                for (const kh2partner::Link &l : links)
+                    if (l.playerId == r.id)
+                        where = l.slot == 1 ? "  - in your party (first companion)" : "  - in your party (second companion)";
+                ImGui::BulletText("%s  %.0f ms%s", r.name.c_str(), r.rttMs, where);
+            }
             if (!kh2coop::isHost())
             {
                 if (ImGui::Button("Go to the host's room"))
@@ -532,7 +540,12 @@ void drawNameTags()
         return;
     const std::vector<kh2coop::RemotePlayer> players = kh2coop::remotes();
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
-    for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+    // Puppets, and the players standing in for party members (partners.h).
+    std::vector<kh2puppets::Assignment> tagged = kh2puppets::assignments();
+    for (const kh2partner::Link &l : kh2partner::links())
+        if (l.object)
+            tagged.push_back(kh2puppets::Assignment{l.playerId, l.object, {}});
+    for (const kh2puppets::Assignment &a : tagged)
     {
         if (!a.object)
             continue;
@@ -672,7 +685,8 @@ void tick()
         return;
     tickMovieMenu();
     kh2input::setSuppressed(kh2pgs::menuOpen() || g_movieMenu);
-    kh2pgs::setWorldOverlayActive(g_opt.nameTags && kh2coop::active() && !kh2puppets::assignments().empty());
+    kh2pgs::setWorldOverlayActive(g_opt.nameTags && kh2coop::active() &&
+                                  (!kh2puppets::assignments().empty() || !kh2partner::links().empty()));
     const bool paused = kh2pgs::menuOpen() || g_movieMenu || (g_opt.pauseUnfocused && !kh2pgs::windowFocused());
     if (paused != g_paused)
     {

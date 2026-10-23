@@ -49,7 +49,7 @@ double now()
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
 std::atomic<bool> g_anyOverride{false};
-std::vector<Override> g_overrides; // under g_mutex
+std::vector<Override> g_overrides[2]; // per channel, under g_mutex
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
@@ -243,13 +243,18 @@ void buildMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 done = true;
                 break;
             }
-        if (!done)
-            for (const Override &o : g_overrides)
+        for (const auto &list : g_overrides)
+        {
+            if (done)
+                break;
+            for (const Override &o : list)
                 if (o.object == obj)
                 {
                     writeTransform(rdram, obj, o.pos, o.yaw);
+                    done = true;
                     break;
                 }
+        }
     }
     kh2::callOriginal(g_buildMatrix, rdram, ctx, runtime);
 }
@@ -467,11 +472,11 @@ void requestPreload(uint32_t entryId)
 
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
 
-void setOverrides(std::vector<Override> overrides)
+void setOverrides(std::vector<Override> overrides, int channel)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_overrides = std::move(overrides);
-    g_anyOverride = !g_overrides.empty();
+    g_overrides[channel & 1] = std::move(overrides);
+    g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty();
 }
 
 void setMode(Mode mode) { g_mode = mode; }

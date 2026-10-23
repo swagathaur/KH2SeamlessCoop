@@ -24,7 +24,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 3;
+constexpr uint8_t kProtocolVersion = 4;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -58,6 +58,8 @@ enum class MsgType : uint8_t
 enum class GameEventType : uint16_t
 {
     EnemyDamage = 1, // client -> host: world u8, room u8, serial i16, amount i32
+    PartnerHeal = 2, // to everyone: target player u8, hp i32, mp i32 (your partner here healed you)
+    Loadout = 3,     // to everyone: the sender's character save record (0x114 bytes)
 };
 
 // Where a player is and what they are doing, sent ~30 times a second.
@@ -73,6 +75,8 @@ struct PlayerState
     uint16_t anim = 0;  // motion index
     float animTime = 0;
     int32_t hp = 0, maxHp = 0;
+    int32_t mp = 0, maxMp = 0;
+    uint16_t weapon = 0; // objentry id of their weapon object
     uint8_t flags = 0;
 };
 

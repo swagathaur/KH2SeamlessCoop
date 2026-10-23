@@ -53,6 +53,9 @@ void requestWarp(uint8_t world, uint8_t room, uint16_t door = 0, uint16_t battle
 void setFollowHost(bool on);
 bool followHost();
 void setSharedEnemies(bool on);
+// Testing: a stand-in partner that copies this player a second behind
+// (partners.h), with no session.
+void setTestPartner(bool on);
 bool sharedEnemies();
 
 // For display.

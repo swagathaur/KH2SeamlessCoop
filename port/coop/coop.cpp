@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "enemies.h"
+#include "partners.h"
 #include "game_state.h"
 #include "puppets.h"
 #include "guest_call.h"
@@ -26,6 +27,7 @@ struct Remote
 {
     std::string name;
     kh2net::Interpolator interp{0.1};
+    std::vector<uint8_t> loadout; // their character save record (Loadout event)
 };
 
 std::mutex g_mutex; // tick() runs on the host loop, the UI reads from the render path
@@ -39,6 +41,15 @@ double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
 const uint8_t *g_rdram = nullptr; // during tick(), for session callbacks
 uint64_t g_lastEnemyFrame = UINT64_MAX;
+// Partners (partners.h): heals for this player, our loadout as last sent.
+std::vector<kh2partner::Heal> g_healsIn;
+std::vector<uint8_t> g_sentLoadout;
+double g_loadoutSentAt = -100.0;
+bool g_resendLoadout = false;
+// --partner-test: a stand-in partner that copies this player, a second behind.
+bool g_testPartner = false;
+std::deque<kh2partner::Remote> g_echo;
+bool g_partnersReset = false; // undo the partners on the next tick (session over)
 
 
 double now()
@@ -103,7 +114,10 @@ void makeSession()
     g_session->onLog = [](const std::string &s) { addLog(s); };
     g_session->onPeer = [](uint8_t id, const std::string &name, bool joined) {
         if (joined)
+        {
             g_remotes[id].name = name;
+            g_resendLoadout = true; // the newcomer needs ours
+        }
         else
             g_remotes.erase(id);
     };
@@ -115,7 +129,21 @@ void makeSession()
         if (g_opt.sharedEnemies)
             kh2enemies::onHostStates(s, now());
     };
-    g_session->onEvent = [](uint8_t, uint16_t type, const std::vector<uint8_t> &data) {
+    g_session->onEvent = [](uint8_t origin, uint16_t type, const std::vector<uint8_t> &data) {
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::Loadout) && data.size() == kh2partner::kLoadoutSize)
+        {
+            g_remotes[origin].loadout = data;
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::PartnerHeal) && data.size() == 9 && g_session &&
+            data[0] == g_session->localId())
+        {
+            kh2partner::Heal h;
+            std::memcpy(&h.hp, data.data() + 1, 4);
+            std::memcpy(&h.mp, data.data() + 5, 4);
+            g_healsIn.push_back(h);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage) && g_session->isHost() && g_rdram &&
             g_opt.sharedEnemies)
         {
@@ -178,6 +206,8 @@ void leave()
     g_session.reset();
     g_remotes.clear();
     kh2enemies::reset();
+    g_sentLoadout.clear();
+    g_partnersReset = true;
 }
 
 void init(const Options &options)
@@ -191,9 +221,108 @@ void init(const Options &options)
 
 void shutdown() { leave(); }
 
+// The remote players as partners (partners.h); heals they got here go out.
+void updatePartners(uint8_t *ram, uint64_t guestFrame)
+{
+    std::vector<kh2partner::Remote> list;
+    const double t = now();
+    if (g_testPartner)
+    {
+        // Stand-in: this player as they were 60 frames ago, a little to the side.
+        const kh2state::State st = kh2state::read(ram);
+        kh2partner::Remote me;
+        me.playerId = 7;
+        me.name = "Echo";
+        me.present = st.player.valid;
+        me.world = st.now.world;
+        me.room = st.now.room;
+        for (int i = 0; i < 3; ++i)
+            me.pos[i] = st.player.pos[i];
+        me.pos[0] += 120.0f;
+        me.yaw = st.player.facing;
+        me.model = uint16_t(st.player.entryId);
+        me.weapon = kh2partner::localWeaponEntry(ram);
+        me.motion = uint16_t(st.player.motion);
+        me.hp = st.party[0].hp;
+        me.maxHp = st.party[0].maxHp;
+        me.mp = st.party[0].mp;
+        me.maxMp = st.party[0].maxMp;
+        me.loadout = kh2partner::localLoadout(ram);
+        g_echo.push_back(me);
+        while (g_echo.size() > 60)
+            g_echo.pop_front();
+        list.push_back(g_echo.front());
+    }
+    else if (g_session && g_session->active())
+        for (auto &[id, r] : g_remotes)
+        {
+            kh2net::PlayerState ps;
+            if (!r.interp.sample(t, ps) || t - r.interp.lastArrival() > 3.0)
+                continue;
+            kh2partner::Remote p;
+            p.playerId = id;
+            p.name = r.name;
+            p.present = (ps.flags & 1) != 0;
+            p.world = ps.world;
+            p.room = ps.room;
+            std::memcpy(p.pos, ps.pos, sizeof(p.pos));
+            p.yaw = ps.rotY;
+            p.model = ps.model;
+            p.weapon = ps.weapon;
+            p.motion = ps.anim;
+            p.hp = ps.hp;
+            p.maxHp = ps.maxHp;
+            p.mp = ps.mp;
+            p.maxMp = ps.maxMp;
+            p.loadout = r.loadout;
+            list.push_back(p);
+        }
+    for (const kh2partner::Heal &h : kh2partner::update(ram, list))
+    {
+        if (g_testPartner)
+        {
+            kh2partner::applyHeal(ram, h.hp, h.mp);
+            continue;
+        }
+        std::vector<uint8_t> data(9);
+        data[0] = h.playerId;
+        std::memcpy(data.data() + 1, &h.hp, 4);
+        std::memcpy(data.data() + 5, &h.mp, 4);
+        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::PartnerHeal), data);
+        addLog("healed player " + std::to_string(h.playerId + 1) + " for " + std::to_string(h.hp) + " HP");
+    }
+    for (const kh2partner::Heal &h : g_healsIn)
+        kh2partner::applyHeal(ram, h.hp, h.mp);
+    g_healsIn.clear();
+    // Our equipment, for the others' menus: when it changes (at most once a
+    // second) and when someone joins.
+    if (g_session && g_session->active() && !g_testPartner && guestFrame % 30 == 0)
+    {
+        std::vector<uint8_t> mine = kh2partner::localLoadout(ram);
+        if ((mine != g_sentLoadout || g_resendLoadout) && t - g_loadoutSentAt > 1.0)
+        {
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::Loadout), mine);
+            g_sentLoadout = mine;
+            g_loadoutSentAt = t;
+            g_resendLoadout = false;
+        }
+    }
+}
+
 void tick(const uint8_t *rdram, uint64_t guestFrame)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
+    uint8_t *ram = const_cast<uint8_t *>(rdram);
+    if (g_partnersReset)
+    {
+        g_partnersReset = false;
+        kh2partner::reset(ram);
+    }
+    if (!g_session || !g_session->active())
+    {
+        if (g_testPartner)
+            updatePartners(ram, guestFrame);
+    }
     if (!g_session)
     {
         kh2puppets::update(rdram, {});
@@ -210,7 +339,9 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2puppets::update(rdram, {});
         return;
     }
-    // Remote players with a body drive their puppets.
+    updatePartners(ram, guestFrame);
+    // Remote players with a body drive their puppets, unless they are one of
+    // our party members (partners.h).
     {
         std::vector<kh2puppets::Target> targets;
         const double t = now();
@@ -219,6 +350,14 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             kh2net::PlayerState ps;
             if (!r.interp.sample(t, ps) || !(ps.flags & 1) || t - r.interp.lastArrival() > 3.0)
                 continue;
+            if (kh2partner::linked(id))
+            {
+                bool here = false;
+                for (const kh2partner::Link &l : kh2partner::links())
+                    here = here || (l.playerId == id && l.object);
+                if (here)
+                    continue;
+            }
             kh2puppets::Target tg;
             tg.playerId = id;
             std::memcpy(tg.pos, ps.pos, sizeof(tg.pos));
@@ -296,6 +435,9 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     ps.hp = st.party[0].hp;
     ps.maxHp = st.party[0].maxHp;
+    ps.mp = st.party[0].mp;
+    ps.maxMp = st.party[0].maxMp;
+    ps.weapon = kh2partner::localWeaponEntry(rdram);
     g_session->sendState(ps);
 }
 
@@ -396,5 +538,13 @@ void setSharedEnemies(bool on)
         kh2enemies::reset();
 }
 bool sharedEnemies() { return g_opt.sharedEnemies; }
+void setTestPartner(bool on)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_testPartner && !on)
+        g_partnersReset = true;
+    g_testPartner = on;
+    g_echo.clear();
+}
 bool followHost() { return g_opt.followHost; }
 } // namespace kh2coop

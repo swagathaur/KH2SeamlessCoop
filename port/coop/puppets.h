@@ -61,7 +61,8 @@ struct Override
     float pos[3] = {0, 0, 0};
     float yaw = 0;
 };
-void setOverrides(std::vector<Override> overrides);
+// Channel 0: the host's enemies (enemies.cpp); 1: partners (partners.cpp).
+void setOverrides(std::vector<Override> overrides, int channel = 0);
 
 struct Assignment
 {

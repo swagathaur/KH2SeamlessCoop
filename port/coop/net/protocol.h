@@ -60,6 +60,7 @@ enum class GameEventType : uint16_t
     EnemyDamage = 1, // client -> host: world u8, room u8, serial i16, amount i32
     PartnerHeal = 2, // to everyone: target player u8, hp i32, mp i32 (your partner here healed you)
     Loadout = 3,     // to everyone: the sender's character save record (0x114 bytes)
+    EnemyHit = 4,    // client -> host: world u8, room u8, serial i16, DAMAGE (0x60), its attack parameters (0x80)
 };
 
 // Where a player is and what they are doing, sent ~30 times a second.

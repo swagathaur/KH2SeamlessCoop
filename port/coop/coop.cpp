@@ -11,6 +11,7 @@
 #include "enemies.h"
 #include "partners.h"
 #include "game_state.h"
+#include "hits.h"
 #include "puppets.h"
 #include "guest_call.h"
 #include "net/interpolation.h"
@@ -117,6 +118,21 @@ bool hostState(kh2net::PlayerState &out)
     return it->second.interp.sample(now(), out);
 }
 
+// The object that stands for player `id` in our game: their partner (the
+// companion they replace) or puppet in this room, else our own player.
+uint32_t attackerFor(const uint8_t *rdram, uint8_t id)
+{
+    for (const kh2partner::Link &l : kh2partner::links())
+        if (l.playerId == id && l.object)
+            return l.object;
+    for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+        if (a.playerId == id && a.object)
+            return a.object;
+    uint32_t player = 0;
+    std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+    return player;
+}
+
 void makeSession()
 {
     g_session = std::make_unique<kh2net::Session>();
@@ -152,6 +168,26 @@ void makeSession()
             std::memcpy(&h.hp, data.data() + 1, 4);
             std::memcpy(&h.mp, data.data() + 5, 4);
             g_healsIn.push_back(h);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyHit) && g_session->isHost() && g_rdram &&
+            g_opt.sharedEnemies)
+        {
+            // A client's hit: its reaction, played on our copy of the enemy.
+            uint8_t world, room;
+            int16_t serial;
+            kh2hits::Hit hit;
+            if (!kh2hits::decode(data, world, room, serial, hit))
+                return;
+            const kh2state::State st = kh2state::read(g_rdram);
+            if (st.now.world != world || st.now.room != room)
+                return;
+            for (const kh2enemies::Local &e : kh2enemies::scan(g_rdram))
+                if (e.serial == serial && e.hp > 0)
+                {
+                    kh2hits::replay(e.object, attackerFor(g_rdram, origin), hit.damage, hit.param);
+                    break;
+                }
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage) && g_session->isHost() && g_rdram &&
@@ -399,6 +435,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         addLog(g_session->lastError());
     if (!g_session->active())
     {
+        kh2hits::setCapture(false);
         kh2puppets::update(rdram, {});
         return;
     }
@@ -472,11 +509,23 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             }
         }
         else
+        {
+            // Our hits first (their reactions), then the HP they took.
+            for (const kh2hits::Hit &h : kh2hits::takeHits())
+                for (const kh2enemies::Local &e : kh2enemies::scan(rdram))
+                    if (e.object == h.object)
+                    {
+                        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyHit),
+                                             kh2hits::encode(me.now.world, me.now.room, e.serial, h));
+                        break;
+                    }
             for (const kh2enemies::Damage &d :
                  kh2enemies::clientTick(const_cast<uint8_t *>(rdram), me.now.world, me.now.room, now()))
                 g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage),
                                      kh2enemies::encodeDamage(me.now.world, me.now.room, d));
+        }
     }
+    kh2hits::setCapture(g_opt.sharedEnemies && !g_session->isHost());
     // 30 updates a second: every other guest frame.
     if (guestFrame / 2 == g_lastSentFrame / 2)
         return;

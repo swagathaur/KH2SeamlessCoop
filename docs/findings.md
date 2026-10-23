@@ -462,15 +462,30 @@ position, rotation (`+0x14` yaw), serial `+0x1E`, a message id for townsfolk at
 shows: in Twilight Town 02-04 the Struggle signs `W_EX010_U0/V0/W0_RTN` offer
 `0x022B`-`0x022D`). `--actors-at` prints them.
 
-**DAMAGE** (`YS::BTLOBJ::_OVR_exec_damage`, `0x00186148`, called through the
-target's vtable, hands it to the battle overlay's handler 6 through
-`0x00196AA0`): `+0x00` hit direction (float4), `+0x10` attacker, `+0x14`
-target, `+0x18` flags (bit 0 handled), `+0x1C` the ATTACK, `+0x20` its
-parameters (`+0x0C` a knock-back strength, `0x7FFF` none), `+0x26`/`+0x27`
-reaction types (`YS::DAMAGE::GetReactionType`), `+0x28` the amount, `+0x58`/
-`+0x5C` the ATTACK again. `KH2_DAMAGE_LOG=1` (port/coop/hits.cpp) logs every
-one. Replaying a remote player's hit on the host would need an ATTACK of the
-host's own, which is why the host only takes the HP so far.
+**DAMAGE.** An object takes a hit in `0x001B3D00(obj, DAMAGE*)`: the HP
+(`0x00186D48`: the amount at `+0x28` through `add_hp`, vtable `+0x78`, sheet
+index `+0x25`; skipped when flag 2 is set, and it sets it), the attacker
+(`0x001B3CB0`, from the ATTACK's `+0x08`, into object `+0xAE4`), the class's
+own reaction (vtable `+0x68`, e.g. `0x00186160`: detach, knock-back, launch by
+reaction type), the AI script (`YS::VM::callback` 6) and last
+`YS::BTLOBJ::_OVR_exec_damage` (`0x00186148`, vtable `+0x64`). Layout:
+`+0x00` hit direction (float4), `+0x10` attacker, `+0x14` target, `+0x18`
+flags (1 handled, 2 HP taken, 4 ...), `+0x1C` the ATTACK (`+0x08` attacker,
+`+0x0C` target), `+0x20` its attack parameters (`+0x04` kind, `+0x0C`
+knock-back, `0x7FFF` none, `+0x2B` ...), `+0x25` sheet index, `+0x26`/`+0x27`
+reaction types (`YS::DAMAGE::GetReactionType`), `+0x28` amount, `+0x58`/`+0x5C`
+the ATTACK again. The script traps (`YS::trap_damage_*`, `0x0018F4A0`-
+`0x0018F690`) read only the flags, the parameters, `+0x25`-`+0x28`. Enemy
+motions 10-39 are damage motions (`YS::trap_enemy_is_damage_motion`).
+`KH2_DAMAGE_LOG=1` (port/coop/hits.cpp) logs every DAMAGE.
+
+**Replaying a client's hit on the host** (hits.cpp): the client copies the
+DAMAGE and 0x80 bytes of its parameters when its player hits an enemy; the
+host builds it again in free memory (`0x01E4D200`, four slots of `0x240`)
+with flag 2 set, a zeroed `0x140`-byte stand-in ATTACK (attacker: the
+player's partner or puppet), and calls `0x001B3D00` on its enemy: Seifer
+(Twilight Town 02-04) plays the same damage motion on the host as on the
+client (12, 13), and the HP, already sent, is not taken twice.
 
 **Enemy puppets.** With an enemy's "may act" bit set (object `+0x10C |=
 0x200000`) its AI does nothing, but `YS::MOTION::change` still plays any

@@ -226,8 +226,9 @@ enemy swings at you where and when it swings for the host, and its attacks
 hit whoever is in their way on each machine. A hit a client lands is handled by
 that client's game as usual (spark, sound, reaction; the host's motion is
 put back 0.6 s later), is sent to the host and counts there, so everyone's hits wear the same enemies down; an
-enemy the host's game kills dies for everyone. On the host, a client's hit
-shows as the enemy's HP going down (the flinch is not replayed there yet).
+enemy the host's game kills dies for everyone. The hit itself goes to the host
+too and is played on the host's enemy without its HP, so it flinches, is
+knocked back and reacts there as well, and every other player sees that.
 Co-op → **Shared enemies** turns sharing off on a client
 (`--no-shared-enemies`); `KH2_ENEMY_AI=1` keeps the client's own enemy AI
 running as the first version did.

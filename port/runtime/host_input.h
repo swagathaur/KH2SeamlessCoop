@@ -27,6 +27,9 @@ void setConfirmOnBottom(bool on);
 bool confirmOnBottom();
 // While suppressed (the settings menu is open) the game sees an idle pad.
 void setSuppressed(bool on);
+// Buttons (PS2 mask, e.g. 0x0008 Start) the game does not see while set: a
+// co-op client cannot open the cutscene's skip menu in the host's story.
+void setBlockedButtons(uint32_t mask);
 // The pad as the player holds it (PS2 button mask, active high, and the sticks
 // packed rx|ry|lx|ly), also while suppressed: for the runtime's own menus.
 uint32_t rawButtons();

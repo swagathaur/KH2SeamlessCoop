@@ -17,6 +17,13 @@ void setAutoSkip(bool on);
 bool autoSkip();
 // A cutscene (the game's control state 3) is running.
 bool inCutscene(const uint8_t *rdram);
+// A co-op client playing in the host's story may not skip on its own: holding
+// the skip button asks the host instead (takeSkipVote), and --skip-cutscenes
+// does nothing. Allowed by default.
+void setLocalSkip(bool allowed);
+bool localSkip();
+// The player asked to skip since the last call (only while local skips are off).
+bool takeSkipVote();
 // Skip the in-engine cutscene now (no-op outside one).
 bool skipCutscene(uint8_t *rdram);
 // Once per host loop iteration. skipHeld: how long the skip button has been

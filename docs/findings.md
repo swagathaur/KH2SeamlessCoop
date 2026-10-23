@@ -493,3 +493,31 @@ motion on it, the motion's hit boxes still hit, and the game's own damage code
 still hurts it and plays its reaction: so a client can mirror the host's
 enemies by motion alone and still land hits on them (Seifer, Twilight Town
 02-04).
+
+## Story state (shared story)
+
+The game runs on its save data (`getSaveRam()`, `0x0032BB30`, `0x10FC0`
+bytes, layout as OpenKH's `SaveDataFinalMix`). The story part: each room's
+map/battle/event programs (`+0x0010`, 6 bytes a room), the progress flags
+(`+0x1C90`, `YS::PROGRESS`, base `0x0032D7C0`), rooms visited (`+0x22F8`),
+`YS::SAVEFLAG`'s flags (`+0x2400`, base `0x0032DF30`) and the party for each
+world (`+0x3534`). Munny follows at `+0x2440`; level, items, equipment,
+abilities and drive forms are elsewhere. port/coop/story.cpp copies
+`+0x0010`-`+0x2440` and `+0x3534`-`+0x3580` from the host.
+
+**Saving and loading.** The save menu makes the memory card image with
+`FUN_00240A70(image)`: `memcpy(image, getSaveRam(), 0x10FC0)` (`0x002FDD68`),
+a few fields, then the checksum (`FUN_002409B8`, into `+0x08`). Loading is
+the same memcpy the other way (`FUN_00240B48`). story.cpp hooks memcpy for
+exactly those (size `0x10FC0`, the save data on one side). The image buffer
+(`*0x0035EC90`) exists only while the save menu is open.
+
+**Cutscenes.** A room's event program (location `+8`, `0x0032BAE0`) can
+start a cutscene as it begins; a map jump to the room with that event plays
+it. Others start inside a running program: in the Sandlot (02-04, event 76)
+the Struggle sign (`W_EX010_U0_RTN`, reaction `0x022B`) starts
+`tt_event_110a/b/c`, named in the room's script data (the current one's name
+is kept in the event system's heap, e.g. `0x01DAD918`). What starts those by
+name is not found yet. `sa::EVENT::readBuffAlloc` (`0x00227870`) reads an
+event's parts (`anm/tt/<model>/ETTnnnnnE.anb`, `voice/fm/event/tt109nn*.vag`,
+`bgm/`, `se/`); `KH2_EVENT_LOG=1` logs them.

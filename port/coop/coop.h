@@ -16,10 +16,12 @@ struct Options
     std::string name = "Player";
     bool host = false;
     std::string join;          // host address ("1.2.3.4" or "1.2.3.4:27552")
+    uint64_t joinAtFrame = 0;  // testing: join once the game reaches this frame
     uint16_t port = kh2net::kDefaultPort;
     float simulatedLoss = 0;
     bool followHost = false;    // clients warp to the host's room when it changes
     bool sharedEnemies = true;  // clients follow the host's enemies (enemies.h)
+    bool sharedStory = true;    // clients play in the host's story, rooms and cutscenes (story.h)
 };
 
 struct RemotePlayer
@@ -57,6 +59,11 @@ void setSharedEnemies(bool on);
 // (partners.h), with no session.
 void setTestPartner(bool on);
 bool sharedEnemies();
+// Clients play in the host's story while connected (their own comes back
+// when they leave), go where the host goes and watch the host's cutscenes;
+// only the host skips them (a client's skip is a vote).
+void setSharedStory(bool on);
+bool sharedStory();
 
 // For display.
 bool active();

@@ -1,5 +1,6 @@
 #include "cutscene_skip.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +18,8 @@ constexpr uint32_t kUncKick = 0x00352770;       // set by FUN_001D5A38 (kickUnc'
 constexpr double kHoldToSkip = 1.0;              // seconds
 
 bool g_auto = false;
+std::atomic<bool> g_localSkip{true}; // false: a co-op client in the host's story
+std::atomic<bool> g_vote{false};
 double g_lastSkip = -100.0;
 double g_cutsceneSince = -1.0;
 bool g_holdUsed = false; // this hold already skipped something
@@ -31,6 +34,9 @@ double now()
 } // namespace
 
 void setAutoSkip(bool on) { g_auto = on; }
+void setLocalSkip(bool allowed) { g_localSkip = allowed; }
+bool localSkip() { return g_localSkip; }
+bool takeSkipVote() { return g_vote.exchange(false); }
 bool autoSkip() { return g_auto; }
 
 bool inCutscene(const uint8_t *rdram)
@@ -86,6 +92,13 @@ void tick(uint8_t *rdram, double skipHeld)
             kh2movie::skipCurrent();
             kh2pgs::toast("Movie skipped");
         }
+        else if (cutscene && !g_localSkip)
+        {
+            // The host's story: the host decides; this is a vote.
+            g_holdUsed = true;
+            g_vote = true;
+            kh2pgs::toast("Asked to skip: the host decides");
+        }
         else if (cutscene && mayManual && skipCutscene(rdram))
         {
             g_holdUsed = true;
@@ -97,7 +110,7 @@ void tick(uint8_t *rdram, double skipHeld)
     // again if it is still going a while after the last skip.
     // Only story events (an event number in the location): the Game Over
     // screen also stops control, with event 0, and is left alone.
-    if (g_auto && cutscene && mayAuto && t - g_cutsceneSince > 0.5)
+    if (g_auto && g_localSkip && cutscene && mayAuto && t - g_cutsceneSince > 0.5)
     {
         if (scene.now.event != 0 && scene.now.event != 0xFFFF && skipCutscene(rdram))
             g_skippedThisScene = true;

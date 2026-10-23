@@ -13,6 +13,10 @@
 #include "game_state.h"
 #include "hits.h"
 #include "puppets.h"
+#include "story.h"
+#include "cutscene_skip.h"
+#include "host_input.h"
+#include "pgs_renderer.h"
 #include "guest_call.h"
 #include "net/interpolation.h"
 #include "net/session.h"
@@ -51,6 +55,20 @@ bool g_resendLoadout = false;
 bool g_testPartner = false;
 std::deque<kh2partner::Remote> g_echo;
 bool g_partnersReset = false; // undo the partners on the next tick (session over)
+// Shared story (story.h): the host sends its story and where it is (the
+// scene); clients play in it and watch its cutscenes.
+constexpr size_t kSceneSize = 11; // world, room, door, map, battle, event, cutscene
+bool g_storyFull = false;             // host: send all of it next time (someone joined)
+uint8_t g_sceneSent[kSceneSize] = {}; // host: the scene as last sent
+bool g_sceneSentValid = false;
+uint8_t g_hostScene[kSceneSize] = {}; // client: the host's scene
+bool g_haveHostScene = false;
+bool g_storyWarp = false;              // client: reload the room in the host's story
+uint32_t g_sceneStarted = 0xFFFFFFFFu; // client: the host's cutscene we started here
+double g_lastSceneWarp = -100.0;
+double g_strayCutSince = -1.0;         // client: in a cutscene the host is not in, since
+double g_lastClientSkip = -100.0;
+double g_battleDiffSince = -1.0;      // client: the host's battle differs from ours, since
 // Reloading the room so partners show their own look (partners.h): wanted,
 // then the map jump under way, then the player put back where they stood.
 struct Refresh
@@ -133,6 +151,162 @@ uint32_t attackerFor(const uint8_t *rdram, uint8_t id)
     return player;
 }
 
+void encodeScene(const kh2state::State &st, uint8_t (&out)[kSceneSize])
+{
+    out[0] = st.now.world;
+    out[1] = st.now.room;
+    std::memcpy(out + 2, &st.now.door, 2);
+    std::memcpy(out + 4, &st.now.map, 2);
+    std::memcpy(out + 6, &st.now.battle, 2);
+    std::memcpy(out + 8, &st.now.event, 2);
+    out[10] = st.control == 3 ? 1 : 0;
+}
+
+// Client: the session is over (or shared story turned off); our own story
+// comes back, and we go back to where we were when the host's began.
+void endStory(uint8_t *ram)
+{
+    kh2story::Place back;
+    if (kh2story::end(ram, back))
+    {
+        addLog("back in your own story");
+        if (back.world != 0)
+            warpLocked(back.world, back.room, back.door);
+    }
+    kh2skip::setLocalSkip(true);
+    kh2input::setBlockedButtons(0);
+    g_haveHostScene = false;
+    g_storyWarp = false;
+    g_sceneStarted = 0xFFFFFFFFu;
+    g_strayCutSince = -1.0;
+}
+
+// Shared story, every tick in a session.
+void storyTick(uint8_t *ram, uint64_t guestFrame)
+{
+    const kh2state::State me = kh2state::read(ram);
+    if (g_session->isHost())
+    {
+        if (!g_opt.sharedStory)
+            return;
+        // The story: what changed, 4 times a second (all of it for newcomers).
+        if (g_storyFull || guestFrame % 15 == 0)
+        {
+            for (const std::vector<uint8_t> &p : kh2story::hostCollect(ram, g_storyFull))
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::StoryChunk), p);
+            g_storyFull = false;
+        }
+        // Where we are and whether a cutscene is playing, when it changes.
+        uint8_t sc[kSceneSize];
+        encodeScene(me, sc);
+        if (!g_sceneSentValid || std::memcmp(sc, g_sceneSent, kSceneSize) != 0)
+        {
+            std::memcpy(g_sceneSent, sc, kSceneSize);
+            g_sceneSentValid = true;
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::Scene),
+                                 std::vector<uint8_t>(sc, sc + kSceneSize));
+        }
+        return;
+    }
+    if (!g_opt.sharedStory)
+    {
+        endStory(ram);
+        return;
+    }
+    uint32_t jumping;
+    std::memcpy(&jumping, ram + kh2state::addr::MapJumpTask, 4);
+    const bool cut = kh2skip::inCutscene(ram);
+    if (!kh2story::active())
+        kh2story::setReturnPlace({me.now.world, me.now.room, me.now.door});
+    if (kh2story::clientTick(ram, me.control == 0 && !jumping))
+    {
+        addLog("playing in the host's story");
+        g_storyWarp = true; // the room's programs are the host's now: load it again
+    }
+    if (!kh2story::active())
+        return;
+    // Only the host skips: ours is a vote; the pause menu's Skip is out of reach.
+    kh2skip::setLocalSkip(false);
+    kh2input::setBlockedButtons(cut ? 0x0008u : 0u);
+    if (kh2skip::takeSkipVote())
+        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SkipVote), {});
+    if (!g_haveHostScene)
+        return;
+    const uint8_t hw = g_hostScene[0], hr = g_hostScene[1];
+    uint16_t hdoor, hbattle, hevent;
+    std::memcpy(&hdoor, g_hostScene + 2, 2);
+    std::memcpy(&hbattle, g_hostScene + 6, 2);
+    std::memcpy(&hevent, g_hostScene + 8, 2);
+    const bool hostCut = g_hostScene[10] != 0 && hevent != 0 && hevent != 0xFFFF;
+    if (g_storyWarp && hw != 0 && me.control == 0 && !jumping)
+    {
+        g_storyWarp = false;
+        g_lastWarp = now();
+        warpLocked(hw, hr, hdoor);
+        return;
+    }
+    if (hw != me.now.world || hr != me.now.room)
+    {
+        g_strayCutSince = -1.0; // following the host takes us there
+        return;
+    }
+    const uint32_t hostKey = uint32_t(hw) << 24 | uint32_t(hr) << 16 | hevent;
+    const uint32_t myKey = uint32_t(me.now.world) << 24 | uint32_t(me.now.room) << 16 | me.now.event;
+    if (!hostCut)
+        g_sceneStarted = 0xFFFFFFFFu;
+    // The host's cutscene. One that starts with the room's event plays here
+    // too when the room loads again with that event. One a script started
+    // inside the event we both run (a talk, say) cannot be started that way
+    // yet: we say so, and catch up with whatever follows it.
+    if (hostCut && !cut && !jumping && g_sceneStarted != hostKey)
+    {
+        if (hevent != me.now.event && now() - g_lastSceneWarp > 3.0)
+        {
+            g_sceneStarted = hostKey;
+            g_lastSceneWarp = now();
+            addLog("watching the host's cutscene");
+            warpLocked(hw, hr, hdoor, hbattle, hevent);
+        }
+        else if (hevent == me.now.event)
+        {
+            g_sceneStarted = hostKey;
+            kh2pgs::toast("The host is watching a cutscene");
+            addLog("the host is watching a cutscene (not shown here yet)");
+        }
+    }
+    // The host's battle (enemy groups) in this room, once it has stayed
+    // different a moment: the room again with it, so its enemies are here.
+    if (!hostCut && !cut && hbattle != 0xFFFF && hbattle != me.now.battle && me.control == 0 && !jumping)
+    {
+        if (g_battleDiffSince < 0)
+            g_battleDiffSince = now();
+        else if (now() - g_battleDiffSince > 1.0 && now() - g_lastSceneWarp > 4.0)
+        {
+            g_lastSceneWarp = now();
+            g_battleDiffSince = -1.0;
+            addLog("joining the host's battle");
+            warpLocked(hw, hr, hdoor, hbattle, hevent);
+        }
+    }
+    else
+        g_battleDiffSince = -1.0;
+    // A cutscene the host is not in: it ended or was skipped there, or our
+    // game started one the host has not. The host's game leads.
+    if (cut && !(hostCut && myKey == hostKey))
+    {
+        if (g_strayCutSince < 0)
+            g_strayCutSince = now();
+        if (now() - g_strayCutSince > 0.75 && now() - g_lastClientSkip > 3.0)
+        {
+            g_lastClientSkip = now();
+            if (kh2skip::skipCutscene(ram))
+                addLog(hostCut ? "skipped: the host is in another cutscene" : "the host's cutscene is over: skipped here too");
+        }
+    }
+    else
+        g_strayCutSince = -1.0;
+}
+
 void makeSession()
 {
     g_session = std::make_unique<kh2net::Session>();
@@ -143,6 +317,11 @@ void makeSession()
         {
             g_remotes[id].name = name;
             g_resendLoadout = true; // the newcomer needs ours
+            if (g_session && g_session->isHost())
+            {
+                g_storyFull = true; // and the story, and where we are
+                g_sceneSentValid = false;
+            }
         }
         else
             g_remotes.erase(id);
@@ -168,6 +347,29 @@ void makeSession()
             std::memcpy(&h.hp, data.data() + 1, 4);
             std::memcpy(&h.mp, data.data() + 5, 4);
             g_healsIn.push_back(h);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::StoryChunk) && !g_session->isHost())
+        {
+            if (g_opt.sharedStory)
+                kh2story::onChunk(data);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::Scene) && !g_session->isHost())
+        {
+            if (data.size() == kSceneSize)
+            {
+                std::memcpy(g_hostScene, data.data(), kSceneSize);
+                g_haveHostScene = true;
+            }
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::SkipVote) && g_session->isHost())
+        {
+            auto it = g_remotes.find(origin);
+            const std::string who = it != g_remotes.end() && !it->second.name.empty() ? it->second.name : "A player";
+            addLog(who + " asks to skip the cutscene");
+            kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyHit) && g_session->isHost() && g_rdram &&
@@ -261,7 +463,7 @@ void init(const Options &options)
     g_opt = options;
     if (options.host)
         host(options.name, options.port);
-    else if (!options.join.empty())
+    else if (!options.join.empty() && !options.joinAtFrame)
         join(options.name, options.join);
 }
 
@@ -408,6 +610,12 @@ void stepRefresh(uint8_t *ram)
 
 void tick(const uint8_t *rdram, uint64_t guestFrame)
 {
+    // --join-at: join now (as a player would once their game is running).
+    if (g_opt.joinAtFrame && guestFrame >= g_opt.joinAtFrame && !g_opt.join.empty())
+    {
+        g_opt.joinAtFrame = 0;
+        join(g_opt.name, g_opt.join);
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     uint8_t *ram = const_cast<uint8_t *>(rdram);
     kh2enemies::thawAfterSession(ram);
@@ -424,6 +632,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     stepRefresh(ram);
     if (!g_session)
     {
+        endStory(ram);
         kh2puppets::update(rdram, {});
         return;
     }
@@ -435,11 +644,13 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         addLog(g_session->lastError());
     if (!g_session->active())
     {
+        endStory(ram);
         kh2hits::setCapture(false);
         kh2puppets::update(rdram, {});
         return;
     }
     updatePartners(ram, guestFrame);
+    storyTick(ram, guestFrame);
     // Remote players with a body drive their puppets, unless they are one of
     // our party members (partners.h).
     {
@@ -472,7 +683,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     // Clients following the host: once the host has been in another room for
     // a moment and we are in free control, go there too.
-    if (g_opt.followHost && !g_session->isHost())
+    if ((g_opt.followHost || kh2story::active()) && !g_session->isHost())
     {
         kh2net::PlayerState host;
         const kh2state::State me = kh2state::read(rdram);
@@ -650,6 +861,12 @@ void setSharedEnemies(bool on)
         kh2enemies::reset();
 }
 bool sharedEnemies() { return g_opt.sharedEnemies; }
+void setSharedStory(bool on)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_opt.sharedStory = on;
+}
+bool sharedStory() { return g_opt.sharedStory; }
 void setTestPartner(bool on)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

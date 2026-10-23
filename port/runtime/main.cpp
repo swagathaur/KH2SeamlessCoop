@@ -51,6 +51,7 @@
 #include "puppets.h"
 #include "partners.h"
 #include "hits.h"
+#include "story.h"
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
@@ -124,6 +125,7 @@ struct Options
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
     std::set<uint64_t> actorsAt;       // --actors-at: print the object list
+    uint64_t storySaveTest = 0;        // --story-save-test: make a save image and check whose story it holds
     std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
@@ -248,6 +250,7 @@ void usage()
         "                          (sticks 0-255, 128 = centre, LY 0 = up; START may be +N)\n"
         "  --host[=PORT]           host a co-op session (default port 27552)\n"
         "  --join=HOST[:PORT]      join a co-op session\n"
+        "  --join-at=FRAME         testing: join (--join) only once the game reaches FRAME\n"
         "  --name=NAME             your name in co-op\n"
         "  --puppet-mode=M         co-op: show other players as their own character ('spawn',\n"
         "                          default) or by moving an NPC already in the room ('borrow')\n"
@@ -267,6 +270,7 @@ void usage()
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
         "  --no-shared-enemies     co-op client: keep your own enemies instead of the host's\n"
+        "  --no-shared-story       co-op client: keep your own story instead of playing in the host's\n"
         "  --net-loss=F            testing: drop this fraction of outgoing co-op packets\n"
         "  --mash-until=FRAME      stop --mash at this guest frame\n"
         "  --mash=BTN[+BTN]:N      tap these buttons every N guest frames (gets through menus and\n"
@@ -436,9 +440,12 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a == "--host") o.coop.host = true;
         else if (a.rfind("--host=", 0) == 0) { o.coop.host = true; o.coop.port = static_cast<uint16_t>(std::stoul(value(a))); }
         else if (a.rfind("--join=", 0) == 0) o.coop.join = value(a);
+        else if (a.rfind("--join-at=", 0) == 0) o.coop.joinAtFrame = std::stoull(value(a));
+        else if (a.rfind("--story-save-test=", 0) == 0) o.storySaveTest = std::stoull(value(a));
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
         else if (a == "--follow-host") o.coop.followHost = true;
         else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
+        else if (a == "--no-shared-story") o.coop.sharedStory = false;
         else if (a == "--mark-actors") o.markActors = true;
         else if (a == "--no-settings") {} // handled before parsing
         else if (a.rfind("--hurt-enemies=", 0) == 0)
@@ -987,6 +994,8 @@ bool harnessTick(Harness &h, uint64_t frame)
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
     }
+    if (o.storySaveTest && due(o.storySaveTest))
+        kh2story::testSave();
     if (hit(o.actorsAt) && frame != h.lastActorsFrame)
     {
         h.lastActorsFrame = frame;
@@ -1355,7 +1364,7 @@ std::vector<std::string> readSettings(const char *argv0)
             // key keeps its value, so "ssaa = 1" or "mouse-sensitivity = 1" stay numbers.
             static const std::set<std::string> kSwitches = {
                 "backbuffer-promotion", "english", "follow-host", "hd-log", "hd-textures", "fullscreen", "headless", "host", "mark-actors", "mute", "no-fsr", "no-mipmaps", "no-mouse-camera",
-                "no-name-tags", "no-rumble", "no-shared-enemies", "no-ssaa-textures", "pause-unfocused", "profile", "show-fps",
+                "no-name-tags", "no-rumble", "no-shared-enemies", "no-shared-story", "no-ssaa-textures", "pause-unfocused", "profile", "show-fps",
                 "skip-cutscenes", "skip-movies", "swap-confirm", "vsync", "widescreen"};
             const bool on = val.empty() || val == "1" || val == "true" || val == "yes" || val == "on";
             const bool off = val == "0" || val == "false" || val == "no" || val == "off";
@@ -1585,6 +1594,7 @@ int main(int argc, char **argv)
     kh2puppets::install(runtime);
     kh2partner::install(runtime);
     kh2hits::install(runtime);
+    kh2story::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
     kh2coop::init(opt.coop);
     if (opt.speed != 1.0)

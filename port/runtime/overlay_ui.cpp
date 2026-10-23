@@ -369,6 +369,11 @@ void draw()
                 if (ImGui::Checkbox("Shared enemies", &shared))
                     kh2coop::setSharedEnemies(shared);
                 ImGui::SetItemTooltip("In the host's room, enemies are where the host's are, with the host's HP; your hits count for everyone");
+                bool story = kh2coop::sharedStory();
+                if (ImGui::Checkbox("Shared story", &story))
+                    kh2coop::setSharedStory(story);
+                ImGui::SetItemTooltip("Play in the host's story: go where they go and watch their cutscenes (only the host skips). "
+                                      "Your own story, and your place in it, come back when you leave; saving keeps yours.");
             }
             bool puppets = kh2puppets::enabled();
             if (ImGui::Checkbox("Show other players", &puppets))

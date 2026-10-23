@@ -268,7 +268,31 @@ place without a network.
 - Clients can jump to the host's room (**Go to the host's room** in the menu)
   or follow them automatically (**Follow the host**, or `--follow-host`): when
   the host has been in another room for a second and you are free to move,
-  the game's own map jump takes you there. Story progress is still each
-  player's own, so rooms your save has not reached yet may misbehave.
+  the game's own map jump takes you there.
+
+**Shared story** (on by default; Co-op → **Shared story**, `--no-shared-story`).
+Any save can join any other: while connected, a client plays in the *host's*
+story. The host runs the game; the client's own story is put aside when they
+join and comes back when they leave, so their save never moves on in the
+host's story:
+
+- The story is the host's: each room's events and battles, the story flags,
+  the rooms seen and each world's party. The client keeps their own level,
+  HP, items, equipment, abilities, munny and drive forms (and what they earn
+  while connected).
+- The client goes wherever the host goes, and into the host's battles: the
+  host's enemies are there for them too.
+- Cutscenes are the host's. A cutscene that starts as a room's event begins
+  for the client as well (the room loads again with it), and ends for them
+  when it ends for the host, watched through or skipped. A cutscene a script
+  starts in the middle of an event (talking to someone, say) is not shown to
+  the client yet: they get a note, and pick up with whatever follows it.
+- Only the host skips. A client holding the skip button asks the host instead
+  (the host sees "... asks to skip the cutscene"); the pause menu's Skip is out
+  of a client's reach during cutscenes.
+- Saving while connected saves the client's own story and their place in it
+  (where they were when they joined), with everything they gained meanwhile.
+- When the session ends, the client's story comes back and the map jump takes
+  them back to where they were when they joined.
 
 Two instances on one PC work too (`--join=127.0.0.1`).

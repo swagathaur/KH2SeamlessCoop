@@ -1,0 +1,391 @@
+From 467a68f4807b2e3d625a7a33300031c080d1fe06 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 23 Oct 2026 14:22:27 +1100
+Subject: [PATCH] 0034 async DMA: wait stats, VIF0 without waiting, modes 2 and
+ 3, GIF_MODE writes
+
+---
+ ps2xRuntime/include/runtime/ps2_memory.h      |  34 ++--
+ ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp       |   6 +-
+ .../src/lib/Kernel/Stubs/Helpers/Support.h    |   6 +-
+ ps2xRuntime/src/lib/ps2_memory.cpp            | 149 ++++++++++++++++--
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |   2 +-
+ 5 files changed, 168 insertions(+), 29 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index dfe1c08..f8c0685 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -358,10 +358,17 @@ public:
+     void processPendingTransfers(bool allowAsync = false);
+     // Blocks until the DMA worker has finished everything queued, then completes
+     // those channels (CHCR, D_STAT, DMAC causes). EE thread only.
+-    void waitDmaIdle();
++    // site (and the guest ra, when known) only feed the PS2X_ASYNC_DMA_STATS report.
++    enum AsyncWaitSite : uint32_t { WaitOther, WaitGuard, WaitSync, WaitGsStub, WaitGifPacket, WaitSyncTransfer, WaitChain, WaitGsEnv, WaitSiteCount };
++    void waitDmaIdle(uint32_t site = WaitOther, uint32_t ra = 0);
+     // Completes the channels if the worker is done; true if any completed. EE only.
+     bool pollAsyncDma();
+     bool asyncDmaOutstanding() const { return m_asyncPendingChannels.load(std::memory_order_relaxed) != 0u; }
++    // Channels not completed yet, or (mode 3) jobs still running on the worker.
++    bool asyncWorkOutstanding() const
++    {
++        return m_asyncPendingChannels.load(std::memory_order_relaxed) != 0u || m_dmaInFlight.load(std::memory_order_acquire) != 0u;
++    }
+     void stopAsyncDma();
+     // Set by sceDmaSend around its CHCR write: that kick may go to the worker.
+     void setAllowAsyncKick(bool on) { m_allowAsyncKick = on; }
+@@ -496,16 +503,25 @@ public:
+     void dmaWorkerMain();
+     void asyncDmaGuard(uint32_t address)
+     {
+-        // Registers and memory the worker owns while it runs: GIF/VIF regs and
+-        // FIFOs, DMA channel 1/2 and D_* regs, VU1 memory, GS privileged regs.
+-        if (m_asyncPendingChannels.load(std::memory_order_relaxed) != 0u &&
+-            ((address >= 0x10003000u && address < 0x10007000u) || (address >= 0x10009000u && address < 0x1000B000u) ||
+-             (address >= 0x1000E000u && address < 0x1000F000u) || (address >= 0x11008000u && address < 0x11010000u) ||
+-             (address >= 0x12000000u && address < 0x12002000u)))
+-            waitDmaIdle();
++        // What the worker owns while it runs: GIF/VIF regs and FIFOs, VU1
++        // memory, GS privileged regs; and DMA channel 1/2 and D_* regs until
++        // their channels complete (in mode 3 they complete at the kick).
++        if (!asyncWorkOutstanding())
++            return;
++        const bool workerOwned = (address >= 0x10003000u && address < 0x10007000u) ||
++                                 (address >= 0x11008000u && address < 0x11010000u) ||
++                                 (address >= 0x12000000u && address < 0x12002000u);
++        const bool channelRegs = (address >= 0x10009000u && address < 0x1000B000u) ||
++                                 (address >= 0x1000E000u && address < 0x1000F000u);
++        if (workerOwned || (channelRegs && m_asyncPendingChannels.load(std::memory_order_relaxed) != 0u))
++            waitDmaIdle(WaitGuard, address);
+     }
++    void noteAsyncWait(uint32_t site, uint32_t ra, uint64_t ns);
+     bool m_allowAsyncKick = false;
+-    int m_asyncDmaMode = -1; // -1: not decided yet (PS2X_ASYNC_DMA), 0 off, 1 on
++    // -1: not decided yet; 0 off; 1 sceDmaSend kicks run async; 2 any VIF1/GIF CHCR kick does;
++    // 3 like 2, and the channel completes at the kick (the game never waits for it).
++    int m_asyncDmaMode = -1;
++    int asyncDmaMode();
+     std::thread m_dmaWorker;
+     std::thread::id m_dmaWorkerId;
+     std::mutex m_dmaMutex;
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index a6a4ab3..f0c07b7 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -110,7 +110,7 @@ namespace ps2_stubs
+         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
+         {
+         if (runtime)
+-            runtime->memory().waitDmaIdle();
++            runtime->memory().waitDmaIdle(PS2Memory::WaitGsStub, 0u);
+             if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
+             {
+                 return;
+@@ -1135,7 +1135,7 @@ namespace ps2_stubs
+     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         if (runtime)
+-            runtime->memory().waitDmaIdle();
++            runtime->memory().waitDmaIdle(PS2Memory::WaitGsStub, getRegU32(ctx, 31));
+         const uint32_t envAddr = getRegU32(ctx, 4);
+         const uint32_t which = getRegU32(ctx, 5) & 1u;
+ 
+@@ -1195,7 +1195,7 @@ namespace ps2_stubs
+     void sceGsSwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         if (runtime)
+-            runtime->memory().waitDmaIdle();
++            runtime->memory().waitDmaIdle(PS2Memory::WaitGsStub, getRegU32(ctx, 31));
+         const uint32_t envAddr = getRegU32(ctx, 4);
+         const uint32_t which = getRegU32(ctx, 5) & 1u;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 3b27c7d..72c9560 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1486,7 +1486,7 @@ namespace
+             if (mem.asyncDmaOutstanding())
+             {
+                 if (mode == 0)
+-                    mem.waitDmaIdle();
++                    mem.waitDmaIdle(PS2Memory::WaitSync, getRegU32(ctx, 31));
+                 else if (!mem.pollAsyncDma())
+                     return 1;
+                 runtime->drainCompletedDmacHandlers(rdram);
+@@ -1918,7 +1918,7 @@ namespace
+     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
+     {
+         if (runtime)
+-            runtime->memory().waitDmaIdle();
++            runtime->memory().waitDmaIdle(PS2Memory::WaitGsEnv);
+         if (!runtime || !runtime->syncCoreSubsystems())
+             return;
+         auto &regs = runtime->memory().gs();
+@@ -1934,7 +1934,7 @@ namespace
+     static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
+     {
+         if (runtime)
+-            runtime->memory().waitDmaIdle();
++            runtime->memory().waitDmaIdle(PS2Memory::WaitGsEnv);
+         if (!runtime || !pairs || !runtime->syncCoreSubsystems())
+             return;
+         for (size_t i = 0; i < pairCount; ++i)
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 018dbdd..07c95d6 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,3 +1,5 @@
++#include <chrono>
++#include <cstdio>
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/gs_frontend.h"
+@@ -1001,7 +1003,10 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
+ 
+ void PS2Memory::write32(uint32_t address, uint32_t value)
+ {
+-    asyncDmaGuard(address);
++    // GIF_MODE is only stored (path 3 masking comes from VIF MSKPATH3), so the
++    // per-frame write KH2 makes there need not wait for the DMA worker.
++    if (address != 0x10003010u)
++        asyncDmaGuard(address);
+     if (address & 3)
+     {
+         throw std::runtime_error("Unaligned 32-bit write at address: 0x" + std::to_string(address));
+@@ -1617,7 +1622,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                     (channelBase == 0x1000A000u) ? (m_gifPacketCallback || m_gifArbiter != nullptr) : true;
+                 if (autoProcessTransfers)
+                 {
+-                    processPendingTransfers(m_allowAsyncKick);
++                    // PS2X_ASYNC_DMA=2 also hands the game's own CHCR kicks to the worker.
++                    processPendingTransfers(m_allowAsyncKick || asyncDmaMode() >= 2);
+                 }
+             }
+         }
+@@ -1776,6 +1782,37 @@ std::vector<uint8_t> PS2Memory::snapshotTransfer(const PendingTransfer &p)
+     return out;
+ }
+ 
++namespace
++{
++    // PS2X_ASYNC_DMA_STATS=1: where the EE blocks on the DMA worker, and for how long.
++    struct AsyncWaitStats
++    {
++        uint64_t count[PS2Memory::WaitSiteCount] = {};
++        uint64_t blocked[PS2Memory::WaitSiteCount] = {};
++        uint64_t ns[PS2Memory::WaitSiteCount] = {};
++        uint32_t keyRa[16] = {};
++        uint32_t keySite[16] = {};
++        uint64_t keyNs[16] = {};
++        uint64_t keyCount[16] = {};
++        uint64_t workerNs = 0;
++        uint64_t jobs = 0;
++        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
++    };
++    AsyncWaitStats g_asyncStats;
++    std::mutex g_asyncStatsMutex;
++    int g_asyncStatsOn = -1;
++    bool asyncStatsOn()
++    {
++        if (g_asyncStatsOn < 0)
++        {
++            const char *e = std::getenv("PS2X_ASYNC_DMA_STATS");
++            g_asyncStatsOn = (e && *e == '1') ? 1 : 0;
++        }
++        return g_asyncStatsOn == 1;
++    }
++    const char *const kAsyncSiteNames[] = {"other", "guard", "sync", "gs-stub", "gif-packet", "sync-transfer", "chain", "gs-env"};
++}
++
+ void PS2Memory::dmaWorkerMain()
+ {
+ #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+@@ -1795,12 +1832,21 @@ void PS2Memory::dmaWorkerMain()
+         }
+         PendingTransfer pt;
+         pt.chainData = std::move(job.data);
++        const bool stats = asyncStatsOn();
++        const auto t0 = stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+         if (job.channel == 2u)
+             runGifTransfer(pt);
+         else
+             runVif1Transfer(pt);
+         if (m_gifArbiter)
+             m_gifArbiter->drain();
++        if (stats)
++        {
++            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++            std::lock_guard<std::mutex> lock(g_asyncStatsMutex);
++            g_asyncStats.workerNs += static_cast<uint64_t>(ns);
++            ++g_asyncStats.jobs;
++        }
+         {
+             std::lock_guard<std::mutex> lock(m_dmaMutex);
+             if (m_dmaInFlight.fetch_sub(1u, std::memory_order_acq_rel) == 1u)
+@@ -1822,15 +1868,77 @@ void PS2Memory::stopAsyncDma()
+     m_dmaWorker.join();
+ }
+ 
+-void PS2Memory::waitDmaIdle()
++void PS2Memory::noteAsyncWait(uint32_t site, uint32_t ra, uint64_t ns)
+ {
+-    if (m_asyncPendingChannels.load() == 0u || std::this_thread::get_id() == m_dmaWorkerId)
++    std::lock_guard<std::mutex> lock(g_asyncStatsMutex);
++    AsyncWaitStats &st = g_asyncStats;
++    if (site < WaitSiteCount)
++    {
++        ++st.count[site];
++        if (ns != ~0ull)
++        {
++            ++st.blocked[site];
++            st.ns[site] += ns;
++            // Per caller (guest ra, or the address for guard waits).
++            int slot = -1;
++            for (int i = 0; i < 16; ++i)
++                if (st.keyCount[i] != 0 && st.keyRa[i] == ra && st.keySite[i] == site)
++                {
++                    slot = i;
++                    break;
++                }
++            if (slot < 0)
++                for (int i = 0; i < 16; ++i)
++                    if (st.keyCount[i] == 0)
++                    {
++                        slot = i;
++                        break;
++                    }
++            if (slot >= 0)
++            {
++                st.keyRa[slot] = ra;
++                st.keySite[slot] = site;
++                st.keyNs[slot] += ns;
++                ++st.keyCount[slot];
++            }
++        }
++    }
++    const auto now = std::chrono::steady_clock::now();
++    const double secs = std::chrono::duration<double>(now - st.last).count();
++    if (secs < 4.0)
++        return;
++    std::fprintf(stderr, "[async-dma] %.1fs: worker busy %.1f%% (%llu jobs); EE blocked:", secs,
++                 100.0 * static_cast<double>(st.workerNs) / (secs * 1e9), static_cast<unsigned long long>(st.jobs));
++    for (uint32_t i = 0; i < WaitSiteCount; ++i)
++        if (st.count[i])
++            std::fprintf(stderr, " %s %llu/%llu %.1fms", kAsyncSiteNames[i], static_cast<unsigned long long>(st.blocked[i]),
++                         static_cast<unsigned long long>(st.count[i]), static_cast<double>(st.ns[i]) / 1e6);
++    std::fprintf(stderr, "\n");
++    for (int i = 0; i < 16; ++i)
++        if (st.keyCount[i])
++            std::fprintf(stderr, "[async-dma]   %s 0x%08x: %llu waits, %.1fms\n", kAsyncSiteNames[st.keySite[i]], st.keyRa[i],
++                         static_cast<unsigned long long>(st.keyCount[i]), static_cast<double>(st.keyNs[i]) / 1e6);
++    st = AsyncWaitStats{};
++    st.last = now;
++}
++
++void PS2Memory::waitDmaIdle(uint32_t site, uint32_t ra)
++{
++    if (!asyncWorkOutstanding() || std::this_thread::get_id() == m_dmaWorkerId)
+         return;
+     if (m_dmaInFlight.load(std::memory_order_acquire) != 0u)
+     {
+-        std::unique_lock<std::mutex> lock(m_dmaMutex);
+-        m_dmaIdleCv.wait(lock, [&] { return m_dmaInFlight.load(std::memory_order_acquire) == 0u; });
++        const bool stats = asyncStatsOn();
++        const auto t0 = stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++        {
++            std::unique_lock<std::mutex> lock(m_dmaMutex);
++            m_dmaIdleCv.wait(lock, [&] { return m_dmaInFlight.load(std::memory_order_acquire) == 0u; });
++        }
++        if (stats)
++            noteAsyncWait(site, ra, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+     }
++    else if (asyncStatsOn())
++        noteAsyncWait(site, ra, ~0ull);
+     applyAsyncCompletions();
+ }
+ 
+@@ -1871,17 +1979,28 @@ void PS2Memory::applyAsyncCompletions()
+     }
+ }
+ 
+-void PS2Memory::processPendingTransfers(bool allowAsync)
++int PS2Memory::asyncDmaMode()
+ {
+     if (m_asyncDmaMode < 0)
+     {
+         const char *e = std::getenv("PS2X_ASYNC_DMA");
+-        m_asyncDmaMode = (e && *e == '1') ? 1 : 0;
++        m_asyncDmaMode = (e && *e >= '1' && *e <= '3') ? (*e - '0') : 0;
+     }
+-    const bool async = allowAsync && m_asyncDmaMode == 1 &&
++    return m_asyncDmaMode;
++}
++
++void PS2Memory::processPendingTransfers(bool allowAsync)
++{
++    const bool async = allowAsync && asyncDmaMode() != 0 &&
+                        (!m_pendingGifTransfers.empty() || !m_pendingVif1Transfers.empty());
+     if (!async)
+-        waitDmaIdle();
++    {
++        // Only GIF and VIF1 work has to queue behind the worker's; VIF0 (VU0)
++        // does not touch what the worker owns, so it runs straight away.
++        if (!m_pendingGifTransfers.empty() || !m_pendingVif1Transfers.empty())
++            waitDmaIdle(WaitSyncTransfer, (m_pendingGifTransfers.empty() ? 0u : 4u) | (m_pendingVif1Transfers.empty() ? 0u : 2u) |
++                                              (allowAsync ? 0x10u : 0u));
++    }
+     else
+     {
+         if (!m_dmaWorker.joinable())
+@@ -1897,10 +2016,14 @@ void PS2Memory::processPendingTransfers(bool allowAsync)
+             jobs.push_back({2u, snapshotTransfer(p)});
+         for (const auto &p : m_pendingVif1Transfers)
+             jobs.push_back({1u, snapshotTransfer(p)});
++        // Mode 3: the channel reports done at once; the worker still runs
++        // everything in order, and reads of what it owns wait for it.
+         if (!m_pendingGifTransfers.empty())
+             m_asyncPendingChannels.fetch_or(1u << 2);
+         if (!m_pendingVif1Transfers.empty())
+             m_asyncPendingChannels.fetch_or(1u << 1);
++        if (asyncDmaMode() == 3)
++            applyAsyncCompletions();
+         m_pendingGifTransfers.clear();
+         m_pendingVif1Transfers.clear();
+         {
+@@ -1981,7 +2104,7 @@ void PS2Memory::processPendingTransfers(bool allowAsync)
+     m_pendingVif1Transfers.clear();
+ 
+     // The worker drains the arbiter itself while it owns it.
+-    if (m_gifArbiter && !async)
++    if (m_gifArbiter && !async && !asyncWorkOutstanding())
+         m_gifArbiter->drain();
+ 
+ 
+@@ -2069,8 +2192,8 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
+ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
+ {
+     // Other threads' packets wait for the DMA worker's (patch 0033).
+-    if (m_asyncPendingChannels.load(std::memory_order_relaxed) != 0u && std::this_thread::get_id() != m_dmaWorkerId)
+-        waitDmaIdle();
++    if (asyncWorkOutstanding() && std::this_thread::get_id() != m_dmaWorkerId)
++        waitDmaIdle(WaitGifPacket);
+     if (!data || sizeBytes < 16)
+         return;
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 661fa1c..a2601bc 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2330,7 +2330,7 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+     constexpr uint32_t GIF_TADR = 0x1000A030u;
+     constexpr uint32_t GIF_CHCR = 0x1000A000u;
+ 
+-    m_memory.waitDmaIdle();
++    m_memory.waitDmaIdle(PS2Memory::WaitChain, ctx ? getRegU32(ctx, 31) : 0u);
+     ps2TraceGuestWrite(rdram, D_PCR, 4u, dPcrValue, 0u, "WRITE32", ctx);
+     m_memory.writeIORegister(D_PCR, dPcrValue);
+     ps2TraceGuestWrite(rdram, D_STAT, 4u, dStatValue, 0u, "WRITE32", ctx);
+-- 
+2.43.0
+

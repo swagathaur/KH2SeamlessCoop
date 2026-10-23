@@ -448,6 +448,13 @@ void serviceReadback()
     g_rbCond.notify_all();
 }
 
+// --gif-capture: 1 = start at the next frame(), 2 = capturing until the one after.
+std::mutex g_capMutex;
+std::string g_capPath;
+int g_capState = 0;
+FILE *g_capFile = nullptr;
+size_t g_capBytes = 0;
+
 // Render thread, under g_mutex.
 void drainQueue()
 {
@@ -471,6 +478,11 @@ void drainQueue()
         {
             uint32_t size;
             std::memcpy(&size, g_draining.data() + at, 4);
+            if (g_capFile)
+            {
+                std::fwrite(g_draining.data() + at, 1, 4u + size, g_capFile);
+                g_capBytes += 4u + size;
+            }
             g_gs->gif_transfer(3, g_draining.data() + at + 4, size);
             at += 4 + size;
         }
@@ -1334,6 +1346,25 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         registerThread();
+        {
+            std::lock_guard<std::mutex> cap(g_capMutex);
+            if (g_capState == 2)
+            {
+                // Packets of the frame that just ended were drained before this call.
+                drainQueue();
+                std::fclose(g_capFile);
+                g_capFile = nullptr;
+                g_capState = 0;
+                std::printf("[pgs] GIF capture: %zu bytes in %s\n", g_capBytes, g_capPath.c_str());
+            }
+            else if (g_capState == 1)
+            {
+                drainQueue(); // the previous frame's tail stays out
+                g_capFile = std::fopen(g_capPath.c_str(), "wb");
+                g_capBytes = 0;
+                g_capState = g_capFile ? 2 : 0;
+            }
+        }
         drainQueue();
         savePipelineCache(false);
         g_gs->flush();
@@ -1396,6 +1427,14 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 void setAspect(float aspect) { g_opt.aspect = aspect; }
 float displayAspect() { return g_opt.aspect > 0.0f ? g_opt.aspect : 4.0f / 3.0f; }
 bool takeScreenshotRequest() { return g_screenshotRequested.exchange(false); }
+void requestGifCapture(const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(g_capMutex);
+    if (g_capState != 0)
+        return;
+    g_capPath = path;
+    g_capState = 1;
+}
 void toast(const std::string &text, double seconds)
 {
     std::lock_guard<std::mutex> lock(g_toastMutex);

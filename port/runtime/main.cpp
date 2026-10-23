@@ -52,6 +52,7 @@
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
+#include "gpu_sync.h"
 #include "hd_textures.h"
 #include "file_override.h"
 #include "overlay_ui.h"
@@ -117,6 +118,7 @@ struct Options
     uint64_t profileFrom = 0, profileTo = 0; // --profile-from=F[:T]: only sample guest frames F..T
     std::string dmaLog;                // FRAME,COUNT: GIF DMA chains to decode
     std::set<uint64_t> gsDumpAt;       // guest frames at which to dump GS state + VRAM
+    std::set<uint64_t> gifCaptureAt;   // --gif-capture: guest frames whose GIF packets to save
     std::set<uint64_t> eeDumpAt;       // guest frames at which to print EE threads and sync objects
     std::vector<uint32_t> watch;       // guest words to print (hex and float) on each status line
     std::set<uint64_t> actorsAt;       // --actors-at: print the object list
@@ -124,6 +126,7 @@ struct Options
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
     unsigned ssaa = 1;                 // GPU renderer super-sampling: 1, 2, 4, 8, 16
+    int asyncDma = -1;                 // --async-dma: VIF1/GIF DMA on a worker thread (PS2X_ASYNC_DMA); default 3
     bool fullscreen = false;
     unsigned windowW = 1280, windowH = 960;
     bool vsync = false;
@@ -207,10 +210,13 @@ void usage()
         "  --stack-dump=A,B,..     at these guest frames print every host thread's stack (the EE\n"
         "                          thread's shows the translated guest call chain)\n"
         "  --gs-dump=A,B,..        at these guest frames write GS registers and all of GS memory\n"
+        "  --gif-capture=A,B,..    GPU renderer: save the next frame's GIF packets to SHOTS/gif_FRAME.bin\n"
         "                          (as a 1024x1024 32-bit image) into the screenshot directory\n"
         "  --renderer=gpu|soft     GS renderer: gpu = paraLLEl-GS on Vulkan (default when windowed),\n"
         "                          soft = the runtime's software rasteriser (default headless)\n"
         "  --ssaa=N                GPU renderer super-sampling, N = 1, 2, 4, 8 or 16 (default 1)\n"
+        "  --async-dma=N           run VU1/GS work on its own thread: 0 off, 1 sceDmaSend only, 2 all kicks,\n"
+        "                          3 all, completing at once (default)\n"
         "  --fullscreen            start fullscreen (Alt+Enter or F11 toggles)\n"
         "  --window=WxH            window size (default 1280x960)\n"
         "  --vsync                 present in sync with the display's refresh\n"
@@ -357,6 +363,12 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             for (std::string t; std::getline(ss, t, ',');)
                 if (!t.empty()) o.eeDumpAt.insert(std::stoull(t));
         }
+        else if (a.rfind("--gif-capture=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (!t.empty()) o.gifCaptureAt.insert(std::stoull(t));
+        }
         else if (a.rfind("--gs-dump=", 0) == 0)
         {
             std::stringstream ss(value(a));
@@ -365,6 +377,7 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         }
         else if (a.rfind("--renderer=", 0) == 0) o.renderer = value(a);
         else if (a.rfind("--ssaa=", 0) == 0) o.ssaa = static_cast<unsigned>(std::stoul(value(a)));
+        else if (a.rfind("--async-dma=", 0) == 0) o.asyncDma = std::stoi(value(a));
         else if (a == "--fullscreen") o.fullscreen = true;
         else if (a.rfind("--window=", 0) == 0)
         {
@@ -567,6 +580,7 @@ struct Harness
     uint64_t lastEeDumpFrame = UINT64_MAX;
     uint64_t lastStackDumpFrame = UINT64_MAX;
     uint64_t lastRamDumpFrame = UINT64_MAX;
+    uint64_t lastGifCaptureFrame = UINT64_MAX;
     uint64_t lastSpawnFrame = UINT64_MAX;
     uint64_t lastWarpFrame = UINT64_MAX;
     uint64_t lastActorsFrame = UINT64_MAX;
@@ -935,6 +949,15 @@ bool harnessTick(Harness &h, uint64_t frame)
     {
         h.lastShotFrame = frame;
         saveShot(h, frame);
+    }
+    if (hit(o.gifCaptureAt) && frame != h.lastGifCaptureFrame)
+    {
+        h.lastGifCaptureFrame = frame;
+        char name[64];
+        std::snprintf(name, sizeof(name), "gif_%06llu.bin", (unsigned long long)frame);
+        std::error_code ec;
+        std::filesystem::create_directories(o.shotDir, ec);
+        kh2pgs::requestGifCapture((std::filesystem::path(o.shotDir) / name).string());
     }
     if (hit(o.gsDumpAt) && frame != h.lastDumpFrame)
     {
@@ -1459,6 +1482,18 @@ int main(int argc, char **argv)
     kh2pad2::install(runtime);
     kh2gs::install(runtime);
     kh2gs::installEnv(runtime);
+    // VU1/GS work on its own thread (patches 0033/0034); mode 3 unless the
+    // option or PS2X_ASYNC_DMA says otherwise.
+    if (opt.asyncDma >= 0 || !std::getenv("PS2X_ASYNC_DMA"))
+    {
+        const std::string v = std::to_string(opt.asyncDma >= 0 ? opt.asyncDma : 3);
+#ifdef _WIN32
+        _putenv_s("PS2X_ASYNC_DMA", v.c_str());
+#else
+        setenv("PS2X_ASYNC_DMA", v.c_str(), 1);
+#endif
+    }
+    kh2gpusync::install(runtime);
     if (opt.english)
         kh2english::install(runtime);
     // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by

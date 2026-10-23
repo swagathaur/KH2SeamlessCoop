@@ -358,3 +358,44 @@ Diagnostics used for this: `KH2_PGS_TRACE_FBP=<fbp|999>:<from>:<lines>[:<to>]`
 (state changes of draws into a frame buffer, transfers and CLUT loads, from
 the GIF stream), `KH2_PGS_VRAM_DUMP=<tick>,...` (paraLLEl-GS VRAM),
 `KH2_RAM_DUMP=<frame>,...` (guest RAM and scratchpad), `KH2_PGS_NO_READBACK`.
+
+## Model draw path (field)
+
+Draw work is queued as FIELD tasks (`FIELD::CreateTask`, 0x102C18). Three matter:
+0x161818 sends the finished DMA chain (via 0x133F80), 0x144250 draws the map
+octree, 0x161880 renders models (0x10A618).
+
+**Queueing.** Each object at `obj+0x670` goes through 0x143398 → 0x146F28 →
+0x144250 → 0x1473E8 → 0x148598 / 0x147F08 → 0x11CD80 → 0x11CA20, which fills
+`inst+0x40` (world matrix) and `inst+0xC0` (view×world) and queues a record with
+0x109D00 into the lists at 0x33CC78.
+
+**Rendering.** 0x10A618 walks the records and calls 0x11C8F8 for each, which
+calls vtable+0x4C (0x123138) and then the packet builder 0x121CC8
+`(model, world, chains, params, flags, texanim, passflag, viewWorld)`.
+Menus draw models immediately through 0x11CDF0 instead.
+
+**ModelObj fields.**
+
+| Offset | Meaning |
+|---|---|
+| +0x14 | resource; +4 is the MDLX header |
+| +0x2C / +0x30 | skin matrices (64 bytes each, count = MDLX +0x10 u16) and their swap buffer, swapped by 0x11D440 |
+| +0x40 / +0xC0 | world and view×world |
+| +0x104 | subpart visibility flags |
+| +0x108 / +0x10C | DMA chain arrays |
+
+**Animation.** 0x17F938 → 0x11C4E8 → 0x130D28 → 0x12D728 / 0x129C38 (bones, IK).
+
+**Mesh chains** are built once at load by 0x120A20: per VIF packet a REF to the
+static VIF data, a REF to `skin matrices + index*64`, then MSCNT. The header
+comes from 0x108730 followed by MSCAL 0. Textures come from `param+0x24`
+(the BAR type-7 block).
+
+**VU1 programs** are uploaded from the table at 0x3A8EA0 by 0x109360:
+1 = 0x325C00, 2 = 0x327400 (skinned models, 1132 instruction pairs),
+3 = 0x329800 (shadow), 4 = 0x329B80. Program 2: entry 0 loads constants
+(vf24–27 matrix, vf28–31, vf21) from VU addresses 0–8 and ends; the per-batch
+code starts at 0x58, selects optional passes from bits of VU word 9.x, skins
+vertices against up to 4 matrices per influence count, and kicks at 0xCA8,
+0xE88, 0x1660 and 0x2300. `tools/vu_disasm.py` disassembles it.

@@ -1,0 +1,36 @@
+--- a/gs/gs_interface.cpp	2026-10-23 14:47:43.772545982 +1100
++++ b/gs/gs_interface.cpp	2026-10-23 14:47:51.872331878 +1100
+@@ -3576,8 +3576,25 @@
+ 	}
+ }
+ 
++// KH2 port (patch 0003): PGS_NO_AA1=1 ignores PRIM.AA1, to test edge seams.
++static uint64_t kh2_strip_aa1(uint64_t payload)
++{
++	static const bool strip = [] {
++		const char *e = getenv("PGS_NO_AA1");
++		return e && *e == '1';
++	}();
++	static bool reported = false;
++	if (!reported && (payload & (1u << 7)) && (payload & 7u) != 6u && (payload & 7u) != 0u)
++	{
++		reported = true;
++		fprintf(stderr, "[pgs] PRIM.AA1 in use (prim 0x%x)%s\n", unsigned(payload & 0x7FFu), strip ? ", ignored" : "");
++	}
++	return strip ? (payload & ~uint64_t(1u << 7)) : payload;
++}
++
+ void GSInterface::a_d_PRIM(uint64_t payload)
+ {
++	payload = kh2_strip_aa1(payload);
+ 	Reg64<PRIMBits> prim(payload);
+ 	bool prim_delta = registers.prim.desc.PRIM != prim.desc.PRIM;
+ 
+@@ -3763,6 +3780,7 @@
+ 
+ void GSInterface::a_d_PRMODE(uint64_t payload)
+ {
++	payload = kh2_strip_aa1(payload);
+ 	if (!registers.prmodecont.desc.AC)
+ 	{
+ 		Reg64<PRIMBits> prim{payload};

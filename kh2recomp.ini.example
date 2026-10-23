@@ -28,4 +28,5 @@ widescreen = 1        # 16:9 patch
 
 # Speed
 # ff-speed = 3            # fast-forward while Tab is held
+# async-dma = 0           # 3 (default) runs VU1/GS work on a second thread; 0 = all on one
 # pause-unfocused = 1     # pause while the window is in the background

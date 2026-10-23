@@ -69,6 +69,10 @@ bool pumpWindow();
 // with the UI on top (~60 Hz). False once closed.
 bool redraw();
 
+// Write the GIF packets of the next whole frame to path ([u32 size][bytes]...),
+// for tools/gif_tris.py.
+void requestGifCapture(const std::string &path);
+
 // Read back the last scanned-out frame as RGBA8 (for screenshots).
 bool readback(std::vector<uint32_t> &rgba, uint32_t &width, uint32_t &height);
 

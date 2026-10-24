@@ -1528,6 +1528,9 @@ size_t load(const std::filesystem::path &folder)
             std::string rest;
             std::getline(as, rest);
             rest.erase(0, rest.find_first_not_of(' '));
+            // A relative path is next to the manifest (a portable copy's pack).
+            if (!rest.empty() && std::filesystem::path(rest).is_relative())
+                rest = (folder / rest).string();
             if (r->m_archives.size() <= index)
                 r->m_archives.resize(index + 1);
             r->m_archives[index] = rest;

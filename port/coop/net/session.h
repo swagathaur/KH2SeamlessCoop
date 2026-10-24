@@ -25,6 +25,7 @@ struct SessionConfig
     float simulatedLoss = 0;   // testing: drop this fraction of outgoing packets
     bool openPort = false;     // host: ask the router to forward the port (UPnP / NAT-PMP)
     bool discover = false;     // ask a public STUN server how the internet sees us (the game turns both on)
+    uint8_t preferredId = 0;   // client: ask for this player number (0-based; 0 = any): local player N asks for N-1
 };
 
 struct PeerInfo

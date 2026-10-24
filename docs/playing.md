@@ -250,6 +250,9 @@ the way Dark Souls III's seamless co-op puts a friend in your world:
   member does (Cure, items): the HP your game gives them is sent to their
   game. Damage your enemies do to them is ignored; their own game decides
   what hurts them.
+- Menus call them by their name: the camp menu, status and ability screens
+  and level-up windows show the player's name where Donald's (or Goofy's)
+  would be.
 - The party menu shows their equipment, items and abilities. You cannot
   change them: an edit is undone, and so is what it did to your inventory.
 - Drive forms do not send them away (nor your other companion) while a

@@ -606,6 +606,8 @@ const std::vector<std::string> &servers()
 
 // ---- PortMapper ----
 
+std::atomic<int> g_mappersRunning{0};
+
 struct PortMapper::Shared
 {
     std::mutex mutex;
@@ -625,6 +627,13 @@ void runMapper(std::shared_ptr<PortMapper::Shared> sh, uint16_t port);
 
 PortMapper::~PortMapper() { stop(); }
 
+void PortMapper::waitForAll(int ms)
+{
+    const auto until = Clock::now() + std::chrono::milliseconds(ms);
+    while (g_mappersRunning.load() > 0 && Clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+}
+
 PortMapper::Status PortMapper::status() const
 {
     if (!m_shared)
@@ -638,6 +647,7 @@ void PortMapper::start(uint16_t port)
     stop();
     m_shared = std::make_shared<Shared>();
     m_shared->set(Status{State::Working, "", {}, ""});
+    ++g_mappersRunning;
     m_thread = std::thread(runMapper, m_shared, port);
 }
 
@@ -653,7 +663,13 @@ void PortMapper::stop()
 
 namespace
 {
+void runMapperBody(std::shared_ptr<PortMapper::Shared> sh, uint16_t port);
 void runMapper(std::shared_ptr<PortMapper::Shared> sh, uint16_t port)
+{
+    runMapperBody(std::move(sh), port);
+    --g_mappersRunning;
+}
+void runMapperBody(std::shared_ptr<PortMapper::Shared> sh, uint16_t port)
 {
     using State = PortMapper::State;
     using Status = PortMapper::Status;
@@ -698,6 +714,11 @@ void runMapper(std::shared_ptr<PortMapper::Shared> sh, uint16_t port)
             natpmpMap(gateway, port, 0, e);
         else if (via == Via::Upnp)
             upnpUnmap(igd, port);
+        if (via != Via::None)
+        {
+            std::printf("[nat] asked the router to close port %u again\n", unsigned(port));
+            std::fflush(stdout);
+        }
     };
     if (!alive())
     {

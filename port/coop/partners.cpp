@@ -1,4 +1,5 @@
 #include "partners.h"
+#include "names.h"
 
 #include <algorithm>
 #include <atomic>
@@ -493,6 +494,21 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     }
     g_linked = !g_links.empty();
     kh2puppets::setOverrides(overrides, 1);
+    // The party members they stand in for go by their names in menus.
+    {
+        std::map<int, std::string> names;
+        if (st.now.world < 0x20)
+            for (size_t i = 0; i < order.size(); ++i)
+            {
+                if (order[i]->name.empty())
+                    continue;
+                const uint8_t character =
+                    rd<uint8_t>(rdram, kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(i + 1));
+                if (character > 0 && character < 13)
+                    names[character] = order[i]->name;
+            }
+        kh2names::set(names);
+    }
     return heals;
 }
 
@@ -511,6 +527,7 @@ void reset(uint8_t *rdram)
     g_links.clear();
     g_linked = false;
     kh2puppets::setOverrides({}, 1);
+    kh2names::set({});
 }
 
 uint16_t localWeaponEntry(const uint8_t *rdram)

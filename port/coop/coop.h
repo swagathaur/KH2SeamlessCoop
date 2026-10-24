@@ -17,6 +17,7 @@ struct Options
     bool host = false;
     std::string join;          // host address ("1.2.3.4" or "1.2.3.4:27552")
     uint64_t joinAtFrame = 0;  // testing: join once the game reaches this frame
+    uint8_t preferredId = 0;   // ask the host for this player number (0-based): local player N asks for N-1
     uint16_t port = kh2net::kDefaultPort;
     float simulatedLoss = 0;
     bool openPort = true;       // host: ask the router to forward the port (UPnP / NAT-PMP)

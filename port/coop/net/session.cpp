@@ -267,6 +267,7 @@ void Session::update(double now)
             w.u32(m_config.gameCrc);
             w.u32(m_nonce);
             w.str(m_config.name);
+            w.u8(m_config.preferredId);
             sendRaw(m_hostAddress, pkt);
         }
         return;
@@ -458,6 +459,8 @@ void Session::handleConnect(const Address &from, ByteReader &r, double now)
     std::string name = r.str();
     if (!r.ok())
         return;
+    const uint8_t preferred = r.u8(); // optional
+    const bool havePreferred = r.ok() && preferred > 0 && preferred < kMaxPlayers;
     auto reply = [&](PacketKind kind, auto &&fill) {
         std::vector<uint8_t> pkt;
         ByteWriter w(pkt);
@@ -478,9 +481,16 @@ void Session::handleConnect(const Address &from, ByteReader &r, double now)
         reply(PacketKind::Reject, [](ByteWriter &w) { w.u8(static_cast<uint8_t>(RejectReason::WrongGame)); });
         return;
     }
+    auto taken = [&](uint8_t candidate) {
+        return std::any_of(m_peers.begin(), m_peers.end(), [&](const auto &p) { return p->id == candidate; });
+    };
+    // The number asked for (a local player's), if free; else the first free one.
     uint8_t id = 1;
-    while (id < kMaxPlayers && std::any_of(m_peers.begin(), m_peers.end(), [&](const auto &p) { return p->id == id; }))
-        ++id;
+    if (havePreferred && !taken(preferred))
+        id = preferred;
+    else
+        while (id < kMaxPlayers && taken(id))
+            ++id;
     if (id >= kMaxPlayers)
     {
         reply(PacketKind::Reject, [](ByteWriter &w) { w.u8(static_cast<uint8_t>(RejectReason::Full)); });

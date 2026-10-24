@@ -53,6 +53,7 @@
 #include "partners.h"
 #include "hits.h"
 #include "story.h"
+#include "names.h"
 #include "local_players.h"
 #include "net/nat.h"
 #include "watchdog.h"
@@ -1659,7 +1660,10 @@ int main(int argc, char **argv)
     kh2partner::install(runtime);
     kh2hits::install(runtime);
     kh2story::install(runtime);
+    kh2names::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);
+    if (opt.player > 1)
+        opt.coop.preferredId = static_cast<uint8_t>(opt.player - 1);
     kh2coop::init(opt.coop);
     if (opt.localPlayers > 1 && opt.player == 1)
     {

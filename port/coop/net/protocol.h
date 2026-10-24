@@ -2,7 +2,7 @@
 // magic, protocol version and kind, so strangers' datagrams and other
 // versions are dropped at the door.
 //
-//   Connect   game crc u32, nonce u32, name (u8 length + bytes)
+//   Connect   game crc u32, nonce u32, name (u8 length + bytes), preferred id u8 (0 any)
 //   Accept    player id u8, nonce u32, max players u8
 //   Reject    reason u8
 //   Data      sender u8, seq u16, ack flags u8 (1 = acks valid), ack u16,

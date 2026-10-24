@@ -268,6 +268,7 @@ add_executable(kh2recomp
     port/coop/partners.cpp
     port/coop/hits.cpp
     port/coop/story.cpp
+    port/coop/names.cpp
     port/coop/enemies.cpp
     port/coop/guest_call.cpp
     port/coop/net/udp_socket.cpp

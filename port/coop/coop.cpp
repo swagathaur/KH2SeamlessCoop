@@ -46,6 +46,7 @@ double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
 bool g_followPending = false; // the host moved since we last followed
 int g_rejoins = 0;            // automatic joins after losing the host
+int g_lastMapState = -1;      // the port mapping's state as last logged
 double g_lastRejoin = -100.0;
 const uint8_t *g_rdram = nullptr; // during tick(), for session callbacks
 uint64_t g_lastEnemyFrame = UINT64_MAX;
@@ -428,6 +429,7 @@ kh2net::SessionConfig config(const std::string &name, uint16_t port)
     c.simulatedLoss = g_opt.simulatedLoss;
     c.openPort = g_opt.openPort;
     c.discover = true;
+    c.preferredId = g_opt.preferredId;
     return c;
 }
 } // namespace
@@ -487,7 +489,12 @@ void init(const Options &options)
         join(options.name, options.join);
 }
 
-void shutdown() { leave(); }
+void shutdown()
+{
+    leave();
+    // Let the router hear that the port is closed again before we go.
+    kh2net::PortMapper::waitForAll(3000);
+}
 
 // The remote players as partners (partners.h); heals they got here go out.
 void updatePartners(uint8_t *ram, uint64_t guestFrame)
@@ -688,6 +695,21 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         addLog(g_session->lastError());
     if (g_session->status() == kh2net::Session::Status::Connected)
         g_rejoins = 0;
+    // What the router said about the port (host), once.
+    if (g_session->isHost())
+    {
+        const kh2net::PortMapper::Status pm = g_session->portMapping();
+        const int state = static_cast<int>(pm.state);
+        if (state != g_lastMapState)
+        {
+            g_lastMapState = state;
+            if (pm.state == kh2net::PortMapper::State::Mapped)
+                addLog("the router opened port " + std::to_string(pm.external.port) + " (" + pm.method + "); others join at " +
+                       g_session->shareAddress().str() + (pm.detail.empty() ? "" : " - " + pm.detail));
+            else if (pm.state == kh2net::PortMapper::State::Failed)
+                addLog("the router did not open the port: " + pm.detail);
+        }
+    }
     if (!g_session->active())
     {
         endStory(ram);

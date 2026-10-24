@@ -194,7 +194,7 @@ int main()
 
     // c2 goes silent: the host drops it after the timeout and tells c1.
     const int c1LeavesBefore = c1.leaves;
-    step({&host, &c1}, now, 60 * 7);
+    step({&host, &c1}, now, 60 * int(SessionConfig{}.timeout + 2.0));
     CHECK(host.s.roster().size() == 2);
     CHECK(c1.s.roster().size() == 2);
     CHECK(c1.leaves == c1LeavesBefore + 1);

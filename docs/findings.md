@@ -521,3 +521,16 @@ is kept in the event system's heap, e.g. `0x01DAD918`). What starts those by
 name is not found yet. `sa::EVENT::readBuffAlloc` (`0x00227870`) reads an
 event's parts (`anm/tt/<model>/ETTnnnnnE.anb`, `voice/fm/event/tt109nn*.vag`,
 `bgm/`, `se/`); `KH2_EVENT_LOG=1` logs them.
+
+## Text: party members' names
+
+The game turns a message id into its text with `0x00192048` (searching the
+loaded message files; returns the text). Party members' names are asked for
+with `YS::OBJPART::GetMessage(part)` (`0x001B77A8`), which looks the id up in
+the table at `0x0036DAD0` (u16 by character + 1: `0x851F` Sora, `0x8520`
+Donald, `0x8521` Goofy, ... the `sys` file's `0x51F`...) and tail-jumps to
+`0x00192048`; the camp menu's `Tz::PartyInfo` (`+0x0C` of its 0x14-byte
+entries) holds the text it got. `0xB9FC`-`0xB9FE` are the camp menu's
+status labels (HP, ...), not names. Text encoding (the international font):
+A-Z `0x2E`-`0x47`, a-z `0x9A`-`0xB3`, 0-9 `0x21`-`0x2A`, space `0x01`,
+new line `0x02`, 0 ends. port/coop/names.cpp hooks both functions.

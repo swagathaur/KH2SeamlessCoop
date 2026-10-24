@@ -75,6 +75,9 @@ public:
     // Remove the mapping (in the background; returns at once).
     void stop();
     Status status() const;
+    // At exit: wait (up to `ms`) for mappers that are still removing their
+    // mapping, so the router does not keep the port open for its lease.
+    static void waitForAll(int ms);
 
     struct Shared; // the thread's state: it may outlive this object (stop() lets it finish alone)
 private:

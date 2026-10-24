@@ -80,7 +80,11 @@ bool notForOthers(const std::string &a)
 {
     static const char *const kDrop[] = {"--host",  "--join=",   "--join-at=", "--name=",    "--player=", "--pad=",
                                         "--local-players=", "--fullscreen", "--volume=", "--mute", "--window-pos=",
-                                        "--script=", "--input=", "--teleport=", "--poke=", "--warp-test="};
+                                        "--script=", "--input=", "--teleport=", "--poke=", "--warp-test=",
+                                        // testing aids that act on one window only
+                                        "--menu-at=", "--arrange-at=", "--story-save-test=", "--ram-dump=", "--gs-dump=",
+                                        "--ee-dump=", "--stack-dump=", "--hurt-enemies=", "--partner-test=", "--spawn-test=",
+                                        "--preload-test=", "--nat-test"};
     for (const char *d : kDrop)
         if (a.rfind(d, 0) == 0)
             return true;

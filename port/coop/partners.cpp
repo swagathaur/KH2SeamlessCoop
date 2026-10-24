@@ -321,6 +321,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
 {
     std::vector<Heal> heals;
     std::vector<kh2puppets::Override> overrides;
+    std::vector<std::pair<uint32_t, int32_t>> guards;
     std::lock_guard<std::mutex> lock(g_mutex);
     const kh2state::State st = kh2state::read(rdram);
     const std::vector<Companion> comps = companions(rdram);
@@ -441,7 +442,9 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             // theirs back when this game started another (a hit reaction).
             const uint32_t playing = rd<uint32_t>(rdram, obj + kh2state::addr::ObjMotionIndex);
             ++s.sinceMotion;
-            if (s.dressedAtCreation && (r.motion != s.motion || (playing != r.motion && s.sinceMotion > 20)))
+            if (s.dressedAtCreation)
+                guards.emplace_back(obj, static_cast<int32_t>(r.motion)); // its own AI's motions kept off
+            if (s.dressedAtCreation && (r.motion != s.motion || (playing != r.motion && s.sinceMotion > 4)))
             {
                 s.motion = r.motion;
                 s.sinceMotion = 0;
@@ -494,6 +497,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     }
     g_linked = !g_links.empty();
     kh2puppets::setOverrides(overrides, 1);
+    kh2puppets::setMotionGuards(guards);
     // The party members they stand in for go by their names in menus.
     {
         std::map<int, std::string> names;
@@ -527,6 +531,7 @@ void reset(uint8_t *rdram)
     g_links.clear();
     g_linked = false;
     kh2puppets::setOverrides({}, 1);
+    kh2puppets::setMotionGuards({});
     kh2names::set({});
 }
 

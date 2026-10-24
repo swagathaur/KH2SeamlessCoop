@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -35,6 +36,7 @@ struct Slot
     bool loadRequested = false;
     uint8_t playerId = 0;
     uint16_t motion = 0xFFFF; // last motion we started on it
+    int sinceMotion = 0;      // updates since then
     uint32_t object = 0;
     char name[33] = {};
     float pos[3] = {0, 0, 0};
@@ -311,6 +313,54 @@ void writeTransform(uint8_t *rdram, uint32_t obj, const float pos[3], float yaw)
     std::memcpy(rdram + ((obj + kh2state::addr::ObjDir) & 0x01FFFFFFu), d, sizeof(d));
 }
 
+// Our puppets' motions are ours: the NPC class's own code (its stand-still
+// handler while its action is off, its routine otherwise) starts its idle
+// motion every frame, so the puppet glided along standing. While a puppet
+// follows a player, YS::MOTION::change / start_num on its MOTION start only
+// the motion the player is playing.
+struct Guard
+{
+    std::atomic<uint32_t> motion{0}; // puppet object + 0x140; 0: none
+    std::atomic<int32_t> wanted{-1};
+};
+Guard g_guards[kMaxPuppets + 2]; // our puppets, then the party members players stand in for
+PS2Runtime::RecompiledFunction g_change = nullptr, g_startNum = nullptr;
+
+bool blocked(R5900Context *ctx, const char *what)
+{
+    const uint32_t m = getRegU32(ctx, 4);
+    const int32_t id = static_cast<int32_t>(getRegU32(ctx, 5));
+    for (const Guard &g : g_guards)
+        if (m && g.motion.load(std::memory_order_relaxed) == m)
+        {
+            const int32_t want = g.wanted.load(std::memory_order_relaxed);
+            if (want < 0 || id == want)
+                return false;
+            static int logged = 0;
+            if (std::getenv("KH2_PUPPET_LOG") && logged < 20)
+            {
+                ++logged;
+                std::printf("[puppets] kept %s(%d) off puppet motion %08X (want %d, from %08X)\n", what, id, m, want,
+                            getRegU32(ctx, 31));
+                std::fflush(stdout);
+            }
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return true;
+        }
+    return false;
+}
+void changeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!blocked(ctx, "change"))
+        kh2::callOriginal(g_change, rdram, ctx, runtime);
+}
+void startNumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!blocked(ctx, "start_num"))
+        kh2::callOriginal(g_startNum, rdram, ctx, runtime);
+}
+
 // FUN_00193608(obj) override; runs on the EE thread.
 void buildMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -365,6 +415,13 @@ bool install(PS2Runtime &runtime)
         g_buildMatrix = nullptr;
         return false;
     }
+    constexpr uint32_t kStartNum = 0x0017EDA8; // YS::MOTION::start_num(int, float, float)
+    g_change = runtime.lookupFunction(kMotionChange);
+    g_startNum = runtime.lookupFunction(kStartNum);
+    if (!g_change || !runtime.replaceFunction(kMotionChange, &changeHook))
+        g_change = nullptr;
+    if (!g_startNum || !runtime.replaceFunction(kStartNum, &startNumHook))
+        g_startNum = nullptr;
     return true;
 }
 
@@ -500,9 +557,51 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
             }
             continue;
         }
-        // Our own puppets also play the player's motions.
-        if (s.spawned && tg->motion != s.motion)
+        static const bool kLog = std::getenv("KH2_PUPPET_LOG") != nullptr;
+        static double lastLog = 0;
+        if (kLog && s.spawned && t - lastLog > 0.5)
         {
+            lastLog = t;
+            auto dump = [&](const char *who, uint32_t obj) {
+                std::printf("[puppets] %s %08X motion:", who, obj);
+                for (uint32_t i = 0; i < 0x60; i += 4)
+                {
+                    uint32_t v;
+                    std::memcpy(&v, rdram + ((obj + kh2state::addr::ObjMotion + i) & 0x01FFFFFFu), 4);
+                    std::printf(" %08X", v);
+                }
+                std::printf("\n");
+            };
+            std::printf("[puppets] target motion %u\n", tg->motion);
+            dump("puppet", s.object);
+            uint32_t me;
+            std::memcpy(&me, rdram + kh2state::addr::PlayerPtr, 4);
+            if (me)
+                dump("me", me);
+            std::fflush(stdout);
+        }
+        // Our own puppets also play the player's motions. Their NPC
+        // routine is off (it would start its own idle every frame: the
+        // puppet glided along in it), and the motion is started again if
+        // something else changed it.
+        if (s.spawned)
+        {
+            constexpr uint32_t kObjFlags = 0x10C, kNoAct = 0x200000u;
+            uint32_t flags;
+            std::memcpy(&flags, rdram + ((s.object + kObjFlags) & 0x01FFFFFFu), 4);
+            if (!(flags & kNoAct))
+            {
+                flags |= kNoAct;
+                std::memcpy(const_cast<uint8_t *>(rdram) + ((s.object + kObjFlags) & 0x01FFFFFFu), &flags, 4);
+            }
+        }
+        uint32_t playing = 0;
+        if (s.spawned)
+            std::memcpy(&playing, rdram + ((s.object + kh2state::addr::ObjMotionIndex) & 0x01FFFFFFu), 4);
+        ++s.sinceMotion;
+        if (s.spawned && (tg->motion != s.motion || (playing != tg->motion && s.sinceMotion > 4)))
+        {
+            s.sinceMotion = 0;
             s.motion = tg->motion;
             const uint32_t obj = s.object;
             const uint32_t motion = tg->motion;
@@ -581,6 +680,19 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
             }
         }
     g_any = any;
+    // What each puppet's motion may be changed to (see changeHook).
+    for (size_t i = 0; i < kMaxPuppets; ++i)
+    {
+        const Slot &s = g_slots[i];
+        const bool on = s.active && s.spawned && !s.pending && s.object;
+        int32_t want = -1;
+        if (on)
+            for (const Target &x : targets)
+                if (x.playerId == s.playerId)
+                    want = x.motion;
+        g_guards[i].wanted.store(want, std::memory_order_relaxed);
+        g_guards[i].motion.store(on ? s.object + kh2state::addr::ObjMotion : 0, std::memory_order_relaxed);
+    }
 }
 
 void requestPreload(uint32_t entryId) { preload(entryId, {}); }
@@ -623,6 +735,17 @@ void setOverrides(std::vector<Override> overrides, int channel)
     std::lock_guard<std::mutex> lock(g_mutex);
     g_overrides[channel & 1] = std::move(overrides);
     g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty();
+}
+
+void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects)
+{
+    for (size_t i = 0; i < 2; ++i)
+    {
+        Guard &g = g_guards[kMaxPuppets + i];
+        const bool on = i < objects.size() && objects[i].first;
+        g.wanted.store(on ? objects[i].second : -1, std::memory_order_relaxed);
+        g.motion.store(on ? objects[i].first + kh2state::addr::ObjMotion : 0, std::memory_order_relaxed);
+    }
 }
 
 void setMode(Mode mode) { g_mode = mode; }

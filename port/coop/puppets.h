@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 class PS2Runtime;
@@ -27,6 +28,11 @@ struct Target
     uint16_t model = 0;  // the remote player's objentry id (0x5A Roxas, ...)
     uint16_t motion = 0; // their current motion index (MOTION +0x14)
 };
+
+// Party members other players stand in for (partners.h): only the motion
+// their player is playing may be started on them (object, motion index; up
+// to two; an empty list: none).
+void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects);
 
 enum class Mode
 {

@@ -14,6 +14,7 @@
 #include "hits.h"
 #include "puppets.h"
 #include "story.h"
+#include "downed.h"
 #include "cutscene_skip.h"
 #include "host_input.h"
 #include "pgs_renderer.h"
@@ -224,7 +225,10 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
         kh2story::setReturnPlace({me.now.world, me.now.room, me.now.door});
     // In a room of the game (past the title screen and the new-game set-up)?
     const bool inGame = me.player.valid && me.now.world != 0 && me.now.world != 0xFF;
-    if (kh2story::clientTick(ram, inGame && me.control == 0 && !jumping, inGame && me.control == 0 && !jumping))
+    // (Not while we fight: a fight this game started on its own runs on its
+    // own story flags until it is over.)
+    if (kh2story::clientTick(ram, inGame && me.control == 0 && !jumping && me.battle == 0,
+                             inGame && me.control == 0 && !jumping))
     {
         addLog("playing in the host's story");
         g_storyWarp = true; // the room's programs are the host's now: load it again
@@ -308,7 +312,8 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     }
     // The host's battle (enemy groups) in this room, once it has stayed
     // different a moment: the room again with it, so its enemies are here.
-    if (!hostCut && !cut && hbattle != 0xFFFF && hbattle != me.now.battle && me.control == 0 && !jumping)
+    if (!hostCut && !cut && hbattle != 0xFFFF && hbattle != me.now.battle && me.control == 0 && !jumping &&
+        me.battle == 0)
     {
         if (g_battleDiffSince < 0)
             g_battleDiffSince = now();
@@ -395,14 +400,15 @@ void makeSession()
             // A client's hit: its reaction, played on our copy of the enemy.
             uint8_t world, room;
             int16_t serial;
+            uint16_t entry;
             kh2hits::Hit hit;
-            if (!kh2hits::decode(data, world, room, serial, hit))
+            if (!kh2hits::decode(data, world, room, serial, entry, hit))
                 return;
             const kh2state::State st = kh2state::read(g_rdram);
             if (st.now.world != world || st.now.room != room)
                 return;
             for (const kh2enemies::Local &e : kh2enemies::scan(g_rdram))
-                if (e.serial == serial && e.hp > 0)
+                if (e.serial == serial && e.entry == entry && e.hp > 0)
                 {
                     kh2hits::replay(e.object, attackerFor(g_rdram, origin), hit.damage, hit.param);
                     break;
@@ -683,6 +689,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     stepRefresh(ram);
     if (!g_session)
     {
+        kh2downed::reset(ram);
         endStory(ram);
         kh2puppets::update(rdram, {});
         return;
@@ -712,6 +719,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     if (!g_session->active())
     {
+        kh2downed::reset(ram);
         endStory(ram);
         kh2hits::setCapture(false);
         kh2puppets::update(rdram, {});
@@ -719,6 +727,24 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     updatePartners(ram, guestFrame);
     storyTick(ram, guestFrame);
+    // Downed players (downed.h): who else is here, and who is down.
+    {
+        std::vector<kh2downed::Other> others;
+        const double t = now();
+        for (auto &[id, r] : g_remotes)
+        {
+            kh2net::PlayerState ps;
+            kh2downed::Other o;
+            o.name = r.name.empty() ? "Player " + std::to_string(id + 1) : r.name;
+            if (r.interp.sample(t, ps) && t - r.interp.lastArrival() < 5.0)
+            {
+                o.present = (ps.flags & 1) != 0;
+                o.downed = (ps.flags & 2) != 0;
+            }
+            others.push_back(o);
+        }
+        kh2downed::tick(ram, !others.empty(), others);
+    }
     // Remote players with a body drive their puppets, unless they are one of
     // our party members (partners.h).
     {
@@ -772,7 +798,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             const bool elsewhere = host.world != me.now.world || host.room != me.now.room;
             if (!elsewhere)
                 g_followPending = false;
-            else if (g_followPending && me.control == 0 && !jumping && now() - g_hostRoomSince > 1.0 &&
+            else if (g_followPending && me.control == 0 && me.battle == 0 && !jumping && now() - g_hostRoomSince > 1.0 &&
                      now() - g_lastWarp > 5.0)
             {
                 g_lastWarp = now();
@@ -798,14 +824,16 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         else
         {
             // Our hits first (their reactions), then the HP they took.
+            // (Only for copies of the host's enemies: one this game spawned on
+            // its own has no counterpart there.)
             for (const kh2hits::Hit &h : kh2hits::takeHits())
-                for (const kh2enemies::Local &e : kh2enemies::scan(rdram))
-                    if (e.object == h.object)
-                    {
-                        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyHit),
-                                             kh2hits::encode(me.now.world, me.now.room, e.serial, h));
-                        break;
-                    }
+            {
+                int16_t serial;
+                uint16_t entry;
+                if (kh2enemies::followed(h.object, serial, entry))
+                    g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyHit),
+                                         kh2hits::encode(me.now.world, me.now.room, serial, entry, h));
+            }
             for (const kh2enemies::Damage &d :
                  kh2enemies::clientTick(const_cast<uint8_t *>(rdram), me.now.world, me.now.room, now()))
                 g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyDamage),
@@ -832,6 +860,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         ps.anim = static_cast<uint16_t>(st.player.motion);
         ps.flags |= 1; // has a body in the world
     }
+    if (kh2downed::downed())
+        ps.flags |= 2; // down (downed.h)
     ps.hp = st.party[0].hp;
     ps.maxHp = st.party[0].maxHp;
     ps.mp = st.party[0].mp;

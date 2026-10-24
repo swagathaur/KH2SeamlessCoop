@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,7 @@ namespace kh2puppets
 void requestPreload(uint32_t entryId);
 namespace
 {
+void preload(uint32_t entryId, std::function<void()> requested);
 constexpr size_t kMaxPuppets = 2;
 
 struct Slot
@@ -29,14 +31,18 @@ struct Slot
     bool pending = false;  // spawn job queued, object not known yet
     bool spawnPosted = false;
     uint32_t entry = 0;
-    double loadAt = 0;     // spawn mode: when the model load was requested
+    double loadAt = 0;     // spawn mode: when the model load was requested (the job ran)
+    bool loadRequested = false;
     uint8_t playerId = 0;
     uint16_t motion = 0xFFFF; // last motion we started on it
     uint32_t object = 0;
     char name[33] = {};
     float pos[3] = {0, 0, 0};
     float yaw = 0;
+    uint32_t gen = 0;            // which spawn its jobs belong to
+    uint8_t world = 0, room = 0; // where it was asked for
 };
+uint32_t g_gen = 0;
 
 std::mutex g_mutex;
 Slot g_slots[kMaxPuppets];
@@ -64,7 +70,13 @@ bool ensurePrivateTable(uint8_t *rdram);
 // finish the object with its setup method (vtable +0x38). The factory
 // stores the newest object where GetPlayer() reads (the player is simply
 // created last when a room loads), so that pointer is put back.
-void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void(uint32_t obj)> done)
+//
+// `wanted` is asked before each step that changes the game: a job queued in
+// one room can run in the next (jobs wait while the player is away, as in a
+// cutscene or a load), and a spawn nobody wants any more stops there (done
+// gets 0) instead of making an object nobody follows.
+void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void(uint32_t obj)> done,
+               std::function<bool(const uint8_t *)> wanted = {})
 {
     constexpr uint32_t kAreaAlloc = 0x001050D8;
     constexpr uint32_t kVtableSetup = 0x38;
@@ -78,9 +90,17 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
     auto st = std::make_shared<State>();
     std::memcpy(st->pos, pos, sizeof(st->pos));
     st->yaw = yaw;
-    kh2guest::post([st, entry, done](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
+    kh2guest::post([st, entry, done, wanted](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
         if (st->step == 0)
             ensurePrivateTable(env.rdram); // the game looks the entry up by id
+        if (st->step <= 2 && wanted && !wanted(env.rdram))
+        {
+            std::printf("[puppets] spawn of entry %04X dropped (not wanted any more)\n", entry);
+            std::fflush(stdout);
+            if (done)
+                done(0);
+            return std::nullopt;
+        }
         switch (st->step++)
         {
         case 0:
@@ -106,7 +126,20 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
         case 3:
         {
             st->obj = result;
-            std::memcpy(env.host(kh2state::addr::PlayerPtr), &st->player, 4);
+            // The factory made the new object GetPlayer()'s: give it back to
+            // the player, if it was ours and the player is still there.
+            uint32_t cur = 0;
+            std::memcpy(&cur, env.host(kh2state::addr::PlayerPtr), 4);
+            if (st->obj && cur == st->obj && st->player != st->obj)
+            {
+                bool live = false;
+                for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+                    live = live || a.address == st->player;
+                if (live)
+                    std::memcpy(env.host(kh2state::addr::PlayerPtr), &st->player, 4);
+                else
+                    std::fprintf(stderr, "[puppets] the player %08X went while spawning\n", st->player);
+            }
             uint32_t vt = 0, setup = 0;
             if (st->obj)
                 std::memcpy(&vt, env.host(st->obj), 4);
@@ -395,6 +428,7 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
         if (!keep)
         {
             std::printf("[puppets] player %u releases %s\n", s.playerId + 1, s.name);
+            std::fflush(stdout);
             bool there = false;
             if (s.spawned && s.object && (sameRoom || !tg))
                 for (const kh2state::ActorInfo &a : haveActors())
@@ -415,25 +449,54 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
         {
             // Spawn once its files have had time to load (the request is
             // asynchronous; 1.5 s is plenty for a model and its motions).
-            if (!s.spawnPosted && t - s.loadAt > 1.5)
+            // One spawn at a time, and only in free play (not during a
+            // cutscene, when jobs wait and the room may change under them).
+            bool another = false;
+            for (const Slot &o : g_slots)
+                another = another || (&o != &s && o.active && o.pending && o.spawnPosted);
+            if (!s.spawnPosted && s.loadRequested && t - s.loadAt > 1.5 && !another && st.control == 0)
             {
                 s.spawnPosted = true;
                 const uint8_t id = s.playerId;
                 const uint32_t entry = s.entry;
+                const uint32_t gen = s.gen;
                 const Target where = *tg;
-                postSpawn(entry, where.pos, where.yaw, [id, entry](uint32_t obj) {
-                    std::printf("[puppets] player %u spawned as entry %04X -> %08X\n", id + 1, entry, obj);
-                    std::fflush(stdout);
-                    std::lock_guard<std::mutex> lock(g_mutex);
-                    for (Slot &x : g_slots)
-                        if (x.active && x.pending && x.playerId == id)
+                postSpawn(
+                    entry, where.pos, where.yaw,
+                    [id, entry, gen](uint32_t obj) {
+                        if (obj)
                         {
-                            x.pending = false;
-                            x.object = obj;
-                            if (!obj)
-                                x = Slot{}; // failed; tried again next update
+                            std::printf("[puppets] player %u spawned as entry %04X -> %08X\n", id + 1, entry, obj);
+                            std::fflush(stdout);
                         }
-                });
+                        std::lock_guard<std::mutex> lock(g_mutex);
+                        bool mine = false;
+                        for (Slot &x : g_slots)
+                            if (x.active && x.pending && x.gen == gen)
+                            {
+                                mine = true;
+                                x.pending = false;
+                                x.object = obj;
+                                if (!obj)
+                                    x = Slot{}; // failed; tried again next update
+                            }
+                        if (!mine && obj)
+                        {
+                            // Its slot went while it was being made: nobody
+                            // follows this one, so it goes too.
+                            std::printf("[puppets] entry %04X object %08X is nobody's: removing it\n", entry, obj);
+                            std::fflush(stdout);
+                            postLeave(obj);
+                        }
+                    },
+                    [gen](const uint8_t *ram) {
+                        const kh2state::State now = kh2state::read(ram);
+                        std::lock_guard<std::mutex> lock(g_mutex);
+                        for (const Slot &x : g_slots)
+                            if (x.active && x.pending && x.gen == gen)
+                                return x.world == now.now.world && x.room == now.now.room && now.control == 0;
+                        return false;
+                    });
             }
             continue;
         }
@@ -471,13 +534,27 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
                 *free = Slot{};
                 free->active = free->spawned = free->pending = true;
                 free->playerId = tg.playerId;
+                free->gen = ++g_gen;
+                free->world = tg.world;
+                free->room = tg.room;
                 free->entry = entry;
                 free->loadAt = t;
                 std::snprintf(free->name, sizeof(free->name), "puppet %04X", tg.model);
                 std::memcpy(free->pos, tg.pos, sizeof(free->pos));
                 free->yaw = tg.yaw;
                 postDress(entry, tg.model);
-                requestPreload(entry);
+                // The files load from when the request job runs (it waits
+                // with every other job while the player is away), not from now.
+                const uint32_t gen = free->gen;
+                preload(entry, [gen]() {
+                    std::lock_guard<std::mutex> lock(g_mutex);
+                    for (Slot &x : g_slots)
+                        if (x.active && x.gen == gen)
+                        {
+                            x.loadRequested = true;
+                            x.loadAt = now();
+                        }
+                });
                 any = true;
                 continue;
             }
@@ -506,7 +583,11 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
     g_any = any;
 }
 
-void requestPreload(uint32_t entryId)
+void requestPreload(uint32_t entryId) { preload(entryId, {}); }
+
+namespace
+{
+void preload(uint32_t entryId, std::function<void()> requested)
 {
     // As a room's spawn list does (FUN_00199D38): the objentry's read request
     // (model, textures, motions into the cache buffer), then
@@ -515,7 +596,7 @@ void requestPreload(uint32_t entryId)
     constexpr uint32_t kEntryRequest = 0x0016ED50; // (entry id, -1, 0x1E)
     constexpr uint32_t kCacheFlush = 0x00170888;   // YS::CACHE_BUFF::Flush(TASK*)
     auto step = std::make_shared<int>(0);
-    kh2guest::post([entryId, step](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
+    kh2guest::post([entryId, step, requested](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
         if (*step == 0)
             ensurePrivateTable(env.rdram);
         switch ((*step)++)
@@ -527,10 +608,13 @@ void requestPreload(uint32_t entryId)
         default:
             std::printf("[puppets] requested loading entry %04X\n", entryId);
             std::fflush(stdout);
+            if (requested)
+                requested();
             return std::nullopt;
         }
     });
 }
+} // namespace
 
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
 

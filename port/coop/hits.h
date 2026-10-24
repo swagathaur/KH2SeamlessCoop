@@ -49,8 +49,10 @@ std::vector<Hit> takeHits();
 void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSize],
             const uint8_t (&param)[kParamSize]);
 
-// The EnemyHit game event: world, room, the enemy's spawn serial, the DAMAGE
-// and its attack parameters.
-std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, const Hit &hit);
-bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, Hit &hit);
+// The EnemyHit game event: world, room, the enemy's spawn serial and objentry
+// id (the host checks both: the same serial can be another enemy there), the
+// DAMAGE and its attack parameters.
+std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const Hit &hit);
+bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, uint16_t &entry,
+            Hit &hit);
 } // namespace kh2hits

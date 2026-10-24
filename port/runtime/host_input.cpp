@@ -57,6 +57,7 @@ uint16_t g_rumbleSentSmall = 0, g_rumbleSentLarge = 0;
 std::atomic<bool> g_rumbleOn{true};
 std::atomic<bool> g_suppressed{false};
 std::atomic<uint32_t> g_blocked{0}; // buttons the game does not see now
+std::atomic<bool> g_gameBlocked{false}; // the game sees an idle pad (a downed co-op player)
 std::atomic<uint32_t> g_rawHeld{0};   // buttons before suppression (our own menus read these)
 std::atomic<uint32_t> g_rawSticks{0x80808080u};
 void (*g_comboFn)() = nullptr;
@@ -263,6 +264,7 @@ void setConfirmOnBottom(bool on) { g_opt.confirmOnBottom = on; }
 bool confirmOnBottom() { return g_opt.confirmOnBottom; }
 void setSuppressed(bool on) { g_suppressed = on; }
 void setBlockedButtons(uint32_t mask) { g_blocked = mask; }
+void setGameBlocked(bool on) { g_gameBlocked = on; }
 void setController(int choice) { g_padChoice = choice; }
 int controller() { return g_padChoice.load(); }
 uint32_t rawButtons() { return g_rawHeld.load(); }
@@ -457,6 +459,12 @@ void poll(bool keyboardFocus)
     {
         held = 0;
         lx = ly = rx = ry = 0x80;
+    }
+    if (g_gameBlocked)
+    {
+        // Downed: the camera stays free (right stick), nothing else.
+        held = 0;
+        lx = ly = 0x80;
     }
     // The skip button (Cross: B by default, X/Space on the keyboard), timed
     // before the menu's suppression so a hold is seen whatever the game does.

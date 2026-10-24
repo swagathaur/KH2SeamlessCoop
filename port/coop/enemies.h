@@ -47,6 +47,9 @@ struct Damage
 // Client, once a host-loop iteration: follow the host's enemies; returns the
 // damage this machine's player did since last time, for the host.
 std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, double now);
+// Client: is our `object` a copy of one of the host's enemies we follow now
+// (alive)? Its serial and objentry id if so.
+bool followed(uint32_t object, int16_t &serial, uint16_t &entry);
 // Forget everything (session ended). The enemies whose AI we turned off get
 // it back on the next thawAfterSession() (host loop, with the guest's memory).
 void reset();

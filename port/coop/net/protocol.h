@@ -25,7 +25,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 5;
+constexpr uint8_t kProtocolVersion = 6;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -62,7 +62,7 @@ enum class GameEventType : uint16_t
     EnemyDamage = 1, // client -> host: world u8, room u8, serial i16, amount i32
     PartnerHeal = 2, // to everyone: target player u8, hp i32, mp i32 (your partner here healed you)
     Loadout = 3,     // to everyone: the sender's character save record (0x114 bytes)
-    EnemyHit = 4,    // client -> host: world u8, room u8, serial i16, DAMAGE (0x60), its attack parameters (0x80)
+    EnemyHit = 4,    // client -> host: world u8, room u8, serial i16, entry u16, DAMAGE (0x60), its attack parameters (0x80)
     StoryChunk = 5,  // host -> clients: the host's story (story.h), all of it or what changed
     Scene = 6,       // host -> clients: world u8, room u8, door u16, map u16, battle u16, event u16, cutscene u8
     SkipVote = 7,    // client -> host: this player asks to skip the cutscene playing

@@ -184,29 +184,33 @@ void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSi
     });
 }
 
-std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, const Hit &hit)
+std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const Hit &hit)
 {
     std::vector<uint8_t> out;
-    out.reserve(4 + kDamageSize + kParamSize);
+    out.reserve(6 + kDamageSize + kParamSize);
     out.push_back(world);
     out.push_back(room);
     const uint16_t s = static_cast<uint16_t>(serial);
     out.push_back(static_cast<uint8_t>(s & 0xFF));
     out.push_back(static_cast<uint8_t>(s >> 8));
+    out.push_back(static_cast<uint8_t>(entry & 0xFF));
+    out.push_back(static_cast<uint8_t>(entry >> 8));
     out.insert(out.end(), hit.damage, hit.damage + kDamageSize);
     out.insert(out.end(), hit.param, hit.param + kParamSize);
     return out;
 }
 
-bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, Hit &hit)
+bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, uint16_t &entry,
+            Hit &hit)
 {
-    if (data.size() != 4 + kDamageSize + kParamSize)
+    if (data.size() != 6 + kDamageSize + kParamSize)
         return false;
     world = data[0];
     room = data[1];
     serial = static_cast<int16_t>(data[2] | (data[3] << 8));
-    std::memcpy(hit.damage, data.data() + 4, kDamageSize);
-    std::memcpy(hit.param, data.data() + 4 + kDamageSize, kParamSize);
+    entry = static_cast<uint16_t>(data[4] | (data[5] << 8));
+    std::memcpy(hit.damage, data.data() + 6, kDamageSize);
+    std::memcpy(hit.param, data.data() + 6 + kDamageSize, kParamSize);
     return true;
 }
 } // namespace kh2hits

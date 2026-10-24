@@ -33,6 +33,9 @@ void setSuppressed(bool on);
 // Buttons (PS2 mask, e.g. 0x0008 Start) the game does not see while set: a
 // co-op client cannot open the cutscene's skip menu in the host's story.
 void setBlockedButtons(uint32_t mask);
+// The game sees no buttons and a centred left stick (the camera stays free):
+// a downed co-op player.
+void setGameBlocked(bool on);
 // The controller this window reads (Options::controller), now.
 void setController(int choice);
 int controller();

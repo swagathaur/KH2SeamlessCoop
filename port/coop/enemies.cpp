@@ -53,12 +53,15 @@ struct Follow
     int32_t expectedHp = -1; // what our copy should have, as far as we know
     bool killed = false;
     uint32_t object = 0;     // our copy
+    uint16_t entry = 0;      // its objentry id
     bool frozen = false;     // we turned its AI off
     uint32_t flagsBefore = 0;
     uint16_t motion = 0xFFFF; // the host's motion we last started on it
     int sinceMotion = 0;
     double holdUntil = 0;    // our player just hit it: let its own reaction play
     bool holding = false;
+    double killedAt = -1;    // when we finished it off (its body should go soon after)
+    bool removed = false;    // we had to take the body away ourselves
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
 std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
@@ -108,6 +111,42 @@ void thawAll(uint8_t *rdram)
         const uint32_t back = (flags & ~kNoAct) | (f.flagsBefore & kNoAct);
         std::memcpy(rdram + ((f.object + kObjFlags) & 0x01FFFFFFu), &back, 4);
     }
+}
+
+// Our copy dies: its AI back first (its own code plays the fall and the fade
+// and removes the body; frozen, the body stayed), then add_hp to 0.
+void killCopy(uint8_t *rdram, Follow &f, const Local &e, double now)
+{
+    if (f.frozen)
+    {
+        const uint32_t flags = rd<uint32_t>(rdram, e.object + kObjFlags);
+        const uint32_t back = (flags & ~kNoAct) | (f.flagsBefore & kNoAct);
+        std::memcpy(rdram + ((e.object + kObjFlags) & 0x01FFFFFFu), &back, 4);
+        f.frozen = false;
+    }
+    f.killed = true;
+    f.killedAt = now;
+    postAddHp(e.object, -(e.hp > 0 ? e.hp : 0));
+}
+
+// A body still there a while after it died: take it away (its leave method,
+// vtable +0x20, as trap_obj_leave_force does).
+void removeBody(uint32_t obj)
+{
+    kh2guest::post([obj](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+            return std::nullopt;
+        bool live = false;
+        for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+            live = live || a.address == obj;
+        if (!live)
+            return std::nullopt;
+        const uint32_t vt = rd<uint32_t>(env.rdram, obj);
+        const uint32_t fn = inRam(vt) ? rd<uint32_t>(env.rdram, vt + 0x20) : 0;
+        if (!inRam(fn))
+            return std::nullopt;
+        return kh2guest::Call{fn, {obj}, {}};
+    });
 }
 } // namespace
 
@@ -225,6 +264,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         if (f.object != e.object)
         {
             f.object = e.object;
+            f.entry = e.entry;
             f.frozen = false;
             f.motion = 0xFFFF;
         }
@@ -235,10 +275,16 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             // (our copy can already be at 0 without having died).
             if (f.placed && !f.killed)
             {
-                f.killed = true;
                 std::printf("[enemies] %04X #%d is gone on the host\n", e.entry, e.serial);
                 std::fflush(stdout);
-                postAddHp(e.object, -(e.hp > 0 ? e.hp : 0));
+                killCopy(rdram, f, e, now);
+            }
+            else if (f.killed && !f.removed && now - f.killedAt > 5.0)
+            {
+                f.removed = true;
+                std::printf("[enemies] %04X #%d: its body is still here; removing it\n", e.entry, e.serial);
+                std::fflush(stdout);
+                removeBody(e.object);
             }
             continue;
         }
@@ -260,10 +306,16 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         {
             if (!f.killed)
             {
-                f.killed = true;
                 std::printf("[enemies] %04X #%d died on the host\n", e.entry, e.serial);
                 std::fflush(stdout);
-                postAddHp(e.object, -(hp > 0 ? hp : 0)); // dies the game's way
+                killCopy(rdram, f, e, now); // dies the game's way
+            }
+            else if (!f.removed && now - f.killedAt > 5.0)
+            {
+                f.removed = true;
+                std::printf("[enemies] %04X #%d: its body is still here; removing it\n", e.entry, e.serial);
+                std::fflush(stdout);
+                removeBody(e.object);
             }
         }
         else if (h->hp < hp)
@@ -333,6 +385,19 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     }
     kh2puppets::setOverrides(overrides);
     return damage;
+}
+
+bool followed(uint32_t object, int16_t &serial, uint16_t &entry)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (const auto &[ser, f] : g_follow)
+        if (f.object == object && f.placed && !f.killed)
+        {
+            serial = ser;
+            entry = f.entry;
+            return true;
+        }
+    return false;
 }
 
 void reset()

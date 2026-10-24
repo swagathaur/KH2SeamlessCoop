@@ -1502,6 +1502,20 @@ int main(int argc, char **argv)
     harness.opt = &opt;
     const bool wantGpu = opt.renderer == "gpu" || (opt.renderer == "auto" && !opt.headless);
     bool gpu = false;
+    if (opt.localPlayers > 1 && opt.player == 1)
+    {
+        // Several copies on one graphics card (local multiplayer): this one
+        // takes its share of it too (local_players.cpp sets the others').
+        const std::string n = std::to_string(opt.localPlayers);
+        const std::string mb = std::to_string(1536 / opt.localPlayers);
+#if defined(_WIN32)
+        if (!std::getenv("PGS_SHARE")) _putenv_s("PGS_SHARE", n.c_str());
+        if (!std::getenv("KH2_HD_BUDGET_MB")) _putenv_s("KH2_HD_BUDGET_MB", mb.c_str());
+#else
+        setenv("PGS_SHARE", n.c_str(), 0);
+        setenv("KH2_HD_BUDGET_MB", mb.c_str(), 0);
+#endif
+    }
     if (wantGpu)
     {
         kh2pgs::Options g;

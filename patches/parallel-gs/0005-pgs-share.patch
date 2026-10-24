@@ -1,0 +1,22 @@
+diff --git a/gs/gs_renderer.cpp b/gs/gs_renderer.cpp
+--- a/gs/gs_renderer.cpp
++++ b/gs/gs_renderer.cpp
+@@ -861,6 +861,18 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
+ 		}
+ 	}
+ 
++	// kh2recomp (patch 0005): PGS_SHARE=N when N copies of the game share the
++	// GPU (local multiplayer): each takes 1/N of the above.
++	if (const char *share = getenv("PGS_SHARE"))
++	{
++		const long n = strtol(share, nullptr, 10);
++		if (n > 1)
++		{
++			max_image_slab_size /= VkDeviceSize(n);
++			max_allocated_image_memory_per_flush /= VkDeviceSize(n);
++		}
++	}
++
+ 	LOGI("Using image slab size of %llu MiB.\n",
+ 	     static_cast<unsigned long long>(max_image_slab_size / (1024 * 1024)));
+ 	LOGI("Using max allocated image memory per flush of %llu MiB.\n",

@@ -172,6 +172,9 @@ bool spawn(int player, const std::string &address, const std::string &name, int 
     std::filesystem::create_directories("logs", ec);
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     const std::wstring logName = L"logs\\local-p" + std::to_wstring(player) + L".log";
+    // Keep the previous session's log (logs\\local-pN.prev.log), as play.ps1 does.
+    const std::wstring prevName = L"logs\\local-p" + std::to_wstring(player) + L".prev.log";
+    MoveFileExW(logName.c_str(), prevName.c_str(), MOVEFILE_REPLACE_EXISTING);
     HANDLE log = CreateFileW(logName.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
     STARTUPINFOW si{sizeof(si)};
@@ -185,8 +188,27 @@ bool spawn(int player, const std::string &address, const std::string &name, int 
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> line(cmd.begin(), cmd.end());
     line.push_back(L'\0');
+    // Copies on one graphics card share it: a third of the image memory each
+    // (paraLLEl-GS PGS_SHARE) and a smaller HD texture budget, unless set
+    // already. (Set for the child only: put back right after.)
+    auto setFor = [](const wchar_t *name, const wchar_t *value, std::wstring &before) -> bool {
+        wchar_t buf[64] = {};
+        const DWORD n = GetEnvironmentVariableW(name, buf, 64);
+        before.assign(buf, n < 64 ? n : 0);
+        if (n > 0)
+            return false;
+        SetEnvironmentVariableW(name, value);
+        return true;
+    };
+    std::wstring shareBefore, budgetBefore;
+    const bool setShare = setFor(L"PGS_SHARE", L"3", shareBefore);
+    const bool setBudget = setFor(L"KH2_HD_BUDGET_MB", L"512", budgetBefore);
     const BOOL ok = CreateProcessW(nullptr, line.data(), nullptr, nullptr, log != INVALID_HANDLE_VALUE,
                                    CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    if (setShare)
+        SetEnvironmentVariableW(L"PGS_SHARE", nullptr);
+    if (setBudget)
+        SetEnvironmentVariableW(L"KH2_HD_BUDGET_MB", nullptr);
     if (log != INVALID_HANDLE_VALUE)
         CloseHandle(log);
     if (!ok)

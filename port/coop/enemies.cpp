@@ -289,7 +289,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             continue;
         }
         // Damage our player did to our copy since we last looked.
-        if (f.expectedHp >= 0 && e.hp < f.expectedHp)
+        if (!f.killed && f.expectedHp >= 0 && e.hp < f.expectedHp) // (our kill's own add_hp is no hit)
         {
             damage.push_back(Damage{e.serial, f.expectedHp - e.hp});
             std::printf("[enemies] hit %04X #%d for %d (motion %u)\n", e.entry, e.serial, f.expectedHp - e.hp,

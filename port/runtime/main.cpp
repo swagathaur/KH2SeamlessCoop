@@ -49,6 +49,7 @@
 #include "game_patches.h"
 #include "game_state.h"
 #include "coop.h"
+#include "guest_call.h"
 #include "puppets.h"
 #include "partners.h"
 #include "hits.h"
@@ -1121,6 +1122,25 @@ bool harnessTick(Harness &h, uint64_t frame)
                     continue;
                 int32_t hp;
                 std::memcpy(&hp, ram + sheet, 4);
+                if (amount < 0 && hp > 0)
+                {
+                    // Killed the game's way (its add_hp, vtable +0x78): death,
+                    // experience and prizes as from a hit.
+                    const uint32_t obj = a.address;
+                    kh2guest::post([obj, hp](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+                        if (!first)
+                            return std::nullopt;
+                        uint32_t vt = 0, fn = 0;
+                        std::memcpy(&vt, env.host(obj), 4);
+                        if (vt >= 0x00100000u && vt < 0x02000000u)
+                            std::memcpy(&fn, env.host(vt + 0x78), 4);
+                        if (!fn)
+                            return std::nullopt;
+                        return kh2guest::Call{fn, {obj, static_cast<uint32_t>(-hp), 0u, 0u}, {}};
+                    });
+                    std::printf("[harness] killing %04X %08X (hp %d)\n", a.entryId, a.address, hp);
+                    continue;
+                }
                 const int32_t to = hp - amount > 0 ? hp - amount : 0;
                 std::memcpy(ram + sheet, &to, 4);
                 std::printf("[harness] hurt %04X %08X: hp %d -> %d\n", a.entryId, a.address, hp, to);

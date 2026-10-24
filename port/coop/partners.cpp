@@ -13,6 +13,7 @@
 #include "guest_call.h"
 #include "hle_call.h"
 #include "puppets.h"
+#include "story.h"
 #include "ps2_runtime.h"
 
 namespace kh2partner
@@ -185,6 +186,97 @@ uint16_t weaponOf(const uint8_t *rdram, uint16_t entry)
     return uint16_t(entryByModel(rdram, name));
 }
 
+// ---- empty party slots -------------------------------------------------------
+//
+// Where this game's party has no companion in a slot (Roxas's days, scenes the
+// player is alone in), the other players still get a real party member to
+// stand in: while they are in the session, the world's empty slots
+// (save +0x3534, 0x12 = nobody) get Donald and Goofy, whose objects are then
+// dressed as the players as anywhere else. Saves never see this: the bytes go
+// back to "nobody" in the memory card image (kh2story::setSaveOverrides) and
+// in the game when the session ends.
+constexpr uint8_t kNobody = 0x12;
+constexpr uint8_t kFillCharacters[2] = {1, 2};      // Donald, Goofy
+constexpr uint16_t kFillEntries[2] = {0x005C, 0x005D}; // their objentries (P_EX020, P_EX030)
+struct Fill
+{
+    uint32_t addr;
+    uint8_t original;
+};
+std::vector<Fill> g_fill;   // under g_mutex
+bool g_fillRefresh = false; // a slot in this room's world was just filled
+
+void publishFill()
+{
+    std::vector<std::pair<uint32_t, uint8_t>> o;
+    for (const Fill &f : g_fill)
+        o.emplace_back(f.addr - kh2state::addr::Save, f.original);
+    kh2story::setSaveOverrides(o);
+}
+
+void unfillAll(uint8_t *rdram)
+{
+    if (g_fill.empty())
+        return;
+    for (const Fill &f : g_fill)
+        wr<uint8_t>(rdram, f.addr, f.original);
+    std::printf("[partner] the party is the game's own again\n");
+    std::fflush(stdout);
+    g_fill.clear();
+    publishFill();
+}
+
+// `wanted`: how many companions the other players need (0..2).
+void fillParty(uint8_t *rdram, uint8_t world, size_t wanted)
+{
+    if (world == 0 || world >= 0x20)
+        return;
+    bool changed = false;
+    for (int k = 1; k <= 2; ++k)
+    {
+        const uint32_t addr = kSaveParty + uint32_t(world) * 4u + uint32_t(k);
+        auto it = std::find_if(g_fill.begin(), g_fill.end(), [&](const Fill &f) { return f.addr == addr; });
+        const uint8_t cur = rd<uint8_t>(rdram, addr);
+        if (size_t(k) <= wanted && it == g_fill.end() && cur == kNobody)
+        {
+            // Someone not already in this world's party.
+            uint8_t pick = 0;
+            for (uint8_t c : kFillCharacters)
+            {
+                bool used = false;
+                for (int j = 0; j < 4; ++j)
+                    used = used || rd<uint8_t>(rdram, kSaveParty + uint32_t(world) * 4u + uint32_t(j)) == c;
+                if (!used && !pick)
+                    pick = c;
+            }
+            if (!pick)
+                continue;
+            g_fill.push_back({addr, cur});
+            wr<uint8_t>(rdram, addr, pick);
+            std::printf("[partner] party slot %d of world %02X was empty: %s stands in for a player\n", k, world,
+                        pick == 1 ? "Donald" : "Goofy");
+            std::fflush(stdout);
+            changed = g_fillRefresh = true;
+        }
+        else if (size_t(k) > wanted && it != g_fill.end())
+        {
+            wr<uint8_t>(rdram, addr, it->original);
+            g_fill.erase(it);
+            changed = true;
+        }
+    }
+    if (changed)
+        publishFill();
+}
+
+uint16_t fillEntry(uint8_t character)
+{
+    for (size_t i = 0; i < 2; ++i)
+        if (kFillCharacters[i] == character)
+            return kFillEntries[i];
+    return 0;
+}
+
 uint32_t slotAddress(int slot) { return kh2state::addr::Slot1 - kh2state::addr::SlotStride * uint32_t(slot); }
 
 // ---- per player link --------------------------------------------------------
@@ -333,6 +425,8 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     std::sort(order.begin(), order.end(), [](const Remote *a, const Remote *b) { return a->playerId < b->playerId; });
     if (order.size() > 2)
         order.resize(2);
+    if (st.player.valid)
+        fillParty(rdram, st.now.world, order.size());
 
     // Players gone from the session.
     for (auto it = g_states.begin(); it != g_states.end();)
@@ -365,6 +459,20 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // Was the object made in a player's look? (Asked before dressing now.)
         const uint16_t lookNow = c ? dressedAs(c->entry) : 0;
         // Look: the companion's entry (and weapon) wear the player's.
+        // A slot we just filled: its object comes with the next room, so
+        // dress its entry now and it is made in the player's look.
+        if (!c && !s.companionEntry && g_fillRefresh && st.now.world < 0x20)
+        {
+            const uint8_t character =
+                rd<uint8_t>(rdram, kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(s.slot));
+            const uint16_t entry = fillEntry(character);
+            for (const Fill &f : g_fill)
+                if (entry && f.addr == kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(s.slot))
+                {
+                    s.companionEntry = entry;
+                    s.companionWeapon = weaponOf(rdram, entry);
+                }
+        }
         if (c && c->entry != s.companionEntry)
         {
             if (s.companionEntry)
@@ -496,6 +604,11 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         g_links.push_back(l);
     }
     g_linked = !g_links.empty();
+    if (g_fillRefresh)
+    {
+        g_fillRefresh = false;
+        g_wantRefresh = true; // the room again, with the new party members
+    }
     kh2puppets::setOverrides(overrides, 1);
     kh2puppets::setMotionGuards(guards);
     // The party members they stand in for go by their names in menus.
@@ -530,6 +643,7 @@ void reset(uint8_t *rdram)
     }
     g_links.clear();
     g_linked = false;
+    unfillAll(rdram);
     kh2puppets::setOverrides({}, 1);
     kh2puppets::setMotionGuards({});
     kh2names::set({});

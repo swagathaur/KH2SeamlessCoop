@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 class PS2Runtime;
@@ -50,6 +51,9 @@ struct Place
 // Client: the session is over; the client's own story goes back. True (and
 // where the player was when it started) if it was in use.
 bool end(uint8_t *rdram, Place &back);
+// Bytes of the save data (offset, value) the memory card image gets instead
+// of the running game's (session-only changes, as partners.cpp's party).
+void setSaveOverrides(const std::vector<std::pair<uint32_t, uint8_t>> &bytes);
 // Testing: run the save menu's image step and say whose story it holds.
 void testSave();
 // Where the player was when the host's story was first used.

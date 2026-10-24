@@ -59,6 +59,7 @@ std::vector<std::pair<uint32_t, uint32_t>> g_pending; // block spans to write
 Place g_return;
 double g_lastSettle = 0;
 std::vector<std::pair<uint32_t, uint8_t>> g_lastDiff; // (block offset, our value) at the last look
+std::vector<std::pair<uint32_t, uint8_t>> g_saveOverrides; // (save offset, byte) for memory card images
 
 double now()
 {
@@ -157,7 +158,19 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t dst = getRegU32(ctx, 4), src = getRegU32(ctx, 5);
         const bool saving = (src & 0x1FFFFFFFu) == kSave, loading = (dst & 0x1FFFFFFFu) == kSave;
-        std::lock_guard<std::mutex> lock(g_mutex);
+        std::unique_lock<std::mutex> lock(g_mutex);
+        if (saving && !g_active && !g_saveOverrides.empty())
+        {
+            const auto overrides = g_saveOverrides;
+            lock.unlock();
+            kh2::callOriginal(g_memcpy, rdram, ctx, runtime);
+            for (const auto &[off, v] : overrides)
+                if (off < kSaveSize)
+                    *at(rdram, dst + off) = v;
+            std::printf("[story] saving: %zu byte(s) of session-only party left out\n", overrides.size());
+            std::fflush(stdout);
+            return;
+        }
         if (g_active && (saving || loading))
         {
             std::memmove(at(rdram, dst), at(rdram, src), n);
@@ -166,6 +179,9 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 // The card gets this player's own story, and their own place.
                 writeBlock(at(rdram, dst), g_own);
                 std::memcpy(at(rdram, dst + kSaveLocation), g_ownLocation, sizeof(g_ownLocation));
+                for (const auto &[off, v] : g_saveOverrides)
+                    if (off < kSaveSize)
+                        *at(rdram, dst + off) = v;
                 std::printf("[story] saving: your own story and place go in the save\n");
             }
             else
@@ -185,6 +201,12 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_memcpy, rdram, ctx, runtime);
 }
 } // namespace
+
+void setSaveOverrides(const std::vector<std::pair<uint32_t, uint8_t>> &bytes)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_saveOverrides = bytes;
+}
 
 bool install(PS2Runtime &runtime)
 {

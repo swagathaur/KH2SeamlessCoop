@@ -108,6 +108,14 @@ if(kh2_keep LESS kh2_wanted_count)
     endforeach()
 endif()
 
+# -DKH2_PATCH_ONLY=ON: stop here, with the fork patched (on a fresh
+# checkout, the recompiler tools are built from the patched fork before
+# anything is translated).
+if(KH2_PATCH_ONLY)
+    message(STATUS "kh2: PS2Recomp patched (KH2_PATCH_ONLY)")
+    return()
+endif()
+
 # --- PS2Recomp runtime -----------------------------------------------------
 # VU1 microprograms compiled to native code (the runtime's
 # tools/compile_vu_programs.py) from recordings of a local run with

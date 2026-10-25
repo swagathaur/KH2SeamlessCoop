@@ -1,6 +1,33 @@
+Subject: [PATCH] 0035 scratchpad DMA (channels 8 and 9), StoreImage log
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index f0c07b7..1acc330 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -1,5 +1,7 @@
+ #include "Common.h"
+ #include "GS.h"
++#include <cstdio>
++#include <cstdlib>
+ #include "ps2_log.h"
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+@@ -749,6 +751,10 @@ namespace ps2_stubs
+         mem.processPendingTransfers();
+ 
+         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
++        if (std::getenv("PS2_STOREIMAGE_LOG"))
++            std::fprintf(stderr, "[gs] StoreImage %ux%u psm 0x%02X vram %u at %u,%u -> %08X (%u bytes, ra %08X)\n",
++                         unsigned(img.width), unsigned(img.height), unsigned(img.psm), unsigned(img.vram_addr),
++                         unsigned(img.x), unsigned(img.y), dstAddr, totalImageBytes, getRegU32(ctx, 31));
+         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
+         runtime->guestFree(pktAddr);
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 07c95d6..1509fdb 100644
 --- a/ps2xRuntime/src/lib/ps2_memory.cpp
 +++ b/ps2xRuntime/src/lib/ps2_memory.cpp
-@@ -1351,6 +1351,123 @@
+@@ -1351,6 +1351,124 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
              const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
              m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
  
@@ -121,27 +148,7 @@
 +                }
 +                return true;
 +            }
- 
++
              if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) &&
                  (m_gsVRAM || channelBase == 0x10008000u))
---- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
-+++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
-@@ -1,5 +1,7 @@
- #include "Common.h"
- #include "GS.h"
-+#include <cstdio>
-+#include <cstdlib>
- #include "ps2_log.h"
- #include "runtime/gs/ps2_gs_common.h"
- #include "runtime/gs/ps2_gs_psmct16.h"
-@@ -749,6 +751,10 @@
-         mem.processPendingTransfers();
- 
-         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
-+        if (std::getenv("PS2_STOREIMAGE_LOG"))
-+            std::fprintf(stderr, "[gs] StoreImage %ux%u psm 0x%02X vram %u at %u,%u -> %08X (%u bytes, ra %08X)\n",
-+                         unsigned(img.width), unsigned(img.height), unsigned(img.psm), unsigned(img.vram_addr),
-+                         unsigned(img.x), unsigned(img.y), dstAddr, totalImageBytes, getRegU32(ctx, 31));
-         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
-         runtime->guestFree(pktAddr);
- 
+             {

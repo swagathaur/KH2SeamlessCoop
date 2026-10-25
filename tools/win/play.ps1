@@ -77,8 +77,10 @@ if (-not (Test-Path build\win\kh2recomp.ini)) {
     if (Test-Path game\files\hd\manifest.txt) { $ini += "hd-textures = 1`r`n" }
     $ini | Set-Content -NoNewline -Encoding ascii build\win\kh2recomp.ini
 }
-$iso = Get-ChildItem Src -Filter *.iso | Select-Object -First 1
-$argv = @('game\SLPM_666.75', "`"--iso=$($iso.FullName)`"", '--cd-root=game') + $args
+$iso = Get-ChildItem Src -Filter *.iso -ErrorAction SilentlyContinue | Select-Object -First 1
+$isoPath = if ($iso) { $iso.FullName } elseif ($env:KH2_ISO) { $env:KH2_ISO } else { $null } # KH2_ISO: a disc image elsewhere
+if (-not $isoPath -or -not (Test-Path $isoPath)) { "No disc image: put it in Src\ (or set KH2_ISO)."; Read-Host "Press Enter to close"; exit 1 }
+$argv = @('game\SLPM_666.75', "`"--iso=$isoPath`"", '--cd-root=game') + $args
 "Kingdom Hearts II FM (native). This window closes when the game does; log: logs\play.log"
 $p = Start-Process -FilePath 'build\win\kh2recomp.exe' -ArgumentList $argv -PassThru -NoNewWindow -Wait `
     -RedirectStandardOutput logs\play.log -RedirectStandardError logs\play.err.log

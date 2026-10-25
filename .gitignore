@@ -36,3 +36,6 @@ crashes/
 scratch/
 hd_dump_*.bin
 qa/
+
+# Memory cards (your saves)
+/mc*/

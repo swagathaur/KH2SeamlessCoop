@@ -238,6 +238,9 @@ void unfillAll(uint8_t *rdram)
 // `wanted`: how many companions the other players need (0..2).
 void fillParty(uint8_t *rdram, uint8_t world, size_t wanted)
 {
+    static const bool off = [] { const char *e = std::getenv("KH2_NO_FILL"); return e && *e == '1'; }();
+    if (off)
+        wanted = 0; // diagnostics: the game's own party only
     if (world == 0 || world >= 0x20)
         return;
     bool changed = false;

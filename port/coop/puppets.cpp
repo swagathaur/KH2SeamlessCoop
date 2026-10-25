@@ -78,7 +78,7 @@ bool ensurePrivateTable(uint8_t *rdram);
 // cutscene or a load), and a spawn nobody wants any more stops there (done
 // gets 0) instead of making an object nobody follows.
 void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void(uint32_t obj)> done,
-               std::function<bool(const uint8_t *)> wanted = {})
+               std::function<bool(const uint8_t *)> wanted = {}, int32_t serial = -1)
 {
     constexpr uint32_t kAreaAlloc = 0x001050D8;
     constexpr uint32_t kVtableSetup = 0x38;
@@ -92,7 +92,7 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
     auto st = std::make_shared<State>();
     std::memcpy(st->pos, pos, sizeof(st->pos));
     st->yaw = yaw;
-    kh2guest::post([st, entry, done, wanted](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
+    kh2guest::post([st, entry, done, wanted, serial](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
         if (st->step == 0)
             ensurePrivateTable(env.rdram); // the game looks the entry up by id
         if (st->step <= 2 && wanted && !wanted(env.rdram))
@@ -120,6 +120,13 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
             std::memcpy(env.host(st->unit), &entry, 4);
             std::memcpy(env.host(st->unit + 4), st->pos, 12);
             std::memcpy(env.host(st->unit + 0x14), &st->yaw, 4);
+            if (serial >= 0)
+            {
+                // The spawn entry's serial (UNIT_DATA_OBJ +0x1E), by which
+                // the room's objects are told apart (enemies.cpp).
+                const int16_t ser = int16_t(serial);
+                std::memcpy(env.host(st->unit + 0x1E), &ser, 2);
+            }
             const float p[4] = {st->pos[0], st->pos[1], st->pos[2], 1.0f};
             std::memcpy(env.host(env.scratch), p, 16);
             std::memcpy(&st->player, env.host(kh2state::addr::PlayerPtr), 4);
@@ -809,9 +816,10 @@ void postMotion(uint32_t obj, uint32_t id, float blend)
     });
 }
 
-void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done)
+void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done, int32_t serial,
+             std::function<bool(const uint8_t *)> wanted)
 {
-    postSpawn(entryId, pos, yaw, std::move(done));
+    postSpawn(entryId, pos, yaw, std::move(done), std::move(wanted), serial);
 }
 
 void setOverrides(std::vector<Override> overrides, int channel)

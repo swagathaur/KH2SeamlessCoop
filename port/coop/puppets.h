@@ -66,7 +66,10 @@ void postMotion(uint32_t obj, uint32_t id, float blend = 4.0f);
 // room's spawn list entry: placeholders such as FRIEND_1 (0x237) become the
 // party member the room's party has in that place). `done` gets the object,
 // or 0.
-void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done = {});
+// `serial` (>= 0) goes in its spawn entry (as a room's list numbers its
+// objects); `wanted` is asked before each step (false: dropped, done gets 0).
+void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done = {},
+             int32_t serial = -1, std::function<bool(const uint8_t *)> wanted = {});
 
 // Other objects whose position and facing come from elsewhere (the host's
 // enemies, on clients): applied in the same matrix hook. Replaces the set.

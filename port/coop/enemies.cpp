@@ -64,6 +64,21 @@ struct Follow
     bool removed = false;    // we had to take the body away ourselves
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
+// The host's enemies this room has had (serial -> entry): one gone from the
+// host died there, and our game's own of that serial (made when we walked
+// into the same trigger later) dies too, rather than being fought alone.
+std::map<int16_t, uint16_t> g_hostSeen;
+// Copies we make of host enemies our game has not made (a wave the host set
+// off): by serial.
+struct Made
+{
+    double askedAt = 0;   // its files were requested
+    bool posted = false;  // the spawn job is queued
+    double postedAt = 0;
+    uint32_t object = 0;  // what it made (0: not yet / failed)
+};
+std::map<int16_t, Made> g_made;
+std::map<uint16_t, double> g_preloaded; // entry -> when its files were requested, this room
 std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
 uint16_t g_followRoom = 0xFFFF;
 size_t g_lastSentCount = SIZE_MAX, g_lastFollowCount = SIZE_MAX; // for the log
@@ -229,6 +244,88 @@ void onHostStates(const kh2net::EnemyStates &states, double now)
     g_hostTime = now;
 }
 
+// Host enemies our game has not made (the host walked into a trigger we did
+// not): made here at the host's place, numbered as the host's, so they are
+// followed like any other copy. Their files are requested first (as a
+// room's spawn list does) and given a moment to load. One at a time; only
+// in free play. Under g_mutex.
+static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double now)
+{
+    // Copies of ours the game has made again itself (we walked into the
+    // trigger too): the game's own stays, ours goes.
+    for (auto it = g_made.begin(); it != g_made.end(); ++it)
+    {
+        if (!it->second.object)
+            continue;
+        bool ours = false, other = false;
+        for (const Local &e : locals)
+            if (e.serial == it->first)
+                (e.object == it->second.object ? ours : other) = true;
+        if (ours && other)
+        {
+            std::printf("[enemies] #%d is here twice now: removing our copy\n", it->first);
+            std::fflush(stdout);
+            removeBody(it->second.object);
+            it->second.object = 0;
+        }
+    }
+    const kh2state::State st = kh2state::read(rdram);
+    const bool freePlay = st.player.valid && st.control == 0 && !rd<uint32_t>(rdram, kh2state::addr::MapJumpTask);
+    bool jobQueued = false;
+    for (const auto &[ser, m] : g_made)
+        jobQueued = jobQueued || (m.posted && !m.object && now - m.postedAt < 3.0);
+    for (const kh2net::EnemyState &h : g_host.enemies)
+    {
+        if (h.hp <= 0)
+            continue;
+        bool have = false;
+        for (const Local &e : locals)
+            have = have || (e.serial == h.serial && e.entry == h.entry);
+        if (have)
+            continue;
+        Made &m = g_made[h.serial];
+        if (m.posted && (m.object || now - m.postedAt < 3.0))
+            continue; // made (and gone since: it died here), or being made
+        if (m.posted && !m.object)
+            m.posted = false; // the last try made nothing: again
+        auto pre = g_preloaded.find(h.entry);
+        if (pre == g_preloaded.end())
+        {
+            g_preloaded[h.entry] = now;
+            kh2puppets::requestPreload(h.entry);
+            continue;
+        }
+        if (now - pre->second < 1.5 || !freePlay || jobQueued)
+            continue;
+        m.posted = true;
+        m.postedAt = now;
+        jobQueued = true;
+        const int16_t serial = h.serial;
+        const uint16_t entry = h.entry;
+        const uint16_t room = g_followRoom;
+        std::printf("[enemies] the host's %04X #%d is not in our game: making it\n", entry, serial);
+        std::fflush(stdout);
+        kh2puppets::spawnAt(
+            entry, h.pos, h.yaw,
+            [serial, entry, room](uint32_t obj) {
+                std::printf("[enemies] made %04X #%d -> %08X\n", entry, serial, obj);
+                std::fflush(stdout);
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_followRoom != room)
+                    return;
+                auto it = g_made.find(serial);
+                if (it != g_made.end())
+                    it->second.object = obj;
+            },
+            serial,
+            [room](const uint8_t *ram) {
+                const kh2state::State now = kh2state::read(ram);
+                return uint16_t(now.now.world << 8 | now.now.room) == room && now.control == 0;
+            });
+        break;
+    }
+}
+
 std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, double now)
 {
     std::vector<Damage> damage;
@@ -238,6 +335,9 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     if (key != g_followRoom)
     {
         g_follow.clear();
+        g_hostSeen.clear();
+        g_made.clear();
+        g_preloaded.clear();
         g_followRoom = key;
     }
     const bool fresh = g_hostTime >= 0 && now - g_hostTime < 1.0 && g_host.world == world && g_host.room == room;
@@ -254,7 +354,11 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         kh2puppets::setOverrides({});
         return damage;
     }
-    for (const Local &e : scan(rdram))
+    for (const kh2net::EnemyState &x : g_host.enemies)
+        g_hostSeen[x.serial] = x.entry;
+    const std::vector<Local> locals = scan(rdram);
+    makeMissing(rdram, locals, now);
+    for (const Local &e : locals)
     {
         const kh2net::EnemyState *h = nullptr;
         for (const kh2net::EnemyState &x : g_host.enemies)
@@ -273,7 +377,9 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             // Gone on the host (dead and removed) after we had seen it there.
             // add_hp ending at 0 runs BTLOBJ::dead, also for an amount of 0
             // (our copy can already be at 0 without having died).
-            if (f.placed && !f.killed)
+            auto seen = g_hostSeen.find(e.serial);
+            const bool hostHadIt = seen != g_hostSeen.end() && seen->second == e.entry;
+            if ((f.placed || hostHadIt) && !f.killed)
             {
                 std::printf("[enemies] %04X #%d is gone on the host\n", e.entry, e.serial);
                 std::fflush(stdout);
@@ -409,6 +515,9 @@ void reset()
     g_host = {};
     g_hostTime = -1;
     g_follow.clear();
+    g_hostSeen.clear();
+    g_made.clear();
+    g_preloaded.clear();
     g_followRoom = 0xFFFF;
     kh2puppets::setOverrides({});
 }

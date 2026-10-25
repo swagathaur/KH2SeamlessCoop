@@ -56,7 +56,7 @@ bool isEnemy(const uint8_t *rdram, uint32_t obj)
     if (!inRam(rec))
         return false;
     const uint8_t type = rd<uint8_t>(rdram, rec + 4);
-    return type == 3 || type == 4;
+    return type == 3 || type == 4 || type == 12; // boss, enemy, giant boss
 }
 
 void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

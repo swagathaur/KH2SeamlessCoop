@@ -491,8 +491,13 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
                         s.companionWeapon);
             std::fflush(stdout);
         }
-        if (s.companionWeapon && r.weapon)
+        // The weapon only with the body: a companion made in its own look
+        // holding another character's weapon (bones that are not there)
+        // crashed the game.
+        if (s.companionWeapon && r.weapon && r.model && dressedAs(s.companionEntry) == r.model)
             dress(rdram, s.companionWeapon, r.weapon);
+        else if (s.companionWeapon && dressedAs(s.companionEntry) == 0)
+            dress(rdram, s.companionWeapon, 0);
 
         // A new companion object: made with their look or not?
         const uint32_t obj = c ? c->object : 0;
@@ -561,7 +566,8 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         }
 
         // Stats: their HP and MP in the companion's party slot; what this game
-        // added since we wrote it is a heal for them.
+        // added since we wrote it is a heal for them, and what it took (our
+        // enemies hitting their stand-in) is damage for them.
         if (c && r.maxHp > 0)
         {
             const uint32_t base = slotAddress(s.slot);
@@ -569,11 +575,11 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             const int32_t mpNow = rd<int32_t>(rdram, base + kh2state::addr::SlotMp);
             Heal h;
             h.playerId = r.playerId;
-            if (s.writtenHp >= 0 && hpNow > s.writtenHp)
+            if (s.writtenHp >= 0 && hpNow != s.writtenHp && hpNow >= 0)
                 h.hp = hpNow - s.writtenHp;
             if (s.writtenMp >= 0 && mpNow > s.writtenMp)
                 h.mp = mpNow - s.writtenMp;
-            if (h.hp > 0 || h.mp > 0)
+            if (h.hp != 0 || h.mp > 0)
                 heals.push_back(h);
             // Never 0 here: a companion at 0 HP goes down in this game.
             const int32_t hp = std::max<int32_t>(1, std::min(r.hp + h.hp, r.maxHp));
@@ -606,8 +612,17 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     g_linked = !g_links.empty();
     if (g_fillRefresh)
     {
-        g_fillRefresh = false;
-        g_wantRefresh = true; // the room again, with the new party members
+        // The room again, with the new party members, once their entries
+        // wear the players' looks (a player still loading has none yet).
+        bool dressed = true;
+        for (const auto &[id, st2] : g_states)
+            if (!st2.object && st2.companionEntry && !dressedAs(st2.companionEntry))
+                dressed = false;
+        if (dressed)
+        {
+            g_fillRefresh = false;
+            g_wantRefresh = true;
+        }
     }
     kh2puppets::setOverrides(overrides, 1);
     kh2puppets::setMotionGuards(guards);
@@ -677,6 +692,30 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp)
 {
     const uint32_t base = slotAddress(0);
+    if (hp < 0)
+    {
+        // Hurt by an enemy in another player's game: taken the game's way
+        // (the player's add_hp, vtable +0x78), so the minimum HP while
+        // downed-protected and a Game Over when alone both apply.
+        const int32_t amount = hp;
+        kh2guest::post([amount](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+            if (!first)
+                return std::nullopt;
+            const uint32_t player = rd<uint32_t>(env.rdram, kh2state::addr::PlayerPtr);
+            if (!player || player >= 0x02000000u)
+                return std::nullopt;
+            const uint32_t vt = rd<uint32_t>(env.rdram, player);
+            const uint32_t fn = vt && vt < 0x02000000u ? rd<uint32_t>(env.rdram, vt + 0x78) : 0;
+            if (!fn || rd<int32_t>(env.rdram, kh2state::addr::Slot1) <= 0)
+                return std::nullopt;
+            return kh2guest::Call{fn, {player, static_cast<uint32_t>(amount), 0u, 0u}, {}};
+        });
+        std::printf("[partner] hit in a partner's game: %d HP\n", hp);
+        std::fflush(stdout);
+        hp = 0;
+        if (mp <= 0)
+            return;
+    }
     if (hp > 0)
     {
         const int32_t now = rd<int32_t>(rdram, base + kh2state::addr::SlotHp);

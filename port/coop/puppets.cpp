@@ -326,13 +326,19 @@ struct Guard
 Guard g_guards[kMaxPuppets + 2]; // our puppets, then the party members players stand in for
 PS2Runtime::RecompiledFunction g_change = nullptr, g_startNum = nullptr;
 
-bool blocked(R5900Context *ctx, const char *what)
+bool blocked(const uint8_t *rdram, R5900Context *ctx, const char *what)
 {
     const uint32_t m = getRegU32(ctx, 4);
     const int32_t id = static_cast<int32_t>(getRegU32(ctx, 5));
     for (const Guard &g : g_guards)
         if (m && g.motion.load(std::memory_order_relaxed) == m)
         {
+            // Only an object we drive (its action off): a new object made at
+            // the address of one we drove has to start its motions itself.
+            uint32_t flags = 0;
+            std::memcpy(&flags, rdram + ((m - kh2state::addr::ObjMotion + 0x10C) & 0x01FFFFFFu), 4);
+            if (!(flags & 0x200000u))
+                return false;
             const int32_t want = g.wanted.load(std::memory_order_relaxed);
             if (want < 0 || id == want)
                 return false;
@@ -352,12 +358,12 @@ bool blocked(R5900Context *ctx, const char *what)
 }
 void changeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (!blocked(ctx, "change"))
+    if (!blocked(rdram, ctx, "change"))
         kh2::callOriginal(g_change, rdram, ctx, runtime);
 }
 void startNumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (!blocked(ctx, "start_num"))
+    if (!blocked(rdram, ctx, "start_num"))
         kh2::callOriginal(g_startNum, rdram, ctx, runtime);
 }
 

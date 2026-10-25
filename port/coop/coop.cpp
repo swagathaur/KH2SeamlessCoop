@@ -73,6 +73,7 @@ uint32_t g_sceneStarted = 0xFFFFFFFFu; // client: the host's cutscene we started
 double g_lastSceneWarp = -100.0;
 double g_strayCutSince = -1.0;         // client: in a cutscene the host is not in, since
 double g_lastClientSkip = -100.0;
+bool g_backToHost = false;              // client: ran into a story scene of its own elsewhere; go back
 double g_battleDiffSince = -1.0;      // client: the host's battle differs from ours, since
 // Reloading the room so partners show their own look (partners.h): wanted,
 // then the map jump under way, then the player put back where they stood.
@@ -117,6 +118,19 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0x
                         next[3], next[2]);
             std::fflush(stdout);
             return std::nullopt;
+        }
+        // One map jump at a time: a second one queued while the first is
+        // pending (a story warp and a room reload in the same tick) crashed
+        // the game in the room change.
+        {
+            uint32_t pending;
+            std::memcpy(&pending, env.host(kh2state::addr::MapJumpTask), 4);
+            if (pending)
+            {
+                std::printf("[coop] map jump to %02X-%02X dropped: another is under way\n", world, room);
+                std::fflush(stdout);
+                return std::nullopt;
+            }
         }
         uint8_t loc[10];
         loc[0] = world;
@@ -184,6 +198,13 @@ void endStory(uint8_t *ram)
     g_storyWarp = false;
     g_sceneStarted = 0xFFFFFFFFu;
     g_strayCutSince = -1.0;
+    g_backToHost = false;
+}
+
+std::string hostName()
+{
+    auto it = g_remotes.find(0);
+    return it != g_remotes.end() && !it->second.name.empty() ? it->second.name : std::string("The host");
 }
 
 // Shared story, every tick in a session.
@@ -270,11 +291,30 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
         {
             g_lastClientSkip = now();
             if (kh2skip::skipCutscene(ram))
+            {
                 addLog(hostCut ? "skipped: the host is in another cutscene" : "skipped: the host is not watching this cutscene");
+                // Ahead of the host, in a room of its own: the story (and
+                // its boss) waits for the host. Back to them, like a
+                // guest at a boss door.
+                if (!hostCut && (hw != me.now.world || hr != me.now.room))
+                    g_backToHost = true;
+            }
         }
     }
     else
         g_strayCutSince = -1.0;
+    if (g_backToHost && (hw != me.now.world || hr != me.now.room) && !cut && me.control == 0 && !jumping &&
+        now() - g_lastSceneWarp > 1.0)
+    {
+        g_backToHost = false;
+        g_lastSceneWarp = now();
+        addLog("the story goes on with the host: back to them");
+        kh2pgs::toast(hostName() + " leads the story: this part starts when they get here", 5.0);
+        warpLocked(hw, hr, hdoor);
+        return;
+    }
+    if (hw == me.now.world && hr == me.now.room)
+        g_backToHost = false;
     if (hw != me.now.world || hr != me.now.room)
     {
         // Elsewhere while the host's cutscene starts: come and watch it.
@@ -570,7 +610,10 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
         std::memcpy(data.data() + 1, &h.hp, 4);
         std::memcpy(data.data() + 5, &h.mp, 4);
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::PartnerHeal), data);
-        addLog("healed player " + std::to_string(h.playerId + 1) + " for " + std::to_string(h.hp) + " HP");
+        if (h.hp < 0)
+            addLog("player " + std::to_string(h.playerId + 1) + " was hit here for " + std::to_string(-h.hp) + " HP");
+        else
+            addLog("healed player " + std::to_string(h.playerId + 1) + " for " + std::to_string(h.hp) + " HP");
     }
     if (kh2partner::takeRefreshRequest())
         g_refresh.wanted = true;

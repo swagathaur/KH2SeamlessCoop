@@ -35,3 +35,4 @@ crashes/
 # Diagnostics: dumps of game data (hd_dump_*.bin, extracted files)
 scratch/
 hd_dump_*.bin
+qa/

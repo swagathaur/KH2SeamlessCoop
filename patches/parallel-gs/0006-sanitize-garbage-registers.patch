@@ -1,0 +1,138 @@
+--- a/gs/gs_interface.cpp
++++ b/gs/gs_interface.cpp
+@@ -3009,13 +3009,14 @@
+ 	vertex_queue.count = 0;
+ }
+ 
++static uint64_t kh2_sanitize_tex0(uint64_t v); // patch 0006, below
+ template <int CTX>
+ void GSInterface::a_d_TEX2(uint64_t payload)
+ {
+ 	auto &ctx = registers.ctx[CTX];
+ 	auto &preserve = ctx.tex0.desc;
+ 
+-	Reg64<TEX0Bits> tex0{payload};
++	Reg64<TEX0Bits> tex0{kh2_sanitize_tex0(payload)};
+ 	tex0.desc.TBP0 = preserve.TBP0;
+ 	tex0.desc.TBW = preserve.TBW;
+ 	tex0.desc.TW = preserve.TW;
+@@ -3576,6 +3577,71 @@
+ 	}
+ }
+ 
++// kh2recomp (patch 0006): register values no GS accepts (a game sending
++// texture data as register writes, as KH2 does for a frame in the Twilight
++// Thorn fight) are made harmless rather than drawn with: a 32768-texel
++// texture or an unknown format can keep the GPU busy until the driver
++// resets it. Real hardware has no such limits to trip over.
++static bool kh2_valid_tex_psm(uint32_t psm)
++{
++	switch (psm)
++	{
++	case 0x00: case 0x01: case 0x02: case 0x0A: case 0x13: case 0x14: case 0x1B: case 0x24: case 0x2C:
++	case 0x30: case 0x31: case 0x32: case 0x3A:
++		return true;
++	default:
++		return false;
++	}
++}
++static void kh2_report_sanitized(const char *what, uint64_t before, uint64_t after)
++{
++	static int reported = 0;
++	if (reported < 8 && before != after)
++	{
++		reported++;
++		fprintf(stderr, "[pgs] invalid %s 0x%016llx made safe (0x%016llx)\n", what, (unsigned long long)before,
++		        (unsigned long long)after);
++	}
++}
++static uint64_t kh2_sanitize_tex0(uint64_t v)
++{
++	const uint64_t in = v;
++	uint64_t psm = (v >> 20) & 0x3Fu, tw = (v >> 26) & 0xFu, th = (v >> 30) & 0xFu;
++	if (!kh2_valid_tex_psm(uint32_t(psm)))
++		v &= ~(uint64_t(0x3F) << 20);
++	if (tw > 10)
++		v = (v & ~(uint64_t(0xF) << 26)) | (uint64_t(10) << 26);
++	if (th > 10)
++		v = (v & ~(uint64_t(0xF) << 30)) | (uint64_t(10) << 30);
++	kh2_report_sanitized("TEX0", in, v);
++	return v;
++}
++static uint64_t kh2_sanitize_frame(uint64_t v)
++{
++	const uint64_t in = v;
++	const uint32_t psm = uint32_t((v >> 24) & 0x3Fu);
++	switch (psm)
++	{
++	case 0x00: case 0x01: case 0x02: case 0x0A: case 0x30: case 0x31: case 0x32: case 0x3A:
++		break;
++	default:
++		// Nothing drawn: an all-masked 32-bit buffer.
++		v = (v & ~(uint64_t(0x3F) << 24)) | (uint64_t(0xFFFFFFFFu) << 32);
++		break;
++	}
++	kh2_report_sanitized("FRAME", in, v);
++	return v;
++}
++static uint64_t kh2_sanitize_zbuf(uint64_t v)
++{
++	const uint64_t in = v;
++	const uint32_t psm = uint32_t((v >> 24) & 0xFu);
++	if (psm != 0x0 && psm != 0x1 && psm != 0x2 && psm != 0xA)
++		v = (v & ~(uint64_t(0xF) << 24)) | (uint64_t(1) << 32); // Z32, writes masked
++	kh2_report_sanitized("ZBUF", in, v);
++	return v;
++}
++
+ // KH2 port (patch 0003): PGS_NO_AA1=1 ignores PRIM.AA1, to test edge seams.
+ static uint64_t kh2_strip_aa1(uint64_t payload)
+ {
+@@ -3682,6 +3748,7 @@
+ 
+ void GSInterface::a_d_TEX0_1(uint64_t payload)
+ {
++	payload = kh2_sanitize_tex0(payload);
+ 	update_internal_register(registers.ctx[0].tex0.bits, payload,
+ 	                         STATE_DIRTY_FEEDBACK_BIT | STATE_DIRTY_STATE_BIT |
+ 	                         STATE_DIRTY_PRIM_TEMPLATE_BIT | STATE_DIRTY_TEX_BIT);
+@@ -3692,6 +3759,7 @@
+ 
+ void GSInterface::a_d_TEX0_2(uint64_t payload)
+ {
++	payload = kh2_sanitize_tex0(payload);
+ 	update_internal_register(registers.ctx[1].tex0.bits, payload,
+ 	                         STATE_DIRTY_FEEDBACK_BIT | STATE_DIRTY_STATE_BIT |
+ 	                         STATE_DIRTY_PRIM_TEMPLATE_BIT | STATE_DIRTY_TEX_BIT);
+@@ -3976,6 +4044,7 @@
+ 
+ void GSInterface::a_d_FRAME_1(uint64_t payload)
+ {
++	payload = kh2_sanitize_frame(payload);
+ 	update_internal_register(registers.ctx[0].frame.bits, payload,
+ 	                         STATE_DIRTY_DEGENERATE_BIT | STATE_DIRTY_FEEDBACK_BIT |
+ 	                         STATE_DIRTY_TEX_BIT | STATE_DIRTY_FB_BIT |
+@@ -3985,6 +4054,7 @@
+ 
+ void GSInterface::a_d_FRAME_2(uint64_t payload)
+ {
++	payload = kh2_sanitize_frame(payload);
+ 	update_internal_register(registers.ctx[1].frame.bits, payload,
+ 	                         STATE_DIRTY_DEGENERATE_BIT | STATE_DIRTY_FEEDBACK_BIT |
+ 	                         STATE_DIRTY_TEX_BIT | STATE_DIRTY_FB_BIT |
+@@ -3994,6 +4064,7 @@
+ 
+ void GSInterface::a_d_ZBUF_1(uint64_t payload)
+ {
++	payload = kh2_sanitize_zbuf(payload);
+ 	update_internal_register(registers.ctx[0].zbuf.bits, payload,
+ 	                         STATE_DIRTY_FEEDBACK_BIT | STATE_DIRTY_DEGENERATE_BIT |
+ 	                         STATE_DIRTY_TEX_BIT | STATE_DIRTY_FB_BIT | STATE_DIRTY_PRIM_TEMPLATE_BIT);
+@@ -4002,6 +4073,7 @@
+ 
+ void GSInterface::a_d_ZBUF_2(uint64_t payload)
+ {
++	payload = kh2_sanitize_zbuf(payload);
+ 	update_internal_register(registers.ctx[1].zbuf.bits, payload,
+ 	                         STATE_DIRTY_FEEDBACK_BIT | STATE_DIRTY_DEGENERATE_BIT |
+ 	                         STATE_DIRTY_TEX_BIT | STATE_DIRTY_FB_BIT | STATE_DIRTY_PRIM_TEMPLATE_BIT);

@@ -155,7 +155,7 @@ std::vector<Local> scan(const uint8_t *rdram)
     std::vector<Local> out;
     for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
     {
-        if (a.type != 3 && a.type != 4) // boss, enemy
+        if (a.type != 3 && a.type != 4 && a.type != 12) // boss, enemy, giant boss (Twilight Thorn)
             continue;
         const uint32_t rec = rd<uint32_t>(rdram, a.address + kObjSpawnRecord);
         const uint32_t sheet = rd<uint32_t>(rdram, a.address + kObjSheet);

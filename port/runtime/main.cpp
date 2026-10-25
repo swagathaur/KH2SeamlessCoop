@@ -1040,14 +1040,14 @@ bool harnessTick(Harness &h, uint64_t frame)
         for (const kh2state::ActorInfo &a : kh2state::actors(ram))
         {
             // Fighters (player, party, bosses, enemies) show their HP (YS::SHEET at +0x48C).
-            char hp[32] = "";
+            char hp[64] = "";
             uint32_t sheet = 0;
             std::memcpy(&sheet, ram + ((a.address + 0x48C) & 0x01FFFFFFu), 4);
             if ((a.type <= 1 || a.type == 3 || a.type == 4 || a.type == 12) && sheet >= 0x00100000u && sheet < 0x02000000u)
             {
                 int32_t v[3];
                 std::memcpy(v, ram + sheet, sizeof(v));
-                std::snprintf(hp, sizeof(hp), " hp %d/%d min %d", v[0], v[1], v[2]);
+                std::snprintf(hp, sizeof(hp), " hp %d/%d min %d sheet %08X", v[0], v[1], v[2], sheet);
             }
             // Its spawn record (UNIT_DATA_OBJ at +0x81C): serial, +0x28 (a message id for
             // townsfolk), the reaction command it offers (+0x2C, what the HUD shows), +0x1C.

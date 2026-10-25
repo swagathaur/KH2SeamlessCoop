@@ -147,6 +147,8 @@ struct Companion
     char name[33] = {};
 };
 
+constexpr uint32_t kMemberEntries = 0x01C6CC20; // u16 objentry per party character (Donald 1, Goofy 2, ...)
+
 std::vector<Companion> companions(const uint8_t *rdram)
 {
     std::vector<Companion> out;
@@ -162,7 +164,20 @@ std::vector<Companion> companions(const uint8_t *rdram)
         const uint32_t off = kh2state::addr::Slot1 - sheet;
         if (off % kh2state::addr::SlotStride)
             continue;
-        const int slot = int(off / kh2state::addr::SlotStride);
+        int slot = int(off / kh2state::addr::SlotStride);
+        // Its place in the world's party, by who it is: a boss that takes a
+        // party sheet for itself (Twilight Thorn has slot 1's) moves later
+        // party members' sheets down, so the sheet alone can name the wrong
+        // place. Each character's objentry is in the game's member table
+        // (0x01C6CC10 + 0x10, a u16 per character; YS::FRIEND::GetEntryId).
+        const uint8_t world = rd<uint8_t>(rdram, kh2state::addr::Now);
+        if (world && world < 0x20)
+            for (int k = 1; k <= 2; ++k)
+            {
+                const uint8_t c = rd<uint8_t>(rdram, kSaveParty + uint32_t(world) * 4u + uint32_t(k));
+                if (c < 0x12 && rd<uint16_t>(rdram, kMemberEntries + uint32_t(c) * 2u) == uint16_t(a.entryId))
+                    slot = k;
+            }
         if (slot < 1 || slot > 2)
             continue;
         Companion c;
@@ -211,6 +226,7 @@ struct Fill
 {
     uint32_t addr;
     uint8_t original;
+    uint8_t pick; // what we wrote
 };
 std::vector<Fill> g_fill;   // under g_mutex
 bool g_fillRefresh = false; // a slot in this room's world was just filled
@@ -263,12 +279,31 @@ void fillParty(uint8_t *rdram, uint8_t world, size_t wanted)
             }
             if (!pick)
                 continue;
-            g_fill.push_back({addr, cur});
+            g_fill.push_back({addr, cur, pick});
             wr<uint8_t>(rdram, addr, pick);
             std::printf("[partner] party slot %d of world %02X was empty: %s stands in for a player\n", k, world,
                         pick == 1 ? "Donald" : "Goofy");
             std::fflush(stdout);
             changed = g_fillRefresh = true;
+        }
+        else if (size_t(k) <= wanted && it != g_fill.end() && cur != it->pick)
+        {
+            if (cur == kNobody)
+            {
+                // A room for the player alone (a boss, a story scene) clears
+                // the world's party while it lasts; the players still need
+                // their places there.
+                wr<uint8_t>(rdram, addr, it->pick);
+                std::printf("[partner] party slot %d of world %02X was cleared by the room: %s stands in again\n", k,
+                            world, it->pick == 1 ? "Donald" : "Goofy");
+                std::fflush(stdout);
+            }
+            else
+            {
+                // The game put someone there itself: theirs from now on.
+                g_fill.erase(it);
+                changed = true;
+            }
         }
         else if (size_t(k) > wanted && it != g_fill.end())
         {
@@ -289,12 +324,16 @@ uint16_t fillEntry(uint8_t character)
     return 0;
 }
 
-// A room made for the player alone has no places for party members in its
-// spawn list (only PLAYER, 0x236), so even with the party rule above nobody
-// appears. Once the room has settled, the missing ones are made the way its
-// list would have: the placeholder FRIEND_1 / FRIEND_2 (0x237 / 0x238),
-// which becomes the party member in that place, behind the player to the
-// left and right. Once per room and slot.
+// A room made for the player alone (Twilight Thorn, the Station of
+// Awakening, story scenes) has no places for party members in its spawn list
+// (only PLAYER, 0x236), and its party rule clears the world's party table
+// (fillParty puts the stand-ins back). Once the room has settled, the missing
+// ones are made the way its list would have: the placeholder FRIEND_1 /
+// FRIEND_2 (0x237 / 0x238) resolves through the party table to the member's
+// objentry (YS::FRIEND::GetEntryId), and the member's class takes a party
+// sheet for it (YS::SHEET::AllocFriend), so it is a real party member: our
+// link drives it as anywhere else. Behind the player to the left and right;
+// once per room and slot.
 constexpr uint32_t kFriendPlaceholder[2] = {0x0237, 0x0238};
 uint32_t g_spawnRoom = 0xFFFFFFFFu; // world/room/event the attempts below are for
 double g_roomSince = 0;
@@ -471,9 +510,8 @@ bool install(PS2Runtime &runtime)
         g_sacrifice = nullptr;
         return false;
     }
-    // Experimental, KH2_PARTY_RULE=1: the placeholder made by spawnMissing
-    // is not bound to its party slot (no sheet), keeps its AI and crashed
-    // later; off until party members are made the way a room makes them.
+    // Experimental, KH2_PARTY_RULE=1: raising the room's party rule is not
+    // needed (spawnMissing makes the members) and is off by default.
     const char *ruleEnv = std::getenv("KH2_PARTY_RULE");
     g_partyRule = ruleEnv && *ruleEnv == '1' ? runtime.lookupFunction(kPartyRule) : nullptr;
     if (g_partyRule && !runtime.replaceFunction(kPartyRule, &partyRuleHook))
@@ -495,9 +533,24 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         g_spawnTried[0] = g_spawnTried[1] = false;
         g_roomOverridden = g_ruleOverridden.exchange(false);
     }
-    if (order.empty() || !g_roomOverridden || !st.player.valid || st.control != 0 || st.now.world == 0 ||
+    // On by default; KH2_NO_SPAWN_FRIEND=1 turns it off (diagnostics).
+    static const bool always = [] {
+        const char *e = std::getenv("KH2_NO_SPAWN_FRIEND");
+        return !(e && *e == '1');
+    }();
+    if (order.empty() || !(g_roomOverridden || always) || !st.player.valid || st.control != 0 || st.now.world == 0 ||
         st.now.world >= 0x20)
+    {
+        static uint32_t loggedKey = 0;
+        if (always && loggedKey != key && !order.empty() && std::getenv("KH2_PUPPET_LOG"))
+        {
+            loggedKey = key;
+            std::printf("[partner] spawnMissing waits: valid %d control %u world %02X\n", int(st.player.valid),
+                        unsigned(st.control), unsigned(st.now.world));
+            std::fflush(stdout);
+        }
         return;
+    }
     if (rd<uint32_t>(rdram, kh2state::addr::MapJumpTask))
     {
         g_roomSince = nowSec();
@@ -518,9 +571,18 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         bool have = false;
         for (const Companion &c : comps)
             have = have || c.slot == int(k);
+        const uint8_t character = rd<uint8_t>(rdram, kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(k));
+        {
+            static uint32_t loggedKey[2] = {0, 0};
+            if (loggedKey[k - 1] != key && std::getenv("KH2_PUPPET_LOG"))
+            {
+                loggedKey[k - 1] = key;
+                std::printf("[partner] slot %zu here: have %d character %02X\n", k, int(have), character);
+                std::fflush(stdout);
+            }
+        }
         if (have)
             continue;
-        const uint8_t character = rd<uint8_t>(rdram, kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(k));
         if (character == kNobody || character == 0 || character >= 13)
             continue;
         // Made in the player's look straight away (no room reload): the
@@ -723,7 +785,12 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // enemies hitting their stand-in) is damage for them.
         if (c && r.maxHp > 0)
         {
-            const uint32_t base = slotAddress(s.slot);
+            // The stand-in's own sheet: by slot it can be someone else's (a
+            // boss that took a party sheet, as Twilight Thorn takes slot 1's).
+            uint32_t base = slotAddress(s.slot);
+            const uint32_t sheet = rd<uint32_t>(rdram, c->object + kObjSheet);
+            if (sheet && sheet <= kh2state::addr::Slot1 && (kh2state::addr::Slot1 - sheet) % kh2state::addr::SlotStride == 0)
+                base = sheet;
             const int32_t hpNow = rd<int32_t>(rdram, base + kh2state::addr::SlotHp);
             const int32_t mpNow = rd<int32_t>(rdram, base + kh2state::addr::SlotMp);
             Heal h;

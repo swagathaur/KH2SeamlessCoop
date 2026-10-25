@@ -25,6 +25,7 @@ double g_downedAt = 0;
 int32_t g_lastHp = -1;
 bool g_wiped = false;       // everyone down: the Game Over is under way
 double g_lastFall = -100;
+bool g_noFall = false;     // the fall left the bind pose for this player's character (reset with the session)
 std::vector<bool> g_othersDown;
 
 double now()
@@ -75,7 +76,34 @@ void fall(uint8_t *rdram)
     if (!player || player >= 0x02000000u)
         return;
     g_lastFall = now();
-    kh2guest::postCall({kFall, {player + kh2state::addr::ObjMotion, kFallMotion}, {0.0f, 0.0f}});
+    if (g_noFall)
+        return;
+    // Only if the character has the motion: Roxas's sets have no 0x36, and
+    // starting it left him in his bind pose (arms out) until the next room.
+    constexpr uint32_t kMotionIsExist = 0x001805A8; // YS::MOTION::is_exist(int)
+    const uint32_t motion = player + kh2state::addr::ObjMotion;
+    kh2guest::post([motion, step = 0](const kh2guest::Env &, uint32_t result, bool) mutable -> std::optional<kh2guest::Call> {
+        switch (step++)
+        {
+        case 0:
+            return kh2guest::Call{kMotionIsExist, {motion, kFallMotion}, {}};
+        case 1:
+        {
+            if (result)
+                return kh2guest::Call{kFall, {motion, kFallMotion}, {0.0f, 0.0f}};
+            static bool told = false;
+            if (!told)
+            {
+                told = true;
+                std::printf("[downed] this character has no fall motion; staying up while down\n");
+                std::fflush(stdout);
+            }
+            return std::nullopt;
+        }
+        default:
+            return std::nullopt;
+        }
+    });
 }
 
 // Finish the player off the game's way (add_hp to 0: the Game Over follows).
@@ -107,6 +135,7 @@ void reset(uint8_t *rdram)
         standUp("the session ended");
     g_wiped = false;
     g_lastHp = -1;
+    g_noFall = false;
     g_othersDown.clear();
 }
 
@@ -193,10 +222,29 @@ void tick(uint8_t *rdram, bool session, const std::vector<Other> &others)
                 protect(rdram, false);
                 finish(rdram);
             }
-            else if (now() - g_lastFall > 2.0 &&
-                     rd<uint32_t>(rdram, rd<uint32_t>(rdram, kh2state::addr::PlayerPtr) + kh2state::addr::ObjMotionIndex) !=
-                         kFallMotion)
-                fall(rdram);
+            else
+            {
+                const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+                const uint32_t motion = player + kh2state::addr::ObjMotion;
+                const uint32_t index = rd<uint32_t>(rdram, player + kh2state::addr::ObjMotionIndex);
+                const bool noPose = player && player < 0x02000000u && rd<uint32_t>(rdram, motion + 0xC) == 0;
+                if (noPose && index == kFallMotion && now() - g_lastFall > 0.2)
+                {
+                    // The fall started but its data went (Roxas: the set has
+                    // the id, not the motion), which leaves the bind pose
+                    // (arms out). Stand idle instead, and stop falling.
+                    if (!g_noFall)
+                    {
+                        g_noFall = true;
+                        std::printf("[downed] no fall motion for this character: standing while down\n");
+                        std::fflush(stdout);
+                    }
+                    kh2guest::postCall({kFall, {motion, 0u}, {0.0f, 0.0f}});
+                    g_lastFall = now();
+                }
+                else if (!g_noFall && now() - g_lastFall > 2.0 && index != kFallMotion)
+                    fall(rdram);
+            }
         }
     }
     g_lastHp = hp;

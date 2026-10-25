@@ -51,6 +51,7 @@ Copy-Item 'Play KH2.bat' $Dest
 Copy-Item tools\win\play.ps1 "$Dest\tools\win\"
 Copy-Item build\win\kh2recomp.exe "$Dest\build\win\"
 Get-ChildItem build\win -Filter *.dll | Copy-Item -Destination "$Dest\build\win\"
+Copy-Item build\win\gamecontrollerdb.txt "$Dest\build\win\" -ErrorAction SilentlyContinue # controller mappings
 foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
     $sys = Join-Path $env:SystemRoot "System32\$dll"
     if (Test-Path $sys) { Copy-Item $sys "$Dest\build\win\" }

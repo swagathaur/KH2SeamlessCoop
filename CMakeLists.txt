@@ -330,4 +330,24 @@ endif()
 if(KH2_SDL3)
     target_link_libraries(kh2recomp PRIVATE SDL3::SDL3-static)
     target_compile_definitions(kh2recomp PRIVATE KH2_HAVE_SDL3=1)
+    # The community controller database (zlib licence): mappings for some
+    # 2000 pads SDL does not know itself, loaded from next to the exe
+    # (port/runtime/host_input.cpp). A failed download only leaves it out.
+    set(KH2_PAD_DB_COMMIT ff333823a85ae896e73f4c53670932cf0f728adb)
+    set(KH2_PAD_DB "${CMAKE_BINARY_DIR}/gamecontrollerdb-${KH2_PAD_DB_COMMIT}.txt")
+    if(NOT EXISTS "${KH2_PAD_DB}")
+        file(DOWNLOAD "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/${KH2_PAD_DB_COMMIT}/gamecontrollerdb.txt"
+            "${KH2_PAD_DB}.part" STATUS _db_status TIMEOUT 60)
+        list(GET _db_status 0 _db_code)
+        if(_db_code EQUAL 0)
+            file(RENAME "${KH2_PAD_DB}.part" "${KH2_PAD_DB}")
+        else()
+            file(REMOVE "${KH2_PAD_DB}.part")
+            message(WARNING "kh2: could not download the controller database (${_db_status}); building without it")
+        endif()
+    endif()
+    if(EXISTS "${KH2_PAD_DB}")
+        add_custom_command(TARGET kh2recomp POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KH2_PAD_DB}" "$<TARGET_FILE_DIR:kh2recomp>/gamecontrollerdb.txt")
+    endif()
 endif()

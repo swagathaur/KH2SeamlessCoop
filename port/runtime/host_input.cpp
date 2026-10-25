@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <string>
 
@@ -87,12 +88,59 @@ uint64_t g_sdlRumbleAt = 0;
 void sdlInit()
 {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // The Steam Controller read directly (SDL leaves it to Steam by default;
+    // without Steam Input set up for this game it would do nothing here).
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
     g_sdlReady = SDL_Init(SDL_INIT_GAMEPAD);
     if (!g_sdlReady)
         return;
+    // Mappings for pads SDL does not know itself: the community database the
+    // build puts next to the exe, then the player's own controllers.txt
+    // there (same format; lines from it win).
+    if (const char *base = SDL_GetBasePath())
+    {
+        for (const char *file : {"gamecontrollerdb.txt", "controllers.txt"})
+        {
+            const std::string path = std::string(base) + file;
+            const int added = SDL_AddGamepadMappingsFromFile(path.c_str());
+            if (added > 0)
+                std::printf("[input] %d controller mappings from %s\n", added, file);
+        }
+    }
     // Nothing drains SDL's event queue: poll state instead.
     SDL_SetGamepadEventsEnabled(false);
     SDL_SetJoystickEventsEnabled(false);
+}
+
+// A joystick no mapping knows (an unusual DirectInput pad) gets the most
+// common generic layout, so it is usable rather than ignored: buttons 1-4 as
+// the face buttons (PlayStation order), 5-8 shoulders and triggers, 9-10
+// select and start, 11-12 the stick clicks, the hat as the d-pad. A
+// controllers.txt next to the exe can give it the right mapping.
+void mapUnknownJoysticks()
+{
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetJoysticks(&count);
+    for (int i = 0; ids && i < count; ++i)
+    {
+        if (SDL_IsGamepad(ids[i]))
+            continue;
+        char guid[64];
+        SDL_GUIDToString(SDL_GetJoystickGUIDForID(ids[i]), guid, sizeof(guid));
+        const char *name = SDL_GetJoystickNameForID(ids[i]);
+        std::string label = name ? name : "Controller";
+        for (char &c : label)
+            if (c == ',')
+                c = ' ';
+        const std::string mapping = std::string(guid) + "," + label +
+            ",a:b1,b:b2,x:b0,y:b3,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,"
+            "back:b8,start:b9,leftstick:b10,rightstick:b11,leftx:a0,lefty:a1,rightx:a2,righty:a3,"
+            "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,";
+        if (SDL_AddGamepadMapping(mapping.c_str()) >= 0)
+            std::printf("[input] \"%s\" has no known mapping: using a generic layout (controllers.txt next to the exe can fix it)\n",
+                        label.c_str());
+    }
+    SDL_free(ids);
 }
 
 // Fills the pad state from an SDL gamepad; false when there is none.
@@ -123,6 +171,7 @@ bool sdlPoll(uint32_t &held, uint8_t &lx, uint8_t &ly, uint8_t &rx, uint8_t &ry)
         return false;
     if (!g_sdlPad && (g_sdlScan++ % 60) == 0)
     {
+        mapUnknownJoysticks();
         int count = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&count);
         const int want = choice < 0 ? 0 : choice;

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -58,6 +59,14 @@ void requestPreload(uint32_t entryId);
 // Give a puppet entry (0x084C or 0x084D) another entry's model and motion set
 // (lookEntry 0 puts its own back). Takes effect for later loads and spawns.
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
+// Start motion `id` on object `obj` (a guest job), if the object is still
+// there and its motion set has that motion.
+void postMotion(uint32_t obj, uint32_t id, float blend = 4.0f);
+// Make an object of `entryId` at `pos` facing `yaw` (a guest job, like a
+// room's spawn list entry: placeholders such as FRIEND_1 (0x237) become the
+// party member the room's party has in that place). `done` gets the object,
+// or 0.
+void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done = {});
 
 // Other objects whose position and facing come from elsewhere (the host's
 // enemies, on clients): applied in the same matrix hook. Replaces the set.

@@ -371,7 +371,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
                 {
                     f.motion = h->motion;
                     f.sinceMotion = 0;
-                    kh2guest::postCall({kMotionChange, {e.object + kh2state::addr::ObjMotion, h->motion}, {4.0f, 0.0f}});
+                    kh2puppets::postMotion(e.object, h->motion, 4.0f);
                 }
             }
         }

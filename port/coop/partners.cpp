@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +83,7 @@ uint32_t entryByModel(const uint8_t *rdram, const char *model)
 struct Dress
 {
     uint8_t original[kEntryLookSize];
+    uint8_t joint = 0; // the record's weapon joint (+0x07), which goes with the model
     uint16_t as = 0;
 };
 std::map<uint16_t, Dress> g_dress; // under g_mutex
@@ -103,6 +105,7 @@ void dress(uint8_t *rdram, uint16_t entry, uint16_t as)
         if (it != g_dress.end())
         {
             std::memcpy(look, it->second.original, kEntryLookSize);
+            rdram[(rec + 7) & 0x01FFFFFFu] = it->second.joint;
             g_dress.erase(it);
             std::printf("[partner] entry %04X has its own look again\n", entry);
         }
@@ -115,9 +118,13 @@ void dress(uint8_t *rdram, uint16_t entry, uint16_t as)
     {
         Dress d;
         std::memcpy(d.original, look, kEntryLookSize);
+        d.joint = rdram[(rec + 7) & 0x01FFFFFFu];
         it = g_dress.emplace(entry, d).first;
     }
     std::memcpy(look, rdram + ((from + kEntryLook) & 0x01FFFFFFu), kEntryLookSize);
+    // The joint the weapon is held at belongs to the skeleton: Donald's
+    // (2) on Roxas's model is his head.
+    rdram[(rec + 7) & 0x01FFFFFFu] = rdram[(from + 7) & 0x01FFFFFFu];
     it->second.as = as;
     std::printf("[partner] entry %04X dressed as %.32s (from the next room on)\n", entry,
                 reinterpret_cast<const char *>(look));
@@ -279,6 +286,24 @@ uint16_t fillEntry(uint8_t character)
     return 0;
 }
 
+// A room made for the player alone has no places for party members in its
+// spawn list (only PLAYER, 0x236), so even with the party rule above nobody
+// appears. Once the room has settled, the missing ones are made the way its
+// list would have: the placeholder FRIEND_1 / FRIEND_2 (0x237 / 0x238),
+// which becomes the party member in that place, behind the player to the
+// left and right. Once per room and slot.
+constexpr uint32_t kFriendPlaceholder[2] = {0x0237, 0x0238};
+uint32_t g_spawnRoom = 0xFFFFFFFFu; // world/room/event the attempts below are for
+double g_roomSince = 0;
+bool g_spawnTried[2] = {false, false};
+bool g_roomOverridden = false;
+
+double nowSec()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
 uint32_t slotAddress(int slot) { return kh2state::addr::Slot1 - kh2state::addr::SlotStride * uint32_t(slot); }
 
 // ---- per player link --------------------------------------------------------
@@ -396,6 +421,7 @@ void syncRecord(uint8_t *rdram, State &s, const Remote &r, uint8_t world)
 // companions than players becomes rule 1, so they have party members to
 // stand in for there too (empty world slots are filled, see fillParty).
 std::atomic<int> g_partyWanted{0};
+std::atomic<bool> g_ruleOverridden{false}; // this room load's rule was raised (spawnMissing)
 PS2Runtime::RecompiledFunction g_partyRule = nullptr;
 constexpr uint32_t kPartyRule = 0x001A8D40;
 constexpr uint32_t kPartyRules = 0x01C6CC0C;
@@ -415,6 +441,7 @@ void partyRuleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                         companions, wanted);
             std::fflush(stdout);
             SET_GPR_U32(ctx, 5, 1u);
+            g_ruleOverridden = true;
         }
     }
     kh2::callOriginal(g_partyRule, rdram, ctx, runtime);
@@ -441,9 +468,9 @@ bool install(PS2Runtime &runtime)
         g_sacrifice = nullptr;
         return false;
     }
-    // Work in progress: the rule alone is not enough (a solo room's spawn
-    // list has no places for party members, so none appear); opt in with
-    // KH2_PARTY_RULE=1 until they are spawned too.
+    // Experimental, KH2_PARTY_RULE=1: the placeholder made by spawnMissing
+    // is not bound to its party slot (no sheet), keeps its AI and crashed
+    // later; off until party members are made the way a room makes them.
     const char *ruleEnv = std::getenv("KH2_PARTY_RULE");
     g_partyRule = ruleEnv && *ruleEnv == '1' ? runtime.lookupFunction(kPartyRule) : nullptr;
     if (g_partyRule && !runtime.replaceFunction(kPartyRule, &partyRuleHook))
@@ -452,6 +479,78 @@ bool install(PS2Runtime &runtime)
         g_partyRule = nullptr;
     }
     return true;
+}
+
+static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::vector<Companion> &comps,
+                         const std::vector<const Remote *> &order)
+{
+    const uint32_t key = uint32_t(st.now.world) << 24 | uint32_t(st.now.room) << 16 | st.now.event;
+    if (key != g_spawnRoom)
+    {
+        g_spawnRoom = key;
+        g_roomSince = nowSec();
+        g_spawnTried[0] = g_spawnTried[1] = false;
+        g_roomOverridden = g_ruleOverridden.exchange(false);
+    }
+    if (order.empty() || !g_roomOverridden || !st.player.valid || st.control != 0 || st.now.world == 0 ||
+        st.now.world >= 0x20)
+        return;
+    if (rd<uint32_t>(rdram, kh2state::addr::MapJumpTask))
+    {
+        g_roomSince = nowSec();
+        return;
+    }
+    if (nowSec() - g_roomSince < 1.5)
+        return;
+    const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+    if (!player || player >= 0x02000000u)
+        return;
+    float pos[4], dir[4];
+    std::memcpy(pos, rdram + ((player + kh2state::addr::ObjPos) & 0x01FFFFFFu), sizeof(pos));
+    std::memcpy(dir, rdram + ((player + kh2state::addr::ObjDir) & 0x01FFFFFFu), sizeof(dir));
+    for (size_t k = 1; k <= order.size() && k <= 2; ++k)
+    {
+        if (g_spawnTried[k - 1])
+            continue;
+        bool have = false;
+        for (const Companion &c : comps)
+            have = have || c.slot == int(k);
+        if (have)
+            continue;
+        const uint8_t character = rd<uint8_t>(rdram, kSaveParty + uint32_t(st.now.world) * 4u + uint32_t(k));
+        if (character == kNobody || character == 0 || character >= 13)
+            continue;
+        // Made in the player's look straight away (no room reload): the
+        // entry of that place is dressed first, as fillParty's are.
+        const Remote &r = *order[k - 1];
+        const uint16_t entry = fillEntry(character);
+        if (entry)
+        {
+            State &s = g_states[r.playerId];
+            if (!s.companionEntry)
+            {
+                s.companionEntry = entry;
+                s.companionWeapon = weaponOf(rdram, entry);
+            }
+            if (r.model && dressedAs(entry) != r.model)
+                dress(rdram, entry, r.model);
+            if (!r.model || dressedAs(entry) != r.model)
+                continue; // their look first (they may still be loading)
+        }
+        g_spawnTried[k - 1] = true;
+        // Behind the player, to the left (slot 1) or right (slot 2).
+        const float side = k == 1 ? -1.0f : 1.0f;
+        const float back = 150.0f, aside = 110.0f;
+        const float at[3] = {pos[0] - dir[0] * back + dir[2] * aside * side, pos[1],
+                             pos[2] - dir[2] * back - dir[0] * aside * side};
+        const uint32_t placeholder = kFriendPlaceholder[k - 1];
+        std::printf("[partner] this room has no place for party member %zu: making one behind the player\n", k);
+        std::fflush(stdout);
+        kh2puppets::spawnAt(placeholder, at, dir[3], [placeholder](uint32_t obj) {
+            std::printf("[partner] placeholder %04X made -> %08X\n", placeholder, obj);
+            std::fflush(stdout);
+        });
+    }
 }
 
 std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
@@ -473,6 +572,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     g_partyWanted = int(order.size());
     if (st.player.valid)
         fillParty(rdram, st.now.world, order.size());
+    spawnMissing(rdram, st, comps, order);
 
     // Players gone from the session.
     for (auto it = g_states.begin(); it != g_states.end();)
@@ -611,7 +711,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             {
                 s.motion = r.motion;
                 s.sinceMotion = 0;
-                kh2guest::postCall({kMotionChange, {obj + kh2state::addr::ObjMotion, r.motion}, {4.0f, 0.0f}});
+                kh2puppets::postMotion(obj, r.motion, 4.0f);
             }
         }
 

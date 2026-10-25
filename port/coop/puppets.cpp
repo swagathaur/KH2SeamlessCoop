@@ -324,6 +324,47 @@ struct Guard
     std::atomic<int32_t> wanted{-1};
 };
 Guard g_guards[kMaxPuppets + 2]; // our puppets, then the party members players stand in for
+float g_lastMotionTime[kMaxPuppets + 2] = {};
+PS2Runtime::RecompiledFunction g_motionUpdate = nullptr;
+constexpr uint32_t kMotionUpdate = 0x0017F620; // YS::MOTION's per-frame step (MOTION*, float dt)
+constexpr uint32_t kFrameDelta = 0x00349E10;   // the dt YS::OBJ's update passes it
+
+// An object we drive has its action off (0x200000 at +0x10C), and for the
+// classes we use that also stops its motion's per-frame step: the player's
+// run was started on it but stood still (they glided along). If its
+// motion's time did not move since the last frame, step it here, as the
+// object's own update would.
+void stepFrozenMotion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t obj)
+{
+    if (!g_motionUpdate)
+        return;
+    const uint32_t m = obj + kh2state::addr::ObjMotion;
+    for (size_t i = 0; i < kMaxPuppets + 2; ++i)
+    {
+        if (g_guards[i].motion.load(std::memory_order_relaxed) != m)
+            continue;
+        uint32_t flags = 0;
+        std::memcpy(&flags, rdram + ((obj + 0x10C) & 0x01FFFFFFu), 4);
+        float t = 0;
+        std::memcpy(&t, rdram + ((m + 0x30) & 0x01FFFFFFu), 4);
+        const bool frozen = (flags & 0x200000u) && t == g_lastMotionTime[i];
+        if (frozen)
+        {
+            float dt = 1.0f;
+            std::memcpy(&dt, rdram + kFrameDelta, 4);
+            if (!(dt > 0.0f && dt < 10.0f))
+                dt = 1.0f;
+            R5900Context saved = *ctx;
+            SET_GPR_U32(ctx, 4, m);
+            ctx->f[12] = dt;
+            g_motionUpdate(rdram, ctx, runtime);
+            *ctx = saved;
+            std::memcpy(&t, rdram + ((m + 0x30) & 0x01FFFFFFu), 4);
+        }
+        g_lastMotionTime[i] = t;
+        return;
+    }
+}
 PS2Runtime::RecompiledFunction g_change = nullptr, g_startNum = nullptr;
 
 bool blocked(const uint8_t *rdram, R5900Context *ctx, const char *what)
@@ -377,6 +418,7 @@ void buildMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         if (player && getRegU32(ctx, 4) == player)
             kh2guest::runPending(rdram, ctx, runtime, kh2state::addr::ObjBuildMatrix); // may not return
     }
+    stepFrozenMotion(rdram, ctx, runtime, getRegU32(ctx, 4));
     if (g_any.load(std::memory_order_relaxed) || g_anyOverride.load(std::memory_order_relaxed))
     {
         const uint32_t obj = getRegU32(ctx, 4);
@@ -422,6 +464,7 @@ bool install(PS2Runtime &runtime)
         return false;
     }
     constexpr uint32_t kStartNum = 0x0017EDA8; // YS::MOTION::start_num(int, float, float)
+    g_motionUpdate = runtime.lookupFunction(kMotionUpdate);
     g_change = runtime.lookupFunction(kMotionChange);
     g_startNum = runtime.lookupFunction(kStartNum);
     if (!g_change || !runtime.replaceFunction(kMotionChange, &changeHook))
@@ -611,7 +654,7 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
             s.motion = tg->motion;
             const uint32_t obj = s.object;
             const uint32_t motion = tg->motion;
-            kh2guest::postCall({kMotionChange, {obj + kh2state::addr::ObjMotion, motion}, {4.0f, 0.0f}});
+            postMotion(obj, motion, 4.0f);
         }
     }
     // New players in our room get a puppet.
@@ -735,6 +778,41 @@ void preload(uint32_t entryId, std::function<void()> requested)
 } // namespace
 
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
+
+void postMotion(uint32_t obj, uint32_t id, float blend)
+{
+    // YS::MOTION::is_exist first: a motion the object's set does not have
+    // (a player's reaction-command motions on a stand-in) made change()
+    // jump through garbage.
+    constexpr uint32_t kMotionIsExist = 0x001805A8;
+    auto step = std::make_shared<int>(0);
+    kh2guest::post([obj, id, blend, step](const kh2guest::Env &env, uint32_t result, bool) -> std::optional<kh2guest::Call> {
+        auto live = [&] {
+            for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+                if (a.address == obj)
+                    return true;
+            return false;
+        };
+        switch ((*step)++)
+        {
+        case 0:
+            if (!live())
+                return std::nullopt;
+            return kh2guest::Call{kMotionIsExist, {obj + kh2state::addr::ObjMotion, id}, {}};
+        case 1:
+            if (!(result & 1u) || !live())
+                return std::nullopt;
+            return kh2guest::Call{kMotionChange, {obj + kh2state::addr::ObjMotion, id}, {blend, 0.0f}};
+        default:
+            return std::nullopt;
+        }
+    });
+}
+
+void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void(uint32_t)> done)
+{
+    postSpawn(entryId, pos, yaw, std::move(done));
+}
 
 void setOverrides(std::vector<Override> overrides, int channel)
 {

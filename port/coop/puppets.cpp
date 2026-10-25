@@ -361,18 +361,34 @@ void stepFrozenMotion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, ui
             std::memcpy(&dt, rdram + kFrameDelta, 4);
             if (!(dt > 0.0f && dt < 10.0f))
                 dt = 1.0f;
-            R5900Context saved = *ctx;
-            SET_GPR_U32(ctx, 4, m);
-            ctx->f[12] = dt;
-            g_motionUpdate(rdram, ctx, runtime);
-            *ctx = saved;
-            std::memcpy(&t, rdram + ((m + 0x30) & 0x01FFFFFFu), 4);
+            // Only the clock: the whole step (0x17F620) also works through
+            // a queue of motions these objects never filled and started
+            // stale entries every frame (run, idle, run, ...).
+            float speed = 1.0f;
+            std::memcpy(&speed, rdram + ((m + 0xF4) & 0x01FFFFFFu), 4);
+            if (!(speed > 0.0f && speed < 10.0f))
+                speed = 1.0f;
+            const float next = t + dt * speed;
+            std::memcpy(rdram + ((m + 0x30) & 0x01FFFFFFu), &next, 4);
+            (void)runtime;
+            (void)ctx;
+            float after = 0;
+            std::memcpy(&after, rdram + ((m + 0x30) & 0x01FFFFFFu), 4);
+            static int logged = 0;
+            if (logged < 40 && std::getenv("KH2_MOTION_LOG"))
+            {
+                ++logged;
+                std::printf("[motion] stepped %08X: %.2f -> %.2f (dt %.2f)\n", obj, t, after, dt);
+                std::fflush(stdout);
+            }
+            t = after;
         }
         g_lastMotionTime[i] = t;
         return;
     }
 }
-PS2Runtime::RecompiledFunction g_change = nullptr, g_startNum = nullptr;
+PS2Runtime::RecompiledFunction g_change = nullptr, g_startNum = nullptr, g_push = nullptr, g_start = nullptr,
+                               g_startQueued = nullptr, g_locomotion = nullptr;
 
 bool blocked(const uint8_t *rdram, R5900Context *ctx, const char *what)
 {
@@ -388,6 +404,14 @@ bool blocked(const uint8_t *rdram, R5900Context *ctx, const char *what)
             if (!(flags & 0x200000u))
                 return false;
             const int32_t want = g.wanted.load(std::memory_order_relaxed);
+            static int traced = 0;
+            if (std::getenv("KH2_MOTION_LOG") && traced < 3000)
+            {
+                ++traced;
+                std::printf("[motion] %s(%d) on %08X from %08X (want %d)\n", what, id, m - kh2state::addr::ObjMotion,
+                            getRegU32(ctx, 31), want);
+                std::fflush(stdout);
+            }
             if (want < 0 || id == want)
                 return false;
             static int logged = 0;
@@ -408,6 +432,54 @@ void changeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (!blocked(rdram, ctx, "change"))
         kh2::callOriginal(g_change, rdram, ctx, runtime);
+}
+// YS::MOTION::push(id, blend, start, callback): queues a motion the
+// per-frame step starts later (a party member's own routine queues its idle).
+void pushHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!blocked(rdram, ctx, "push"))
+        kh2::callOriginal(g_push, rdram, ctx, runtime);
+}
+// FUN_0017F488(MOTION*, id, f12, f13): the direct motion start the player
+// and party classes' own code use (run when moving, idle when not).
+void startHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!blocked(rdram, ctx, "start"))
+        kh2::callOriginal(g_start, rdram, ctx, runtime);
+}
+// FUN_0017F268(MOTION*, id, f12, f13): the start the per-frame step (0x17F620)
+// calls for each queued motion. change() and start() reach it with a direct
+// jump, so this only sees the queue: a driven object's own routine queues
+// its idle there, and it undid the run we set (index 2 -> 0 every frame).
+void startQueuedHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!blocked(rdram, ctx, "queued"))
+        kh2::callOriginal(g_startQueued, rdram, ctx, runtime);
+}
+// FUN_0017C160(controller, OBJ*): the walk controller's per-frame step (its
+// vtable +0x18, from the object update at 0x16AB54). It picks idle, walk or
+// run from the object's own velocity (+0x110/+0x114) and changes the motion
+// with a direct jump that no hook above sees. We move driven objects by
+// position, so their velocity stays 0 and it put them back to idle every
+// frame (index 2 -> 0: the stand-ins glided). Skip it for those.
+void locomotionHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 5);
+    const uint32_t m = obj + kh2state::addr::ObjMotion;
+    if (obj)
+        for (const Guard &g : g_guards)
+            if (g.motion.load(std::memory_order_relaxed) == m)
+            {
+                uint32_t flags = 0;
+                std::memcpy(&flags, rdram + ((obj + 0x10C) & 0x01FFFFFFu), 4);
+                if ((flags & 0x200000u) && g.wanted.load(std::memory_order_relaxed) >= 0)
+                {
+                    ctx->pc = getRegU32(ctx, 31);
+                    return;
+                }
+                break;
+            }
+    kh2::callOriginal(g_locomotion, rdram, ctx, runtime);
 }
 void startNumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -476,8 +548,28 @@ bool install(PS2Runtime &runtime)
     g_startNum = runtime.lookupFunction(kStartNum);
     if (!g_change || !runtime.replaceFunction(kMotionChange, &changeHook))
         g_change = nullptr;
-    if (!g_startNum || !runtime.replaceFunction(kStartNum, &startNumHook))
-        g_startNum = nullptr;
+    // Not start_num: it takes a motion set's entry number, which change()
+    // itself passes on (run, motion 2, is entry 8 for Roxas): guarding it by
+    // motion id stopped our own changes half way (the stand-ins glided).
+    (void)kStartNum;
+    constexpr uint32_t kMotionStart = 0x0017F488;
+    g_start = runtime.lookupFunction(kMotionStart);
+    if (!g_start || !runtime.replaceFunction(kMotionStart, &startHook))
+        g_start = nullptr;
+    constexpr uint32_t kMotionPush = 0x0017F5E0;
+    g_push = runtime.lookupFunction(kMotionPush);
+    if (!g_push || !runtime.replaceFunction(kMotionPush, &pushHook))
+        g_push = nullptr;
+    constexpr uint32_t kMotionStartQueued = 0x0017F268;
+    g_startQueued = runtime.lookupFunction(kMotionStartQueued);
+    if (!g_startQueued || !runtime.replaceFunction(kMotionStartQueued, &startQueuedHook))
+        g_startQueued = nullptr;
+    constexpr uint32_t kLocomotion = 0x0017C160;
+    g_locomotion = runtime.lookupFunction(kLocomotion);
+    if (!g_locomotion || !runtime.replaceFunction(kLocomotion, &locomotionHook))
+        g_locomotion = nullptr;
+    (void)&startNumHook;
+    g_startNum = nullptr;
     return true;
 }
 
@@ -807,6 +899,11 @@ void postMotion(uint32_t obj, uint32_t id, float blend)
                 return std::nullopt;
             return kh2guest::Call{kMotionIsExist, {obj + kh2state::addr::ObjMotion, id}, {}};
         case 1:
+            if (std::getenv("KH2_MOTION_LOG"))
+            {
+                std::printf("[motion] %08X motion %u exists: %u\n", obj, id, result);
+                std::fflush(stdout);
+            }
             if (!(result & 1u) || !live())
                 return std::nullopt;
             return kh2guest::Call{kMotionChange, {obj + kh2state::addr::ObjMotion, id}, {blend, 0.0f}};

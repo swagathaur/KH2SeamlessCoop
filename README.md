@@ -23,8 +23,20 @@ host-authoritative. See [docs/architecture.md](docs/architecture.md).
 
 ## Setup (Windows)
 
-Needs Visual Studio 2022 with C++ tools (its bundled CMake and Ninja are used),
-Python 3 and Git.
+**Easiest: clone this repository, then double-click `First-time setup.bat`.**
+It checks what you have and installs what is missing with winget (Git,
+Python 3.12, and Visual Studio 2022's C++ build tools with its CMake and
+Ninja; an existing Visual Studio 2022 gets the C++ parts added), downloads
+the libraries, finds the Steam or Epic PC release if you have it (see
+below), asks you to put your disc image in `Src\` and checks it, then
+builds the game. It is safe to run again; its log is `logs\setup.log`.
+
+```
+git clone --recursive https://github.com/swagathaur/KH2SeamlessCoop.git
+```
+
+By hand instead: Visual Studio 2022 with C++ tools (its bundled CMake and
+Ninja are used), Python 3.11+ and Git, then:
 
 ```powershell
 git submodule update --init --recursive
@@ -49,7 +61,8 @@ files where they are installed.
 
 1. **Install the PC release** and leave it installed where it is (moving it
    later means indexing again). Python 3 must be installed too.
-2. **Start the game with `Play KH2.bat`.** It looks for the PC release in
+2. **Run `First-time setup.bat`** (it finds the PC release and remembers
+   where), or just **start the game with `Play KH2.bat`.** It looks for the PC release in
    your Steam libraries and in the usual Epic folder. When it finds it, it
    extracts the English text and builds the HD texture index (a minute or
    two, once), and on the first start turns both on. If yours is somewhere

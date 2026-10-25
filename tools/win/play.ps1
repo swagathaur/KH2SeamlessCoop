@@ -6,44 +6,7 @@ New-Item -ItemType Directory -Force logs | Out-Null
 if (Test-Path logs\play.log) { Move-Item -Force logs\play.log logs\play.prev.log }
 if (Test-Path logs\play.err.log) { Move-Item -Force logs\play.err.log logs\play.prev.err.log }
 
-# The PC release (KINGDOM HEARTS HD 1.5+2.5 ReMIX, Steam or Epic), for the
-# English text and the HD textures: game\pc-release.txt may name its
-# "Image\dt" folder; otherwise the usual install places are searched.
-function Find-PCRelease {
-    if (Test-Path game\pc-release.txt) {
-        $p = (Get-Content game\pc-release.txt -TotalCount 1).Trim()
-        if ($p -and (Test-Path (Join-Path $p 'kh2_first.hed'))) { return $p }
-    }
-    $candidates = @()
-    try {
-        $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath
-        if ($steam) {
-            $libs = @($steam)
-            $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
-            if (Test-Path $vdf) {
-                foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) {
-                    $libs += $m.Groups[1].Value -replace '\\\\', '\'
-                }
-            }
-            foreach ($lib in $libs) {
-                $candidates += Join-Path $lib 'steamapps\common\KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\Image\dt'
-            }
-        }
-    } catch { }
-    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if ($root) { $candidates += Join-Path $root 'Epic Games\KH_1.5_2.5\Image\dt' }
-    }
-    foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
-        $candidates += Join-Path $d.Root 'Epic Games\KH_1.5_2.5\Image\dt'
-        $candidates += Join-Path $d.Root 'SteamLibrary\steamapps\common\KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\Image\dt'
-    }
-    foreach ($c in $candidates) {
-        if (Test-Path (Join-Path $c 'kh2_first.hed')) { return $c }
-        if (Test-Path (Join-Path $c 'backup\kh2_first.hed')) { return $c }
-    }
-    return $null
-}
-
+. "$PSScriptRoot\pc-release.ps1" # Find-PCRelease
 $pc = Find-PCRelease
 $python = Get-Command python -ErrorAction SilentlyContinue
 if ($pc -and $python) {

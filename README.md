@@ -39,6 +39,35 @@ Then double-click **`Play KH2.bat`** (controls, settings, co-op: [docs/playing.m
 Command-line testing (headless runs, screenshots, scripted input, exit codes):
 see [docs/harness.md](docs/harness.md).
 
+## English text and HD textures (Steam or Epic PC release)
+
+The disc is Japanese and PS2-resolution. If you also own **KINGDOM HEARTS
+HD 1.5+2.5 ReMIX** for PC (Steam or Epic), the game can take the PC
+release's English text and its high-resolution textures (menus, fonts,
+characters, places). Nothing is copied out of it: the game reads the PC
+files where they are installed.
+
+1. **Install the PC release** and leave it installed where it is (moving it
+   later means indexing again). Python 3 must be installed too.
+2. **Start the game with `Play KH2.bat`.** It looks for the PC release in
+   your Steam libraries and in the usual Epic folder. When it finds it, it
+   extracts the English text and builds the HD texture index (a minute or
+   two, once), and on the first start turns both on. If yours is somewhere
+   else, put the path of its `Image\dt` folder (the one with
+   `kh2_first.hed`) on the first line of `game\pc-release.txt` and start
+   again.
+3. **In the game: Settings > Display > "HD textures (PC release)"** (F1, or
+   Select + Start on a controller) switches the HD textures on and off live,
+   to compare. Your choice is saved in `build\win\kh2recomp.ini`.
+
+If the switch is not in the menu, the textures were not loaded at start.
+That happens when you played before installing the PC release (your
+settings file was already made), or after you saved with the switch off.
+Add `hd-textures = 1` (and `english = 1` for the text) to
+`build\win\kh2recomp.ini`, then start again. A new area can show its PS2
+textures for a moment while its HD ones load. Details and limits are in
+[docs/playing.md](docs/playing.md#hd-textures).
+
 ## Layout
 
 | Path | Contents |

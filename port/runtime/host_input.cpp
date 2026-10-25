@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
@@ -74,6 +75,7 @@ std::mutex g_nameMutex;
 std::string g_padName;
 
 uint8_t axisByte(int v, bool invert);
+void squareStick(uint8_t &bx, uint8_t &by);
 
 #if defined(KH2_HAVE_SDL3)
 bool g_sdlReady = false;
@@ -178,6 +180,25 @@ bool sdlPoll(uint32_t &held, uint8_t &lx, uint8_t &ly, uint8_t &rx, uint8_t &ry)
     return true;
 }
 #endif
+
+// A stick position on the circle -> the same direction on the square: the
+// length is kept, measured on the square (max(|x|, |y|) instead of the
+// radius). Centre and straight directions are unchanged.
+void squareStick(uint8_t &bx, uint8_t &by)
+{
+    const float x = (float(bx) - 128.0f) / 127.0f, y = (float(by) - 128.0f) / 127.0f;
+    const float m = std::max(std::fabs(x), std::fabs(y));
+    if (m < 1e-3f)
+        return;
+    const float len = std::min(1.0f, std::sqrt(x * x + y * y));
+    const float k = len / m;
+    auto back = [](float v) {
+        const float b = 128.0f + std::max(-1.0f, std::min(1.0f, v)) * 127.0f;
+        return static_cast<uint8_t>(b < 0.0f ? 0 : b > 255.0f ? 255 : int(b + 0.5f));
+    };
+    bx = back(x * k);
+    by = back(y * k);
+}
 
 uint8_t axisByte(int v, bool invert)
 {
@@ -446,6 +467,12 @@ void poll(bool keyboardFocus)
 #else
     (void)keyboardFocus;
 #endif
+    // Today's pads report a round stick (full tilt on a diagonal is about
+    // 0.71, 0.71); the PS2's went out to the corners, and KH2 only runs at
+    // full speed near them, so diagonal sprinting was lost. Stretch the
+    // circle out to the square.
+    squareStick(lx, ly);
+    squareStick(rx, ry);
     if (!keyboardFocus)
         g_fastForward = false;
     // Select+Start: settings menu.

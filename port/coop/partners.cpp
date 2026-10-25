@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -15,6 +16,7 @@
 #include "puppets.h"
 #include "story.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 
 namespace kh2partner
 {
@@ -385,6 +387,39 @@ void syncRecord(uint8_t *rdram, State &s, const Remote &r, uint8_t world)
     s.inventory.assign(inv, inv + kInventorySize);
 }
 
+// FUN_001A8D40(MEMBER*, rule) override. A room's area script picks its
+// party with a rule (opcode 15 of its map/battle/event programs): 0 is the
+// player alone (Sora- or Roxas-only bosses, the Station of Awakening), 1 the
+// player and the world's two companions, others mixes (table at
+// [0x01C6CC0C], 4 bytes a rule: 00 player, 01-03 the world's companions,
+// 0x12 nobody). While other players are in the session, a rule with fewer
+// companions than players becomes rule 1, so they have party members to
+// stand in for there too (empty world slots are filled, see fillParty).
+std::atomic<int> g_partyWanted{0};
+PS2Runtime::RecompiledFunction g_partyRule = nullptr;
+constexpr uint32_t kPartyRule = 0x001A8D40;
+constexpr uint32_t kPartyRules = 0x01C6CC0C;
+void partyRuleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const int wanted = g_partyWanted.load(std::memory_order_relaxed);
+    const uint32_t rule = getRegU32(ctx, 5);
+    const uint32_t table = rd<uint32_t>(rdram, kPartyRules);
+    if (wanted > 0 && rule != 1 && rule < 16 && table && table < 0x02000000u)
+    {
+        int companions = 0;
+        for (int i = 1; i < 4; ++i)
+            companions += rd<uint8_t>(rdram, table + rule * 4 + i) != kNobody ? 1 : 0;
+        if (companions < wanted)
+        {
+            std::printf("[partner] the room's party rule %u (%d companion(s)) becomes 1 for %d player(s)\n", rule,
+                        companions, wanted);
+            std::fflush(stdout);
+            SET_GPR_U32(ctx, 5, 1u);
+        }
+    }
+    kh2::callOriginal(g_partyRule, rdram, ctx, runtime);
+}
+
 // FUN_001C9860(form) override: while linked, forms leave the party alone.
 void sacrificeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -406,6 +441,16 @@ bool install(PS2Runtime &runtime)
         g_sacrifice = nullptr;
         return false;
     }
+    // Work in progress: the rule alone is not enough (a solo room's spawn
+    // list has no places for party members, so none appear); opt in with
+    // KH2_PARTY_RULE=1 until they are spawned too.
+    const char *ruleEnv = std::getenv("KH2_PARTY_RULE");
+    g_partyRule = ruleEnv && *ruleEnv == '1' ? runtime.lookupFunction(kPartyRule) : nullptr;
+    if (g_partyRule && !runtime.replaceFunction(kPartyRule, &partyRuleHook))
+    {
+        std::fprintf(stderr, "[partner] could not hook 0x%08X\n", kPartyRule);
+        g_partyRule = nullptr;
+    }
     return true;
 }
 
@@ -425,6 +470,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     std::sort(order.begin(), order.end(), [](const Remote *a, const Remote *b) { return a->playerId < b->playerId; });
     if (order.size() > 2)
         order.resize(2);
+    g_partyWanted = int(order.size());
     if (st.player.valid)
         fillParty(rdram, st.now.world, order.size());
 
@@ -527,7 +573,11 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // Elsewhere (another room, loading): the companion waits out of sight,
         // still and out of reach, rather than acting in a look its AI does not
         // know.
-        const bool away = obj && s.lookAtCreation && !here;
+        // A battle's own short cinematic (a reaction command, a finisher:
+        // its timer runs while the player still has control) is staged for
+        // the player alone: the stand-ins step out of it, and back after.
+        const bool cinematic = st.control == 0 && st.cutsceneLength != 0 && st.cutsceneLength != 0xFFFFFFFFu;
+        const bool away = obj && s.lookAtCreation && (!here || cinematic);
         if (obj)
         {
             uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
@@ -544,7 +594,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             o.pos[2] = st.player.pos[2];
             overrides.push_back(o);
         }
-        if (here)
+        if (here && !cinematic)
         {
             kh2puppets::Override o;
             o.object = obj;

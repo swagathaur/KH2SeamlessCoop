@@ -48,6 +48,12 @@ tools\win\build.ps1       # build build\win\kh2recomp.exe
 
 Then double-click **`Play KH2.bat`** (controls, settings, co-op: [docs/playing.md](docs/playing.md)).
 
+**Updating:** double-click **`Update and rebuild.bat`**. It gets the latest
+version from GitHub, brings the libraries to the versions it needs and
+rebuilds only what changed (when the recompiler itself changed, it also
+translates the game again, a few minutes more). Close the game first.
+Players playing together should be on the same version.
+
 Command-line testing (headless runs, screenshots, scripted input, exit codes):
 see [docs/harness.md](docs/harness.md).
 

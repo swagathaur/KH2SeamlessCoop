@@ -989,6 +989,12 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             {
                 s.flagsBefore = rd<uint32_t>(rdram, obj + kObjFlags);
                 s.lookAtCreation = lookNow;
+                static bool testOldLook = std::getenv("KH2_TEST_OLD_LOOK") != nullptr; // testing: the first one counts as old
+                if (testOldLook && lookNow)
+                {
+                    testOldLook = false;
+                    s.lookAtCreation = 0;
+                }
                 s.refreshAsked = false;
                 std::printf("[partner] player %u is %s (party slot %d, %s)\n", r.playerId + 1, c->name, s.slot,
                             lookNow ? "in a partner's look" : "their look from the next room on");
@@ -1106,9 +1112,19 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         if (st.now.world != 0 && st.now.world < 19)
             syncRecord(rdram, s, r, st.now.world);
 
-        // In our room in the old look: a reload of the room shows theirs now.
+        // In our room in the old look (made before their entry wore their
+        // look, or they changed form): it goes, and spawnMissing makes the
+        // party member again, in their look now. Reloading the room for it
+        // put everyone back at the door for a moment.
         if (here && !s.dressedAtCreation && r.model && dressedAs(s.companionEntry) == r.model && !s.refreshAsked)
-            g_wantRefresh = true;
+        {
+            s.refreshAsked = true;
+            if (s.slot >= 1 && s.slot <= 2)
+                g_spawnTried[s.slot - 1] = false;
+            std::printf("[partner] player %u's stand-in %08X is in an old look: making it again\n", r.playerId + 1, obj);
+            std::fflush(stdout);
+            kh2puppets::remove(obj);
+        }
 
         Link l;
         l.playerId = r.playerId;
@@ -1137,10 +1153,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             if (!st2.object && st2.companionEntry && !dressedAs(st2.companionEntry))
                 dressed = false;
         if (dressed)
-        {
-            g_fillRefresh = false;
-            g_wantRefresh = true;
-        }
+            g_fillRefresh = false; // (spawnMissing makes them, no room reload)
     }
     kh2puppets::setOverrides(overrides, 1);
     kh2puppets::setMotionGuards(guards);

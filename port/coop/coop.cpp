@@ -592,6 +592,11 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             p.model = ps.model;
             p.weapon = ps.weapon;
             p.motion = ps.anim;
+            p.rideSerial = ps.rideSerial;
+            p.rideEntry = ps.rideEntry;
+            p.rideJoint = ps.rideJoint;
+            p.rideFlags = ps.rideFlags;
+            p.rideMotion = ps.rideMotion;
             p.hp = ps.hp;
             p.maxHp = ps.maxHp;
             p.mp = ps.mp;
@@ -914,6 +919,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         ps.model = static_cast<uint16_t>(st.player.entryId);
         ps.anim = static_cast<uint16_t>(st.player.motion);
         ps.flags |= 1; // has a body in the world
+        kh2partner::localRide(rdram, ps);
     }
     if (kh2downed::downed())
         ps.flags |= 2; // down (downed.h)

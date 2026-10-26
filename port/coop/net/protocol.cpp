@@ -21,6 +21,11 @@ void writePlayerState(ByteWriter &w, const PlayerState &s)
     w.i32(s.maxMp);
     w.u16(s.weapon);
     w.u8(s.flags);
+    w.u16(static_cast<uint16_t>(s.rideSerial));
+    w.u16(s.rideEntry);
+    w.u16(s.rideJoint);
+    w.u16(s.rideFlags);
+    w.u16(s.rideMotion);
 }
 
 void writeEnemyStates(ByteWriter &w, const EnemyStates &s)
@@ -88,6 +93,11 @@ bool readPlayerState(ByteReader &r, PlayerState &s)
     s.maxMp = r.i32();
     s.weapon = r.u16();
     s.flags = r.u8();
+    s.rideSerial = static_cast<int16_t>(r.u16());
+    s.rideEntry = r.u16();
+    s.rideJoint = r.u16();
+    s.rideFlags = r.u16();
+    s.rideMotion = r.u16();
     return r.ok();
 }
 } // namespace kh2net

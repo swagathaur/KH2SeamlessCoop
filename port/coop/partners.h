@@ -32,6 +32,11 @@
 
 class PS2Runtime;
 
+namespace kh2net
+{
+struct PlayerState;
+}
+
 namespace kh2partner
 {
 constexpr uint32_t kLoadoutSize = 0x114; // one character's save record
@@ -47,6 +52,8 @@ struct Remote
     uint16_t model = 0;  // objentry id of their character (0x54 Sora, 0x5A Roxas, ...)
     uint16_t weapon = 0; // objentry id of their weapon object (0 unknown)
     uint16_t motion = 0;
+    int16_t rideSerial = -1; // what they ride (protocol.h PlayerState)
+    uint16_t rideEntry = 0, rideJoint = 0, rideFlags = 0, rideMotion = 0;
     int32_t hp = 0, maxHp = 0, mp = 0, maxMp = 0;
     std::vector<uint8_t> loadout; // their own save record (kLoadoutSize), or empty
 };
@@ -78,6 +85,8 @@ void reset(uint8_t *rdram);
 
 // This player's own data, for the others.
 uint16_t localWeaponEntry(const uint8_t *rdram);
+// What our player rides now (a skateboard), into the state we send.
+void localRide(const uint8_t *rdram, kh2net::PlayerState &ps);
 std::vector<uint8_t> localLoadout(const uint8_t *rdram);
 // A partner here healed us.
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp);

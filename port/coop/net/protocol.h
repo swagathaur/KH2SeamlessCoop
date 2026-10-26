@@ -25,7 +25,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 6;
+constexpr uint8_t kProtocolVersion = 7;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -84,6 +84,10 @@ struct PlayerState
     int32_t mp = 0, maxMp = 0;
     uint16_t weapon = 0; // objentry id of their weapon object
     uint8_t flags = 0;
+    // What they ride (a skateboard: an object of the room attached to them),
+    // known by its spawn serial in the room's data; -1 nothing.
+    int16_t rideSerial = -1;
+    uint16_t rideEntry = 0, rideJoint = 0, rideFlags = 0, rideMotion = 0;
 };
 
 // The enemies in the host's room, sent ~20 times a second. Each is known by

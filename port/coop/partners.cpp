@@ -14,6 +14,7 @@
 
 #include "game_state.h"
 #include "guest_call.h"
+#include "net/protocol.h"
 #include "hle_call.h"
 #include "puppets.h"
 #include "story.h"
@@ -367,6 +368,9 @@ struct State
     uint16_t motion = 0xFFFF;
     uint16_t weaponSeen = 0;
     int sinceMotion = 0; // updates since we last started a motion on it
+    uint32_t ride = 0;          // the board (our game's) it rides now
+    uint32_t rideFlagsBefore = 0;
+    int sinceRideMotion = 0;
     int32_t writtenHp = -1, writtenMp = -1;
     // Equipment: the character record we fill, its own contents, what we wrote.
     int character = -1;
@@ -377,11 +381,17 @@ std::map<uint8_t, State> g_states; // under g_mutex
 std::vector<Link> g_links;          // under g_mutex
 bool g_wantRefresh = false;         // under g_mutex
 
+void stopRiding(uint8_t *rdram, State &s, uint32_t obj);
+
 void releaseObject(uint8_t *rdram, State &s)
 {
     if (!s.object)
         return;
     // Give it back to the game if it is still there.
+    bool live = false;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        live = live || a.address == s.object;
+    stopRiding(rdram, s, live ? s.object : 0);
     for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
         if (a.address == s.object)
         {
@@ -705,6 +715,110 @@ static void useOurVoices(uint8_t *rdram, uint32_t obj)
         }
 }
 
+namespace
+{
+// ---- riding (skateboards) ------------------------------------------------
+//
+// Hopping on a board attaches the board to the player (YS::OBJ::attach,
+// 0x001C0D38: object +0x570 the parent, +0x574 joint, +0x576 flags), and the
+// rider's motions come from the board's motion set: YS::MOTION +0xF0 the
+// board's axes (board +0x80), +0xFC the board, +0x100 its motion set; a
+// motion change with those set (0x00180C88) "captures" the rider's motion
+// from the board's set (YS::MOTION::Capture, entries 252.. there; the
+// rider's own set has no such motions). The board plays its own (151..).
+// A stand-in rides our game's board of the same room serial the same way.
+constexpr uint32_t kAttach = 0x001C0D38, kDetach = 0x001C0E60, kCaptureChange = 0x00180C88;
+constexpr uint32_t kObjParent = 0x570, kObjSpawnRecord = 0x81C, kRecordSerial = 0x1E;
+constexpr uint32_t kMotCaptureAxes = 0xF0, kMotCaptureObj = 0xFC, kMotCaptureSet = 0x100, kObjAxes = 0x80;
+
+static int16_t spawnSerial(const uint8_t *rdram, uint32_t obj)
+{
+    const uint32_t rec = rd<uint32_t>(rdram, obj + kObjSpawnRecord);
+    return rec >= 0x00100000u && rec < 0x02000000u ? rd<int16_t>(rdram, rec + kRecordSerial) : int16_t(-1);
+}
+
+static uint32_t findRide(const uint8_t *rdram, uint16_t entry, int16_t serial)
+{
+    if (serial < 0)
+        return 0;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        if (a.entryId == entry && spawnSerial(rdram, a.address) == serial)
+            return a.address;
+    return 0;
+}
+
+static void setCapture(uint8_t *rdram, uint32_t obj, uint32_t board)
+{
+    const uint32_t m = obj + kh2state::addr::ObjMotion;
+    wr<uint32_t>(rdram, m + kMotCaptureAxes, board ? board + kObjAxes : 0);
+    wr<uint32_t>(rdram, m + kMotCaptureObj, board);
+    wr<uint32_t>(rdram, m + kMotCaptureSet, board ? rd<uint32_t>(rdram, board + kh2state::addr::ObjMotion) : 0);
+}
+
+// The stand-in gets off its board (or the board went with its room).
+void stopRiding(uint8_t *rdram, State &s, uint32_t obj)
+{
+    if (!s.ride)
+        return;
+    bool live = false;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        live = live || a.address == s.ride;
+    if (live)
+    {
+        if (obj && rd<uint32_t>(rdram, s.ride + kObjParent) == obj)
+            kh2guest::postCall({kDetach, {s.ride}, {}});
+        const uint32_t flags = rd<uint32_t>(rdram, s.ride + kObjFlags);
+        wr<uint32_t>(rdram, s.ride + kObjFlags, (flags & ~kNoAct) | (s.rideFlagsBefore & kNoAct));
+    }
+    if (obj)
+        setCapture(rdram, obj, 0);
+    std::printf("[partner] stand-in %08X gets off %08X\n", obj, s.ride);
+    std::fflush(stdout);
+    s.ride = 0;
+    s.motion = 0xFFFF; // its own motions again
+}
+
+// Drives a stand-in whose player rides `board` (ours); false: not riding.
+static bool ride(uint8_t *rdram, State &s, uint32_t obj, const Remote &r)
+{
+    const uint32_t board = findRide(rdram, r.rideEntry, r.rideSerial);
+    if (board != s.ride)
+        stopRiding(rdram, s, obj);
+    if (!board)
+        return false;
+    if (!s.ride)
+    {
+        s.ride = board;
+        s.rideFlagsBefore = rd<uint32_t>(rdram, board + kObjFlags);
+        s.motion = 0xFFFF;
+        s.sinceRideMotion = 100;
+        std::printf("[partner] stand-in %08X rides %08X (entry %04X #%d)\n", obj, board, r.rideEntry, r.rideSerial);
+        std::fflush(stdout);
+    }
+    // The board is ours to move while they ride it (its own routine off).
+    wr<uint32_t>(rdram, board + kObjFlags, rd<uint32_t>(rdram, board + kObjFlags) | kNoAct);
+    if (rd<uint32_t>(rdram, board + kObjParent) != obj)
+        kh2guest::postCall({kAttach, {board, obj, r.rideJoint, r.rideFlags}, {}});
+    setCapture(rdram, obj, board);
+    const uint32_t playing = rd<uint32_t>(rdram, obj + kh2state::addr::ObjMotionIndex);
+    ++s.sinceMotion;
+    if (r.motion != s.motion || (playing != r.motion && s.sinceMotion > 4))
+    {
+        s.motion = r.motion;
+        s.sinceMotion = 0;
+        kh2guest::postCall({kCaptureChange, {obj + kh2state::addr::ObjMotion, r.motion}, {4.0f, 0.0f}});
+    }
+    ++s.sinceRideMotion;
+    if (rd<uint32_t>(rdram, board + kh2state::addr::ObjMotionIndex) != r.rideMotion && s.sinceRideMotion > 4)
+    {
+        s.sinceRideMotion = 0;
+        kh2puppets::postMotion(board, r.rideMotion, 4.0f);
+    }
+    return true;
+}
+
+} // namespace
+
 std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
 {
     std::vector<Heal> heals;
@@ -875,6 +989,8 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             o.pos[2] = st.player.pos[2];
             overrides.push_back(o);
         }
+        if (s.ride && !(here && !cinematic && s.dressedAtCreation))
+            stopRiding(rdram, s, obj);
         if (here && !cinematic)
         {
             kh2puppets::Override o;
@@ -884,8 +1000,10 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             overrides.push_back(o);
             // Their motions only make sense on their own motion set. Also put
             // theirs back when this game started another (a hit reaction).
+            const bool riding = s.dressedAtCreation && ride(rdram, s, obj, r);
             const uint32_t playing = rd<uint32_t>(rdram, obj + kh2state::addr::ObjMotionIndex);
-            ++s.sinceMotion;
+            if (!riding)
+                ++s.sinceMotion;
             // A player who has stood still since their room loaded has no
             // motion index yet (0xFFFF): they are idle (0). Left as it was,
             // the stand-in kept the pose it was made in (arms out).
@@ -895,7 +1013,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
                 guards.emplace_back(obj, static_cast<int32_t>(motion)); // its own AI's motions kept off
                 useOurVoices(rdram, obj);
             }
-            if (s.dressedAtCreation && (motion != s.motion || (playing != motion && s.sinceMotion > 4)))
+            if (!riding && s.dressedAtCreation && (motion != s.motion || (playing != motion && s.sinceMotion > 4)))
             {
                 static const bool kLog = std::getenv("KH2_PUPPET_LOG") != nullptr;
                 if (kLog)
@@ -1022,6 +1140,26 @@ void reset(uint8_t *rdram)
     kh2puppets::setOverrides({}, 1);
     kh2puppets::setMotionGuards({});
     kh2names::set({});
+}
+
+void localRide(const uint8_t *rdram, kh2net::PlayerState &ps)
+{
+    const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+    if (!player || player >= 0x02000000u)
+        return;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        if (a.address != player && rd<uint32_t>(rdram, a.address + kObjParent) == player)
+        {
+            const int16_t serial = spawnSerial(rdram, a.address);
+            if (serial < 0)
+                continue;
+            ps.rideSerial = serial;
+            ps.rideEntry = uint16_t(a.entryId);
+            ps.rideJoint = rd<uint16_t>(rdram, a.address + 0x574);
+            ps.rideFlags = rd<uint16_t>(rdram, a.address + 0x576);
+            ps.rideMotion = uint16_t(rd<uint32_t>(rdram, a.address + kh2state::addr::ObjMotionIndex));
+            return;
+        }
 }
 
 uint16_t localWeaponEntry(const uint8_t *rdram)

@@ -14,6 +14,7 @@ struct Options
     double baseSpeed = 1.0;        // --speed
     float volume = 1.0f;           // 0..1
     bool nameTags = true;          // co-op: names over other players
+    std::string lastAddress;       // co-op: the address last joined (kh2recomp.ini last-address)
 };
 // Hook the menu into the renderer and input. iniPath: where "Save" writes.
 void install(PS2Runtime &runtime, const std::string &iniPath, const Options &options);

@@ -937,6 +937,8 @@ void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects)
     }
 }
 
+void remove(uint32_t obj) { postLeave(obj); }
+
 void setMode(Mode mode) { g_mode = mode; }
 Mode mode() { return g_mode; }
 

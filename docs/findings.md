@@ -534,3 +534,20 @@ entries) holds the text it got. `0xB9FC`-`0xB9FE` are the camp menu's
 status labels (HP, ...), not names. Text encoding (the international font):
 A-Z `0x2E`-`0x47`, a-z `0x9A`-`0xB3`, 0-9 `0x21`-`0x2A`, space `0x01`,
 new line `0x02`, 0 ends. port/coop/names.cpp hooks both functions.
+
+## Voices and targets of party members
+
+A character's voices are a bank loaded per party place (`YS::VOICE::Read`,
+`0x001AFAF0`: for placeholders 0x236-0x238, by the objentry's part number at
+`+0x4C`; Roxas 14, Donald 2) into a table of three 12-byte slots at
+`0x01C94090` (flags, part, variant). An object's voice context
+(`obj+0x9B8` -> context, set up at `0x00175670`) names its slot at `+0x1C`;
+the object's "say" methods (`0x00176CD0` by voice type, `0x00198630` by id,
+both in vtables) queue into it. A stand-in keeps Donald's or Goofy's slot
+unless the context is pointed at the player's (`partners.cpp`,
+`useOurVoices`).
+
+Targets: `0x0019BC38` (behind `YS::TARGET::can_attack` and the lock-on
+searches `0x00190D10`/`0x00190F80`) refuses objentry types 0, 1 (party) and
+5 by type, so party members and stand-ins are never lock-on targets; types
+15 (the NPC-class puppets) pass when their flags allow.

@@ -172,6 +172,7 @@ struct Options
     bool puppetSpawn = true;           // --puppet-mode=spawn|borrow
     bool markActors = false;           // --mark-actors
     bool noNameTags = false;           // --no-name-tags
+    std::string lastAddress;             // --last-address: the Join box starts with it
     std::set<uint64_t> menuAt;         // --menu-at=F1,F2,..:SECONDS (windowed runs)
     double menuSeconds = 3.0;
     std::vector<std::pair<uint64_t, uint64_t>> ffAt; // --ff-at=FROM-TO,.. (windowed runs)
@@ -474,6 +475,7 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a.rfind("--arrange-at=", 0) == 0) o.arrangeAt = std::stoull(value(a));
         else if (a.rfind("--story-save-test=", 0) == 0) o.storySaveTest = std::stoull(value(a));
         else if (a.rfind("--name=", 0) == 0) o.coop.name = value(a);
+        else if (a.rfind("--last-address=", 0) == 0) o.lastAddress = value(a); // only fills in the Join box
         else if (a == "--follow-host") o.coop.followHost = true;
         else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
         else if (a == "--no-shared-story") o.coop.sharedStory = false;
@@ -1681,6 +1683,7 @@ int main(int argc, char **argv)
         uiOpt.baseSpeed = opt.speed;
         uiOpt.volume = opt.mute ? 0.0f : opt.volume / 100.0f;
         uiOpt.nameTags = !opt.noNameTags;
+        uiOpt.lastAddress = opt.lastAddress;
         kh2ui::install(runtime, (exeDir / "kh2recomp.ini").string(), uiOpt);
         harness.screenshotDir = exeDir / "screenshots";
     }

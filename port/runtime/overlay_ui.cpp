@@ -41,6 +41,9 @@ PS2Runtime *g_runtime = nullptr;
 std::filesystem::path g_iniPath;
 std::string g_status;
 Options g_opt;
+// Co-op name and address boxes; saved (name, last-address) when hosting or joining.
+char g_coopName[32] = "";
+char g_coopAddress[64] = "";
 bool g_paused = false;
 bool g_testFastForward = false;
 double g_speed = 1.0;
@@ -143,7 +146,7 @@ bool save()
                                                     "show-fps",   "ff-speed", "pause-unfocused",
                                                     "no-mouse-camera", "mouse-sensitivity", "volume", "mute", "window",
                                                     "no-name-tags", "skip-movies", "skip-cutscenes",
-                                                    "no-ssaa-textures", "no-mipmaps", "hd-textures"};
+                                                    "no-ssaa-textures", "no-mipmaps", "hd-textures", "name", "last-address"};
         for (std::string line; std::getline(in, line);)
         {
             std::string key = line.substr(0, line.find_first_of("=#;"));
@@ -202,6 +205,10 @@ bool save()
         out << "skip-cutscenes = 1\n";
     if (!g_opt.nameTags)
         out << "no-name-tags = 1\n";
+    if (g_coopName[0])
+        out << "name = " << g_coopName << "\n";
+    if (g_coopAddress[0])
+        out << "last-address = " << g_coopAddress << "\n";
     for (const std::string &line : kh2input::keyBindings().iniLines())
         out << line << "\n";
     return true;
@@ -322,14 +329,15 @@ void draw()
 
     ImGui::SeparatorText("Co-op (preview: players see each other's position)");
     {
-        static char name[32] = "";
-        static char address[64] = "";
+        char *name = g_coopName;
+        char *address = g_coopAddress;
         static bool seeded = false;
         if (!seeded)
         {
             seeded = true;
-            std::snprintf(name, sizeof(name), "%s", kh2coop::options().name.c_str());
-            std::snprintf(address, sizeof(address), "%s", kh2coop::options().join.c_str());
+            std::snprintf(g_coopName, sizeof(g_coopName), "%s", kh2coop::options().name.c_str());
+            const std::string &join = kh2coop::options().join;
+            std::snprintf(g_coopAddress, sizeof(g_coopAddress), "%s", (join.empty() ? g_opt.lastAddress : join).c_str());
         }
         ImGui::TextUnformatted(kh2coop::statusText().c_str());
         // Getting through routers (net/nat.h).
@@ -370,17 +378,23 @@ void draw()
         }
         if (!kh2coop::active() && !nat.connecting)
         {
-            ImGui::InputText("Your name", name, sizeof(name));
+            ImGui::InputText("Your name", name, sizeof(g_coopName));
             if (ImGui::Button("Host"))
+            {
                 kh2coop::host(name, kh2coop::options().port);
+                save(); // remember the name
+            }
             ImGui::SetItemTooltip("Others join with the address shown once hosting (UDP port %u; the router is asked "
                                   "to open it)", unsigned(kh2coop::options().port));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(180);
-            ImGui::InputTextWithHint("##addr", "host IP[:port]", address, sizeof(address));
+            ImGui::InputTextWithHint("##addr", "host IP[:port]", address, sizeof(g_coopAddress));
             ImGui::SameLine();
             if (ImGui::Button("Join") && address[0])
+            {
                 kh2coop::join(name, address);
+                save(); // remember the name and the address
+            }
         }
         else
         {
@@ -417,10 +431,6 @@ void draw()
                 kh2puppets::setEnabled(puppets);
             ImGui::SameLine();
             ImGui::Checkbox("Name tags", &g_opt.nameTags);
-            int pm = kh2puppets::mode() == kh2puppets::Mode::Spawn ? 0 : 1;
-            const char *modes[] = {"Their own character", "An NPC already in the room"};
-            if (ImGui::Combo("Shown as", &pm, modes, 2))
-                kh2puppets::setMode(pm ? kh2puppets::Mode::Borrow : kh2puppets::Mode::Spawn);
             if (ImGui::Button("Leave session"))
                 kh2coop::leave();
         }

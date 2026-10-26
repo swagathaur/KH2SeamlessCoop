@@ -10,6 +10,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <tuple>
 
 #include "game_state.h"
 #include "guest_call.h"
@@ -45,6 +46,8 @@ template <typename T> void wr(uint8_t *ram, uint32_t a, T v) { std::memcpy(ram +
 
 std::mutex g_mutex;
 std::atomic<bool> g_linked{false};
+std::atomic<uint32_t> g_made[2] = {}; // party members spawnMissing made, by slot - 1
+std::atomic<uint32_t> g_standIns[2] = {}; // dressed stand-in objects in this room (voiceHook)
 PS2Runtime::RecompiledFunction g_sacrifice = nullptr;
 
 // ---- objentry records ------------------------------------------------------
@@ -499,10 +502,58 @@ void sacrificeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     kh2::callOriginal(g_sacrifice, rdram, ctx, runtime);
 }
+// A party member's voices come from the voice bank of its character, found
+// by its objentry's part number (+0x4C): Donald's or Goofy's for a stand-in.
+// Two functions pick them: the objects' "say" method (vtable; attack, jump,
+// hurt: 0x176CD0, OBJ*, type, priority) and YS::PARTY::voice_part (0x176D68,
+// limits). When the player a stand-in plays is the same character as ours
+// (Roxas or Sora), the stand-in is looked up as ours for the length of the
+// call: that bank is loaded for our player, and the sound still plays at the
+// stand-in. (Another character's bank is not loaded here: Donald's stays.)
+PS2Runtime::RecompiledFunction g_voicePart = nullptr, g_voiceSay = nullptr;
+constexpr uint32_t kVoicePart = 0x00176D68, kVoiceSay = 0x00176CD0;
+void speakAsUs(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4);
+    if (obj && (obj == g_standIns[0].load(std::memory_order_relaxed) || obj == g_standIns[1].load(std::memory_order_relaxed)))
+    {
+        const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+        const uint32_t mine = player && player < 0x02000000u ? rd<uint32_t>(rdram, player + kh2state::addr::ObjEntry) : 0;
+        const uint32_t theirs = rd<uint32_t>(rdram, obj + kh2state::addr::ObjEntry);
+        // Same character: the stand-in wears our model (its record's model name).
+        if (mine && mine < 0x02000000u && theirs && theirs < 0x02000000u &&
+            std::memcmp(rdram + (mine & 0x01FFFFFFu) + 8, rdram + (theirs & 0x01FFFFFFu) + 8, 32) == 0)
+        {
+            static std::atomic<bool> told{false};
+            if (!told.exchange(true))
+            {
+                std::printf("[partner] stand-in %08X speaks with our voice bank\n", obj);
+                std::fflush(stdout);
+            }
+            wr<uint32_t>(rdram, obj + kh2state::addr::ObjEntry, mine);
+            kh2::callOriginal(original, rdram, ctx, runtime);
+            wr<uint32_t>(rdram, obj + kh2state::addr::ObjEntry, theirs);
+            return;
+        }
+    }
+    kh2::callOriginal(original, rdram, ctx, runtime);
+}
+void voicePartHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { speakAsUs(g_voicePart, rdram, ctx, runtime); }
+void voiceSayHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { speakAsUs(g_voiceSay, rdram, ctx, runtime); }
 } // namespace
 
 bool install(PS2Runtime &runtime)
 {
+    for (auto [address, original, hook] :
+         {std::tuple{kVoicePart, &g_voicePart, &voicePartHook}, std::tuple{kVoiceSay, &g_voiceSay, &voiceSayHook}})
+    {
+        *original = runtime.lookupFunction(address);
+        if (!*original || !runtime.replaceFunction(address, hook))
+        {
+            std::fprintf(stderr, "[partner] could not hook 0x%08X\n", address);
+            *original = nullptr;
+        }
+    }
     g_sacrifice = runtime.lookupFunction(kSacrifice);
     if (!g_sacrifice || !runtime.replaceFunction(kSacrifice, &sacrificeHook))
     {
@@ -611,11 +662,47 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         const uint32_t placeholder = kFriendPlaceholder[k - 1];
         std::printf("[partner] this room has no place for party member %zu: making one behind the player\n", k);
         std::fflush(stdout);
-        kh2puppets::spawnAt(placeholder, at, dir[3], [placeholder](uint32_t obj) {
+        g_made[k - 1] = 0;
+        kh2puppets::spawnAt(placeholder, at, dir[3], [placeholder, k](uint32_t obj) {
+            g_made[k - 1] = obj;
             std::printf("[partner] placeholder %04X made -> %08X\n", placeholder, obj);
             std::fflush(stdout);
         });
     }
+}
+
+// A party member's voices (attack, jump, hurt) play from the voice bank its
+// voice context names (object +0x9B8 -> context, +0x1C: a slot of the bank
+// table at 0x01C94090, 12 bytes each: flags, part number, variant), chosen
+// when it was made, by its part number: Donald's for a stand-in. When the
+// stand-in is the same character as our player (it wears our model), it
+// speaks from our player's bank instead, which is loaded here.
+static void useOurVoices(uint8_t *rdram, uint32_t obj)
+{
+    constexpr uint32_t kVoiceCtx = 0x9B8, kCtxBank = 0x1C, kBanks = 0x01C94090;
+    const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+    if (!player || player >= 0x02000000u)
+        return;
+    const uint32_t mine = rd<uint32_t>(rdram, player + kh2state::addr::ObjEntry);
+    const uint32_t theirs = rd<uint32_t>(rdram, obj + kh2state::addr::ObjEntry);
+    if (!mine || mine >= 0x02000000u || !theirs || theirs >= 0x02000000u ||
+        std::memcmp(rdram + (mine & 0x01FFFFFFu) + 8, rdram + (theirs & 0x01FFFFFFu) + 8, 32) != 0)
+        return;
+    const uint32_t ctx = rd<uint32_t>(rdram, obj + kVoiceCtx);
+    if (!ctx || ctx >= 0x02000000u)
+        return;
+    const uint32_t part = rd<uint16_t>(rdram, mine + 0x4C);
+    for (uint32_t slot = 0; slot < 3; ++slot)
+        if (rd<uint32_t>(rdram, kBanks + slot * 12 + 4) == part)
+        {
+            if (rd<uint32_t>(rdram, ctx + kCtxBank) != slot)
+            {
+                wr<uint32_t>(rdram, ctx + kCtxBank, slot);
+                std::printf("[partner] stand-in %08X speaks from our voice bank (slot %u, part %u)\n", obj, slot, part);
+                std::fflush(stdout);
+            }
+            return;
+        }
 }
 
 std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
@@ -638,6 +725,34 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     if (st.player.valid)
         fillParty(rdram, st.now.world, order.size());
     spawnMissing(rdram, st, comps, order);
+    // The room's own party member can turn up after spawnMissing gave up
+    // waiting for it (a slow load): two in one place. Ours goes.
+    for (int k = 1; k <= 2; ++k)
+    {
+        const uint32_t made = g_made[k - 1].load();
+        if (!made)
+            continue;
+        bool ours = false, other = false;
+        for (const Companion &c : comps)
+            if (c.slot == k)
+                (c.object == made ? ours : other) = true;
+        if (!ours)
+        {
+            bool live = false;
+            for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+                live = live || a.address == made;
+            if (!live)
+                g_made[k - 1] = 0; // gone with its room
+            continue;
+        }
+        if (other)
+        {
+            std::printf("[partner] the room made party member %d after all: taking ours (%08X) away\n", k, made);
+            std::fflush(stdout);
+            g_made[k - 1] = 0;
+            kh2puppets::remove(made);
+        }
+    }
 
     // Players gone from the session.
     for (auto it = g_states.begin(); it != g_states.end();)
@@ -742,7 +857,8 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // its timer runs while the player still has control) is staged for
         // the player alone: the stand-ins step out of it, and back after.
         const bool cinematic = st.control == 0 && st.cutsceneLength != 0 && st.cutsceneLength != 0xFFFFFFFFu;
-        const bool away = obj && s.lookAtCreation && (!here || cinematic);
+        static const bool kHide = std::getenv("KH2_HIDE_STAND_INS") != nullptr; // diagnostics
+        const bool away = obj && s.lookAtCreation && (!here || cinematic || kHide);
         if (obj)
         {
             uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
@@ -770,13 +886,28 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             // theirs back when this game started another (a hit reaction).
             const uint32_t playing = rd<uint32_t>(rdram, obj + kh2state::addr::ObjMotionIndex);
             ++s.sinceMotion;
+            // A player who has stood still since their room loaded has no
+            // motion index yet (0xFFFF): they are idle (0). Left as it was,
+            // the stand-in kept the pose it was made in (arms out).
+            const uint32_t motion = r.motion == 0xFFFFu ? 0u : r.motion;
             if (s.dressedAtCreation)
-                guards.emplace_back(obj, static_cast<int32_t>(r.motion)); // its own AI's motions kept off
-            if (s.dressedAtCreation && (r.motion != s.motion || (playing != r.motion && s.sinceMotion > 4)))
             {
-                s.motion = r.motion;
+                guards.emplace_back(obj, static_cast<int32_t>(motion)); // its own AI's motions kept off
+                useOurVoices(rdram, obj);
+            }
+            if (s.dressedAtCreation && (motion != s.motion || (playing != motion && s.sinceMotion > 4)))
+            {
+                static const bool kLog = std::getenv("KH2_PUPPET_LOG") != nullptr;
+                if (kLog)
+                {
+                    std::printf("[partner] stand-in %08X motion %u (sent %u; playing %u, pose %08X)\n", obj, motion,
+                                unsigned(r.motion), playing,
+                                rd<uint32_t>(rdram, obj + kh2state::addr::ObjMotion + 0xC));
+                    std::fflush(stdout);
+                }
+                s.motion = motion;
                 s.sinceMotion = 0;
-                kh2puppets::postMotion(obj, r.motion, 4.0f);
+                kh2puppets::postMotion(obj, motion, 4.0f);
             }
         }
 
@@ -830,6 +961,15 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         g_links.push_back(l);
     }
     g_linked = !g_links.empty();
+    {
+        uint32_t ids[2] = {0, 0};
+        size_t n = 0;
+        for (const Link &l : g_links)
+            if (l.object && l.dressed && n < 2)
+                ids[n++] = l.object;
+        g_standIns[0] = ids[0];
+        g_standIns[1] = ids[1];
+    }
     if (g_fillRefresh)
     {
         // The room again, with the new party members, once their entries

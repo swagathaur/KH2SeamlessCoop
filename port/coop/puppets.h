@@ -62,6 +62,8 @@ void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
 // Start motion `id` on object `obj` (a guest job), if the object is still
 // there and its motion set has that motion.
 void postMotion(uint32_t obj, uint32_t id, float blend = 4.0f);
+// Take object `obj` away (a guest job; its class's leave), if it is still there.
+void remove(uint32_t obj);
 // Make an object of `entryId` at `pos` facing `yaw` (a guest job, like a
 // room's spawn list entry: placeholders such as FRIEND_1 (0x237) become the
 // party member the room's party has in that place). `done` gets the object,

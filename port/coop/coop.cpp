@@ -1,6 +1,7 @@
 #include "coop.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <deque>
@@ -797,6 +798,17 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         {
             kh2net::PlayerState ps;
             if (!r.interp.sample(t, ps) || !(ps.flags & 1) || t - r.interp.lastArrival() > 3.0)
+                continue;
+            // Other players are always their stand-in: the party member in
+            // their party slot, made for rooms that have none (partners.cpp).
+            // The NPC copies (puppets.h) behaved differently (animation speed,
+            // no weapon), so they are only a diagnostic now: KH2_NPC_PUPPETS=1
+            // shows them for players without a stand-in here.
+            static const bool npcPuppets = [] {
+                const char *e = std::getenv("KH2_NPC_PUPPETS");
+                return e && *e == '1';
+            }();
+            if (!npcPuppets)
                 continue;
             if (kh2partner::linked(id))
             {

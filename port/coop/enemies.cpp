@@ -62,6 +62,7 @@ struct Follow
     bool holding = false;
     double killedAt = -1;    // when we finished it off (its body should go soon after)
     bool removed = false;    // we had to take the body away ourselves
+    double firstSeen = -1;   // when our game made it (one the host never has goes)
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
 // The host's enemies this room has had (serial -> entry): one gone from the
@@ -81,6 +82,7 @@ std::map<int16_t, Made> g_made;
 std::map<uint16_t, double> g_preloaded; // entry -> when its files were requested, this room
 std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
 uint16_t g_followRoom = 0xFFFF;
+double g_sharedSince = -1; // when the host and we were first both in this room (clientTick)
 size_t g_lastSentCount = SIZE_MAX, g_lastFollowCount = SIZE_MAX; // for the log
 
 // Guest job: obj->add_hp(amount) (negative = damage; at 0 the object dies
@@ -339,8 +341,11 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         g_made.clear();
         g_preloaded.clear();
         g_followRoom = key;
+        g_sharedSince = -1;
     }
     const bool fresh = g_hostTime >= 0 && now - g_hostTime < 1.0 && g_host.world == world && g_host.room == room;
+    if (fresh && g_sharedSince < 0)
+        g_sharedSince = now; // both of us in this room from now
     if (!fresh)
     {
         if (g_lastFollowCount != 0 && g_lastFollowCount != SIZE_MAX)
@@ -371,6 +376,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             f.entry = e.entry;
             f.frozen = false;
             f.motion = 0xFFFF;
+            f.firstSeen = now;
         }
         if (!h)
         {
@@ -382,6 +388,18 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             if ((f.placed || hostHadIt) && !f.killed)
             {
                 std::printf("[enemies] %04X #%d is gone on the host\n", e.entry, e.serial);
+                std::fflush(stdout);
+                killCopy(rdram, f, e, now);
+            }
+            else if (!f.placed && !hostHadIt && !f.killed && f.firstSeen >= 0 && now - f.firstSeen > 3.0 &&
+                     now - g_sharedSince > 6.0) // (the host's room has had time to make its own)
+            {
+                // Our game made it (we set off a wave, or our own wave program
+                // went on to the next one) and the host's game has not: in the
+                // host's room the host's enemies are the only ones. It dies the
+                // game's way, so a wave fight our game started (and its walls)
+                // still ends; the host's waves arrive as copies (makeMissing).
+                std::printf("[enemies] %04X #%d is not in the host's game; taking it away\n", e.entry, e.serial);
                 std::fflush(stdout);
                 killCopy(rdram, f, e, now);
             }
@@ -519,6 +537,7 @@ void reset()
     g_made.clear();
     g_preloaded.clear();
     g_followRoom = 0xFFFF;
+    g_sharedSince = -1;
     kh2puppets::setOverrides({});
 }
 

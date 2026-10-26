@@ -53,6 +53,87 @@ double g_speed = 1.0;
 int g_bindAction = -1;
 bool g_bindAdd = false;
 
+// A text field. On Android (gamepad and touch, no keyboard) it is a button
+// that opens a keypad; elsewhere ImGui's own.
+bool textField(const char *id, const char *label, const char *hint, char *buf, size_t size, float width)
+{
+#if defined(__ANDROID__)
+    ImGui::PushID(id);
+    const std::string shown = buf[0] ? std::string(buf) : std::string(hint ? hint : "");
+    bool changed = false;
+    const std::string buttonLabel = (shown.empty() ? std::string(" ") : shown) + "##field";
+    if (ImGui::Button(buttonLabel.c_str(), ImVec2(width, 0)))
+        ImGui::OpenPopup("keypad");
+    if (label && label[0])
+    {
+        ImGui::SameLine();
+        ImGui::TextUnformatted(label);
+    }
+    if (ImGui::BeginPopupModal("keypad", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static bool upper = false;
+        ImGui::TextUnformatted(label && label[0] ? label : (hint ? hint : ""));
+        ImGui::Text("%s_", buf);
+        static const char *const kRows[] = {"1234567890", "qwertyuiop", "asdfghjkl.", "zxcvbnm:-_"};
+        const float cell = ImGui::GetFrameHeight() * 1.6f;
+        for (const char *row : kRows)
+        {
+            for (const char *c = row; *c; ++c)
+            {
+                if (c != row)
+                    ImGui::SameLine();
+                char key[2] = {upper && *c >= 'a' && *c <= 'z' ? char(*c - 32) : *c, 0};
+                if (ImGui::Button(key, ImVec2(cell, cell)))
+                {
+                    const size_t n = std::strlen(buf);
+                    if (n + 1 < size)
+                    {
+                        buf[n] = key[0];
+                        buf[n + 1] = 0;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(cell * 2, cell)))
+            upper = !upper;
+        ImGui::SameLine();
+        if (ImGui::Button("Space", ImVec2(cell * 3, cell)))
+        {
+            const size_t n = std::strlen(buf);
+            if (n + 1 < size)
+            {
+                buf[n] = ' ';
+                buf[n + 1] = 0;
+                changed = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(cell * 2, cell)) && buf[0])
+        {
+            buf[std::strlen(buf) - 1] = 0;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear", ImVec2(cell * 2, cell)))
+        {
+            buf[0] = 0;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Done", ImVec2(cell * 2, cell)))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    return changed;
+#else
+    ImGui::SetNextItemWidth(width);
+    std::string full = std::string(label ? label : "") + "##" + id;
+    return hint ? ImGui::InputTextWithHint(full.c_str(), hint, buf, size) : ImGui::InputText(full.c_str(), buf, size);
+#endif
+}
+
 void stopCapture()
 {
     g_bindAction = -1;
@@ -355,8 +436,7 @@ void draw()
             else
                 ImGui::TextDisabled("Finding your public address...");
             static char invite[64] = "";
-            ImGui::SetNextItemWidth(180);
-            ImGui::InputTextWithHint("##invite", "their address", invite, sizeof(invite));
+            textField("invite", "", "their address", invite, sizeof(invite), 180);
             ImGui::SameLine();
             if (ImGui::Button("Let in") && invite[0])
                 kh2coop::letIn(invite);
@@ -378,7 +458,7 @@ void draw()
         }
         if (!kh2coop::active() && !nat.connecting)
         {
-            ImGui::InputText("Your name", name, sizeof(g_coopName));
+            textField("name", "Your name", nullptr, name, sizeof(g_coopName), 180);
             if (ImGui::Button("Host"))
             {
                 kh2coop::host(name, kh2coop::options().port);
@@ -387,8 +467,7 @@ void draw()
             ImGui::SetItemTooltip("Others join with the address shown once hosting (UDP port %u; the router is asked "
                                   "to open it)", unsigned(kh2coop::options().port));
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(180);
-            ImGui::InputTextWithHint("##addr", "host IP[:port]", address, sizeof(g_coopAddress));
+            textField("addr", "", "host IP[:port]", address, sizeof(g_coopAddress), 180);
             ImGui::SameLine();
             if (ImGui::Button("Join") && address[0])
             {

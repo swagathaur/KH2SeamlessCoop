@@ -37,6 +37,9 @@
 #if defined(KH2_HAVE_SDL3)
 #include <SDL3/SDL.h>
 #endif
+#if defined(__ANDROID__)
+#include "android_host.h"
+#endif
 
 namespace kh2input
 {
@@ -377,6 +380,10 @@ int newlyPressedKey()
 void setMenuComboCallback(void (*fn)()) { g_comboFn = fn; }
 bool controllerConnected()
 {
+#if defined(__ANDROID__)
+    if (kh2android::pad().connected)
+        return true;
+#endif
 #if defined(KH2_HAVE_SDL3)
     if (g_sdlPad)
         return true;
@@ -408,6 +415,43 @@ void poll(bool keyboardFocus)
     bool sdlPad = false;
 #if defined(KH2_HAVE_SDL3)
     sdlPad = sdlPoll(held, lx, ly, rx, ry);
+#endif
+#if defined(__ANDROID__)
+    // The app's gamepad (android_host.cpp), by position.
+    if (g_padChoice.load() != -2)
+    {
+        const kh2android::Pad p = kh2android::pad();
+        const uint32_t bottom = g_opt.confirmOnBottom ? PAD_CIRCLE : PAD_CROSS;
+        const uint32_t right = g_opt.confirmOnBottom ? PAD_CROSS : PAD_CIRCLE;
+        static const std::pair<uint32_t, uint32_t> kMap[] = {
+            {kh2android::PadUp, PAD_UP},       {kh2android::PadDown, PAD_DOWN},   {kh2android::PadLeft, PAD_LEFT},
+            {kh2android::PadRight, PAD_RIGHT}, {kh2android::PadStart, PAD_START}, {kh2android::PadSelect, PAD_SELECT},
+            {kh2android::PadL3, PAD_L3},       {kh2android::PadR3, PAD_R3},       {kh2android::PadL1, PAD_L1},
+            {kh2android::PadR1, PAD_R1},       {kh2android::PadL2, PAD_L2},       {kh2android::PadR2, PAD_R2},
+            {kh2android::PadX, PAD_SQUARE},    {kh2android::PadY, PAD_TRIANGLE},
+        };
+        for (const auto &[bit, mask] : kMap)
+            if (p.buttons & bit)
+                held |= mask;
+        if (p.buttons & kh2android::PadA)
+            held |= bottom;
+        if (p.buttons & kh2android::PadB)
+            held |= right;
+        auto stick = [](float v) {
+            const int b = int(std::lround(v * 127.5f + 127.5f));
+            return static_cast<uint8_t>(b < 0 ? 0 : b > 255 ? 255 : b);
+        };
+        lx = stick(p.lx);
+        ly = stick(p.ly);
+        rx = stick(p.rx);
+        ry = stick(p.ry);
+        if (p.connected)
+        {
+            sdlPad = true;
+            std::lock_guard<std::mutex> lock(g_nameMutex);
+            g_padName = p.name;
+        }
+    }
 #endif
 #if defined(_WIN32)
     // Look for a pad now and then rather than every call: XInputGetState on an

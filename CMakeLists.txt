@@ -137,6 +137,16 @@ set(PS2X_BUILD_RUNTIME ON CACHE BOOL "" FORCE)
 set(PS2X_ENABLE_DEBUG_UI OFF CACHE BOOL "" FORCE)
 set(PS2X_ENABLE_AGRESSIVE_LOGS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PS2RECOMP_DIR}" ps2recomp EXCLUDE_FROM_ALL)
+# ARM (Android): the runtime's SSE intrinsics through sse2neon, which the
+# fork fetches for its own directory; the generated code and ours need it too.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv")
+    include(FetchContent)
+    FetchContent_GetProperties(sse2neon)
+    if(sse2neon_SOURCE_DIR)
+        include_directories("${sse2neon_SOURCE_DIR}")
+    endif()
+    add_compile_definitions(USE_SSE2NEON)
+endif()
 if(MSVC AND TARGET ps2_runtime)
     # Whole-program optimisation makes linking a 12k-function corpus take hours
     # (DQ8Recomp measured this); compile the runtime normally instead.
@@ -226,7 +236,12 @@ FetchContent_Declare(kh2_imgui_src
 FetchContent_MakeAvailable(kh2_imgui_src)
 # SDL3, for controllers only (PlayStation, Switch and other pads natively,
 # with rumble; XInput stays as the fallback). Static, most subsystems off.
-option(KH2_SDL3 "Use SDL3 for game controllers" ON)
+# (Android: the app's own input, port/runtime/android_host.cpp.)
+if(ANDROID)
+    option(KH2_SDL3 "Use SDL3 for game controllers" OFF)
+else()
+    option(KH2_SDL3 "Use SDL3 for game controllers" ON)
+endif()
 if(KH2_SDL3)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -252,7 +267,14 @@ if(WIN32)
 endif()
 target_include_directories(kh2_imgui PUBLIC ${kh2_imgui_src_SOURCE_DIR})
 
-add_executable(kh2recomp
+# Android: the game is the app's native library (libkh2recomp.so, a
+# NativeActivity; tools/android/build-apk.ps1 packages it).
+if(ANDROID)
+    add_library(kh2recomp SHARED port/runtime/android_host.cpp)
+else()
+    add_executable(kh2recomp)
+endif()
+target_sources(kh2recomp PRIVATE
     port/runtime/main.cpp
     port/runtime/overlay_manager.cpp
     port/runtime/pad2_hle.cpp
@@ -297,6 +319,12 @@ add_executable(kh2recomp
 target_include_directories(kh2recomp PRIVATE port/runtime port/coop ${KH2_RUNTIME_INCLUDES}
     third_party/parallel-gs/Granite/third_party/stb/stb)
 target_link_libraries(kh2recomp PRIVATE kh2_main ${KH2_OVERLAY_LIBS} ${KH2_PATCH_LIBS} ps2_runtime parallel-gs kh2_imgui)
+if(ANDROID)
+    target_include_directories(kh2recomp PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
+    target_link_libraries(kh2recomp PRIVATE android log)
+    # raylib's native-activity glue is the entry point.
+    target_link_options(kh2recomp PRIVATE "-Wl,--undefined=ANativeActivity_onCreate" "-Wl,--gc-sections")
+endif()
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)
     # A PDB for --profile and debuggers: full debug info for the runner and the
@@ -317,7 +345,11 @@ ps2x_stage_ffmpeg_runtime_dlls(kh2vureplay)
 
 # Co-op network layer test (no game needed): loopback host + two clients with
 # simulated packet loss. ctest, or run build\win\coop_net_test.exe.
-option(KH2_BUILD_TESTS "Build the tests that need no game (co-op network, key bindings)" ON)
+if(ANDROID)
+    option(KH2_BUILD_TESTS "Build the tests that need no game (co-op network, key bindings)" OFF)
+else()
+    option(KH2_BUILD_TESTS "Build the tests that need no game (co-op network, key bindings)" ON)
+endif()
 if(KH2_BUILD_TESTS)
     enable_testing()
     add_executable(coop_net_test tests/coop_net_test.cpp

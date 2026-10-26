@@ -65,6 +65,9 @@
 #include "file_override.h"
 #include "overlay_ui.h"
 #include "vu_hot.h"
+#if defined(__ANDROID__)
+#include "android_host.h"
+#endif
 
 namespace ps2_stubs
 {
@@ -1443,7 +1446,28 @@ std::vector<std::string> readSettings(const char *argv0)
     return out;
 }
 
+#if defined(__ANDROID__)
+// The APK: raylib's android_main calls main() with no arguments; the command
+// line comes from the data folder (android_host.cpp), the rest is as on PC.
+static int kh2Main(int argc, char **argv);
+int main(int, char **)
+{
+    std::vector<std::string> args = kh2android::prepare();
+    if (args.empty())
+        return 1;
+    std::vector<char *> argv;
+    for (std::string &a : args)
+        argv.push_back(a.data());
+    argv.push_back(nullptr);
+    const int code = kh2Main(int(args.size()), argv.data());
+    std::printf("[android] the game ended (%d)\n", code);
+    std::fflush(stdout);
+    return code;
+}
+static int kh2Main(int argc, char **argv)
+#else
 int main(int argc, char **argv)
+#endif
 {
     kh2watch::installCrashHandler("crashes");
 #if defined(_WIN32)

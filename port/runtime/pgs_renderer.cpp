@@ -20,6 +20,10 @@
 #endif
 
 #include "pgs_renderer.h"
+#if defined(__ANDROID__)
+#include <android/native_window.h>
+#include "android_host.h"
+#endif
 #include "hd_textures.h"
 
 #include <algorithm>
@@ -55,6 +59,13 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 using namespace Vulkan;
 using namespace ParallelGS;
+
+// A window of our own with a swapchain: Windows (Win32) and Android (the app's).
+#if defined(_WIN32) || defined(__ANDROID__)
+#define KH2_WSI 1
+#else
+#define KH2_WSI 0
+#endif
 
 namespace kh2pgs
 {
@@ -732,6 +743,169 @@ public:
 std::unique_ptr<Platform> g_platform;
 std::unique_ptr<WSI> g_wsi;
 uint32_t g_lastSurfaceW = 0, g_lastSurfaceH = 0;
+#elif defined(__ANDROID__)
+// ---- Window (Android: the app's, kh2android) -----------------------------------
+std::atomic<bool> g_focused{true};
+std::atomic<uint32_t> g_clientW{0}, g_clientH{0};
+void (*g_placedFn)(int, int, int, int) = nullptr;
+
+void updateSize()
+{
+    if (ANativeWindow *w = kh2android::window())
+    {
+        g_clientW = uint32_t(std::max(0, ANativeWindow_getWidth(w)));
+        g_clientH = uint32_t(std::max(0, ANativeWindow_getHeight(w)));
+    }
+    else
+        g_clientW = g_clientH = 0;
+}
+
+void pumpMessages()
+{
+    kh2android::pump();
+    g_focused = kh2android::focused();
+    if (kh2android::quitRequested())
+        g_closed = true;
+    updateSize();
+    if (kh2android::takeBack())
+        g_menuOpen = !g_menuOpen;
+}
+
+bool createWindow()
+{
+    updateSize();
+    return kh2android::window() != nullptr;
+}
+
+class Platform final : public WSIPlatform
+{
+public:
+    VkSurfaceKHR create_surface(VkInstance instance, VkPhysicalDevice) override
+    {
+        ANativeWindow *window = kh2android::window();
+        if (!window)
+            return VK_NULL_HANDLE;
+        struct AndroidSurfaceInfo
+        {
+            VkStructureType sType;
+            const void *pNext;
+            VkFlags flags;
+            ANativeWindow *window;
+        } info = {VkStructureType(1000008000) /* VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR */, nullptr, 0, window};
+        using CreateFn = VkResult(VKAPI_PTR *)(VkInstance, const AndroidSurfaceInfo *, const VkAllocationCallbacks *, VkSurfaceKHR *);
+        auto create = reinterpret_cast<CreateFn>(vkGetInstanceProcAddr(instance, "vkCreateAndroidSurfaceKHR"));
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        if (!create || create(instance, &info, nullptr, &surface) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        return surface;
+    }
+    std::vector<const char *> get_instance_extensions() override
+    {
+        return {VK_KHR_SURFACE_EXTENSION_NAME, "VK_KHR_android_surface"};
+    }
+    std::vector<const char *> get_device_extensions() override { return {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; }
+    uint32_t get_surface_width() override { return std::max<uint32_t>(1, g_clientW.load()); }
+    uint32_t get_surface_height() override { return std::max<uint32_t>(1, g_clientH.load()); }
+    bool alive(WSI &) override { return !g_closed; }
+    void poll_input() override {}
+    void poll_input_async(Granite::InputTrackerHandler *) override {}
+    void event_swapchain_destroyed() override
+    {
+        WSIPlatform::event_swapchain_destroyed();
+        g_inFrame = false;
+    }
+    const VkApplicationInfo *get_application_info() override
+    {
+        static const VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "kh2recomp", 0, "Granite", 0,
+                                              VK_API_VERSION_1_1};
+        return &app;
+    }
+    bool g_inFrame = false;
+};
+
+std::unique_ptr<Platform> g_platform;
+std::unique_ptr<WSI> g_wsi;
+uint32_t g_lastSurfaceW = 0, g_lastSurfaceH = 0;
+bool g_surfaceLost = false;
+
+// The app went to the background: its window goes, and the swapchain with it.
+void onWindowLost()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_wsi || g_surfaceLost)
+        return;
+    registerThread();
+    if (g_platform->g_inFrame)
+    {
+        g_wsi->end_frame();
+        g_platform->g_inFrame = false;
+    }
+    g_wsi->get_device().wait_idle();
+    g_wsi->deinit_surface_and_swapchain();
+    g_surfaceLost = true;
+    std::printf("[pgs] window gone (in the background)\n");
+}
+
+// Back: a swapchain for the new window.
+void onWindowRegained()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_wsi || !g_surfaceLost)
+        return;
+    registerThread();
+    updateSize();
+    const Context &ctx = g_wsi->get_context();
+    VkSurfaceKHR surface = g_platform->create_surface(ctx.get_instance(), ctx.get_gpu());
+    if (surface == VK_NULL_HANDLE)
+    {
+        std::fprintf(stderr, "[pgs] could not make a surface for the new window\n");
+        return;
+    }
+    g_wsi->reinit_surface_and_swapchain(surface);
+    g_surfaceLost = false;
+    std::printf("[pgs] window back (%ux%u)\n", g_clientW.load(), g_clientH.load());
+}
+
+// ImGui without a platform backend: the display size, time, the gamepad (for
+// moving through the menu) and touch (as the mouse).
+void imguiAndroidNewFrame()
+{
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(float(std::max<uint32_t>(1, g_clientW.load())), float(std::max<uint32_t>(1, g_clientH.load())));
+    io.DisplayFramebufferScale = ImVec2(1, 1);
+    static double last = 0.0;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    io.DeltaTime = last > 0.0 ? float(std::max(1e-4, t - last)) : 1.0f / 60.0f;
+    last = t;
+    const kh2android::Pad pad = kh2android::pad();
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    auto key = [&](ImGuiKey k, uint32_t bit) { io.AddKeyEvent(k, (pad.buttons & bit) != 0); };
+    key(ImGuiKey_GamepadDpadUp, kh2android::PadUp);
+    key(ImGuiKey_GamepadDpadDown, kh2android::PadDown);
+    key(ImGuiKey_GamepadDpadLeft, kh2android::PadLeft);
+    key(ImGuiKey_GamepadDpadRight, kh2android::PadRight);
+    key(ImGuiKey_GamepadFaceDown, kh2android::PadA);
+    key(ImGuiKey_GamepadFaceRight, kh2android::PadB);
+    key(ImGuiKey_GamepadFaceLeft, kh2android::PadX);
+    key(ImGuiKey_GamepadFaceUp, kh2android::PadY);
+    key(ImGuiKey_GamepadL1, kh2android::PadL1);
+    key(ImGuiKey_GamepadR1, kh2android::PadR1);
+    key(ImGuiKey_GamepadL2, kh2android::PadL2);
+    key(ImGuiKey_GamepadR2, kh2android::PadR2);
+    key(ImGuiKey_GamepadStart, kh2android::PadStart);
+    key(ImGuiKey_GamepadBack, kh2android::PadSelect);
+    auto stick = [&](ImGuiKey neg, ImGuiKey pos, float v) {
+        io.AddKeyAnalogEvent(neg, v < -0.3f, v < -0.3f ? -v : 0.0f);
+        io.AddKeyAnalogEvent(pos, v > 0.3f, v > 0.3f ? v : 0.0f);
+    };
+    stick(ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight, pad.lx);
+    stick(ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown, pad.ly);
+    const kh2android::Touch touch = kh2android::touch();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    if (touch.down)
+        io.AddMousePosEvent(touch.x, touch.y);
+    io.AddMouseButtonEvent(0, touch.down);
+}
 #endif
 
 // ---- Presentation -----------------------------------------------------------
@@ -993,7 +1167,7 @@ void uiDraw(CommandBuffer &cmd, uint32_t width, uint32_t height)
     }
 }
 
-#if defined(_WIN32)
+#if KH2_WSI
 // Builds this frame's UI; false when nothing is on screen.
 bool uiBuild()
 {
@@ -1006,7 +1180,11 @@ bool uiBuild()
     const bool overlay = g_overlayActive && g_overlayCallback;
     if (!g_menuOpen && !g_showFps && !toast && !hud && !world && !overlay)
         return false;
+#if defined(_WIN32)
     ImGui_ImplWin32_NewFrame();
+#else
+    imguiAndroidNewFrame();
+#endif
     ImGui::NewFrame();
     if (g_showFps)
     {
@@ -1046,6 +1224,10 @@ bool uiBuild()
 
 void present()
 {
+#if defined(__ANDROID__)
+    if (g_surfaceLost)
+        return;
+#endif
     if (!g_platform->g_inFrame)
         g_platform->g_inFrame = g_wsi->begin_frame();
     if (!g_platform->g_inFrame)
@@ -1190,7 +1372,7 @@ bool init(const Options &options)
         std::fprintf(stderr, "[pgs] no Vulkan loader; using the software renderer\n");
         return false;
     }
-#if defined(_WIN32)
+#if KH2_WSI
     if (g_opt.windowed)
     {
         if (!createWindow())
@@ -1204,11 +1386,16 @@ bool init(const Options &options)
         {
             std::fprintf(stderr, "[pgs] Vulkan device/swapchain creation failed; using the software renderer\n");
             g_wsi.reset();
+#if defined(_WIN32)
             DestroyWindow(g_hwnd);
             g_hwnd = nullptr;
+#endif
             return false;
         }
         g_device = &g_wsi->get_device();
+#if defined(__ANDROID__)
+        kh2android::setWindowCallbacks(&onWindowLost, &onWindowRegained);
+#endif
     }
     else
 #endif
@@ -1261,7 +1448,7 @@ bool init(const Options &options)
     std::printf("[pgs] paraLLEl-GS on %s, %ux super-sampling%s\n", props.deviceName, g_opt.superSampling,
                 g_opt.windowed ? ", windowed" : "");
 
-#if defined(_WIN32)
+#if KH2_WSI
     if (g_opt.windowed)
     {
         IMGUI_CHECKVERSION();
@@ -1272,11 +1459,20 @@ bool init(const Options &options)
         io.BackendRendererName = "kh2recomp-granite";
         io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
         ImGui::StyleColorsDark();
+#if defined(_WIN32)
         const float dpi = ImGui_ImplWin32_GetDpiScaleForHwnd(g_hwnd);
         const float scale = std::max(1.0f, dpi) * 1.25f;
+#else
+        // A handheld's screen: big enough to read and to touch.
+        const float scale = std::max(1.5f, float(std::min(g_clientW.load(), g_clientH.load())) / 400.0f);
+        io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+        io.BackendPlatformName = "kh2recomp-android";
+#endif
         ImGui::GetStyle().ScaleAllSizes(scale);
         ImGui::GetStyle().FontScaleDpi = scale;
+#if defined(_WIN32)
         ImGui_ImplWin32_Init(g_hwnd);
+#endif
         g_imguiReady = true;
         g_toastUntil = nowSeconds() + 8.0;
     }
@@ -1304,7 +1500,7 @@ void shutdown()
     if (g_gs)
         g_gs->set_texture_replacer(nullptr);
     kh2hd::detach();
-#if defined(_WIN32)
+#if KH2_WSI
     if (g_imguiReady)
     {
         for (ImTextureData *tex : ImGui::GetPlatformIO().Textures)
@@ -1313,7 +1509,9 @@ void shutdown()
                 img->release_reference();
                 tex->BackendUserData = nullptr;
             }
+#if defined(_WIN32)
         ImGui_ImplWin32_Shutdown();
+#endif
         ImGui::DestroyContext();
         g_imguiReady = false;
     }
@@ -1322,9 +1520,11 @@ void shutdown()
     g_fsrTarget.reset();
     g_gs.reset();
     g_blitProgram = g_upscaleProgram = g_sharpenProgram = nullptr;
-#if defined(_WIN32)
+#if KH2_WSI
     g_wsi.reset();
     g_platform.reset();
+#endif
+#if defined(_WIN32)
     if (g_hwnd)
         DestroyWindow(g_hwnd);
     g_hwnd = nullptr;
@@ -1368,7 +1568,7 @@ void applyPending()
 
 bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 {
-#if defined(_WIN32)
+#if KH2_WSI
     if (g_opt.windowed)
         pumpMessages();
 #endif
@@ -1442,7 +1642,7 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
         g_last = g_gs->vsync(info);
         g_guestRate.tick(nowSeconds());
         g_lastLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-#if defined(_WIN32)
+#if KH2_WSI
         if (g_opt.windowed)
         {
             const uint32_t w = g_clientW, h = g_clientH;
@@ -1510,7 +1710,7 @@ void setFsr(bool on) { g_opt.fsr = on; }
 bool vsync() { return g_opt.vsync; }
 void setVsync(bool on)
 {
-#if defined(_WIN32)
+#if KH2_WSI
     g_opt.vsync = on;
     if (g_wsi)
         g_wsi->set_present_mode(on ? PresentMode::SyncToVBlank : PresentMode::UnlockedNoTearing);
@@ -1548,7 +1748,7 @@ void setWindowSize(unsigned w, unsigned h)
 }
 void windowSize(unsigned &w, unsigned &h)
 {
-#if defined(_WIN32)
+#if KH2_WSI
     w = g_clientW;
     h = g_clientH;
 #else
@@ -1559,7 +1759,7 @@ void windowSize(unsigned &w, unsigned &h)
 
 bool pumpWindow()
 {
-#if defined(_WIN32)
+#if KH2_WSI
     if (g_opt.windowed)
         pumpMessages();
 #endif
@@ -1575,7 +1775,7 @@ bool pumpWindow()
 
 bool redraw()
 {
-#if defined(_WIN32)
+#if KH2_WSI
     if (!g_opt.windowed)
         return !g_closed;
     pumpMessages();
@@ -1657,6 +1857,8 @@ bool windowFocused()
 {
 #if defined(_WIN32)
     return g_hwnd ? g_focused.load() : true;
+#elif defined(__ANDROID__)
+    return g_focused.load();
 #else
     return true;
 #endif

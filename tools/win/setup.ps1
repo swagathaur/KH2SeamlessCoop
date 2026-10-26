@@ -218,6 +218,7 @@ if (-not (Test-Path generated\main)) {
     Say '  Translating the game to C++ (a few minutes) ...'
     & python tools\recomp.py --recompiler $recompiler | Out-Host
     if ($LASTEXITCODE) { Fail 'Translation failed (logs\recomp_*.log).' }
+    & "$PSScriptRoot\recomp-key.ps1" -Save
 }
 Say '  Building the game (first time: 30-90 minutes; later only what changed) ...'
 $start = Get-Date

@@ -928,13 +928,14 @@ bool harnessTick(Harness &h, uint64_t frame)
     // play log then shows where a hang or crash happened.
     {
         const kh2state::State gs = kh2state::read(h.runtime->memory().getRDRAM());
-        const uint64_t key = uint64_t(gs.now.world) << 48 | uint64_t(gs.now.room) << 40 | uint64_t(gs.now.event) << 24 |
-                             uint64_t(gs.control & 0xFFFF);
+        const uint64_t key = uint64_t(gs.now.world) << 56 | uint64_t(gs.now.room) << 48 | uint64_t(gs.now.event) << 32 |
+                             uint64_t(gs.now.map & 0xFF) << 24 | uint64_t(gs.now.battle & 0xFF) << 16 | uint64_t(gs.control & 0xFFFF);
         if (key != h.lastSceneKey)
         {
             h.lastSceneKey = key;
-            std::printf("[game] %.1fs frame %llu: %s event %u control %u\n", elapsed(h), (unsigned long long)frame,
-                        kh2state::describe(gs.now).c_str(), gs.now.event, gs.control);
+            std::printf("[game] %.1fs frame %llu: %s event %u map %u battle %u control %u\n", elapsed(h),
+                        (unsigned long long)frame, kh2state::describe(gs.now).c_str(), gs.now.event, gs.now.map,
+                        gs.now.battle, gs.control);
         }
     }
     // The game itself stuck: guest frames stop (not paused), or a cutscene's

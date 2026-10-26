@@ -551,3 +551,16 @@ Targets: `0x0019BC38` (behind `YS::TARGET::can_attack` and the lock-on
 searches `0x00190D10`/`0x00190F80`) refuses objentry types 0, 1 (party) and
 5 by type, so party members and stand-ins are never lock-on targets; types
 15 (the NPC-class puppets) pass when their flags allow.
+
+## Map group masks and LWU (invisible walls)
+
+A room's map program sets which map groups (mesh and collision) exist with
+`MapVisibility` (op 1: two words, kept as one 64-bit mask at `0x0034ECC0`;
+`AREA::start` applies it, the live mask is at `0x0034C710`). Groups above
+the mask are hidden, among them barrier walls the story turns on at times.
+The op handler builds the mask with `lwu`/`dsll32`/`or`; the recompiler
+translated `LWU` sign-extending, so `0x00000FFF_C0000409` (the Sandlot)
+became `0xFFFFFFFF_C0000409` and every barrier group was on: you could walk
+into the Sandlot's square but not out. Patch 0037 zero-extends. build.ps1
+translates the game again when a recompiler patch changes
+(`tools/win/recomp-key.ps1`).

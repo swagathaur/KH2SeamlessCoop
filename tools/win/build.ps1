@@ -13,6 +13,21 @@ if ($drive -and $drive.Free -lt $need) {
 New-Item -ItemType Directory -Force logs | Out-Null
 cmake -S . -B build\win -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | Select-String -Pattern 'kh2:|Error|error|Generating done' | Out-Host
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+# The translated game (generated\) comes from the recompiler: when a patch to
+# the recompiler itself (one touching ps2xRecomp/) changed since it was made,
+# rebuild the recompiler and translate again (configure above applied them).
+$recompKey = & "$PSScriptRoot\recomp-key.ps1"
+$recompStamp = 'generated\.recompiler-patches'
+$recompiler = 'build\ps2recomp-tools\ps2xRecomp\ps2_recomp.exe'
+if ((Test-Path generated\main) -and (Test-Path $recompiler) -and
+    (-not (Test-Path $recompStamp) -or (Get-Content $recompStamp -Raw).Trim() -ne $recompKey)) {
+    Write-Host 'The recompiler changed: rebuilding it and translating the game again (a few minutes) ...'
+    cmake --build build\ps2recomp-tools --parallel 2>&1 | Out-File -Encoding utf8 logs\tools.log
+    if ($LASTEXITCODE) { Get-Content logs\tools.log -Tail 15; exit 1 }
+    & python tools\recomp.py --recompiler $recompiler | Out-Host
+    if ($LASTEXITCODE) { Write-Host 'Translation failed (logs\recomp_*.log).' -ForegroundColor Red; exit 1 }
+    & "$PSScriptRoot\recomp-key.ps1" -Save
+}
 # Compiling: ninja prints "[done/total] ..." per step. The full output goes to
 # logs\build.log; here a progress bar and a line every 5% (a first build has
 # about 20,000 steps and takes a while, so it should not look stuck).

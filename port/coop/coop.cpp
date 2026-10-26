@@ -140,6 +140,11 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0x
         const uint16_t keep = 0xFFFF; // map, battle, event: what the save says
         for (int i = 0; i < 3; ++i)
             std::memcpy(loc + 4 + 2 * i, &keep, 2);
+        if (const char *m = std::getenv("KH2_WARP_MAP")) // testing: this map program
+        {
+            const uint16_t map = uint16_t(std::atoi(m));
+            std::memcpy(loc + 4, &map, 2);
+        }
         std::memcpy(loc + 6, &battle, 2);
         std::memcpy(loc + 8, &event, 2);
         std::memcpy(env.host(env.scratch), loc, sizeof(loc));

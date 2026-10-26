@@ -554,8 +554,8 @@ void voiceSayHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { spea
 // the member's own files: FACE, OBJ*, kind). A stand-in in Roxas's or Sora's
 // look brings the player's face, drawn at the size of the player's own gauge,
 // which covers the party members' HP bars: drawn smaller there. The sprite's
-// YI::SEQUENCE (+0x18) has a scale at +0x134 (x, y, z) that counts when bit 1
-// of +0xB8 is set (YI::SEQUENCE scale setters, 0x00239E60).
+// YI::SEQUENCE (+0x18) has a scale at +0x134 (height), +0x138 (width), +0x13C
+// that counts when bit 1 of +0xB8 is set (YI::SEQUENCE scale setters, 0x00239E60).
 PS2Runtime::RecompiledFunction g_makeFace = nullptr;
 constexpr uint32_t kMakeFace = 0x001542C8;
 float faceScale()
@@ -583,6 +583,9 @@ void makeFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     wr<float>(rdram, seq + 0x138, sc);
     wr<float>(rdram, seq + 0x13C, 1.0f);
     wr<uint32_t>(rdram, seq + 0xB8, rd<uint32_t>(rdram, seq + 0xB8) | 2u);
+    // The sprite's update (0x00138840) sets the sequence's +0x134 from its own
+    // +0x180 every frame (the height): that one too.
+    wr<float>(rdram, face + 0x180, sc);
     std::printf("[partner] party face of stand-in %08X drawn at %.0f%% (face %08X, kind %u)\n", obj, sc * 100.0f, face, kind);
     std::fflush(stdout);
 }

@@ -550,12 +550,49 @@ void speakAsUs(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Con
 }
 void voicePartHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { speakAsUs(g_voicePart, rdram, ctx, runtime); }
 void voiceSayHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { speakAsUs(g_voiceSay, rdram, ctx, runtime); }
+// The party gauge's face (dk::FACE, a dk::Sprite, made by 0x001542C8 from
+// the member's own files: FACE, OBJ*, kind). A stand-in in Roxas's or Sora's
+// look brings the player's face, drawn at the size of the player's own gauge,
+// which covers the party members' HP bars: drawn smaller there. The sprite's
+// YI::SEQUENCE (+0x18) has a scale at +0x134 (x, y, z) that counts when bit 1
+// of +0xB8 is set (YI::SEQUENCE scale setters, 0x00239E60).
+PS2Runtime::RecompiledFunction g_makeFace = nullptr;
+constexpr uint32_t kMakeFace = 0x001542C8;
+float faceScale()
+{
+    static const float scale = [] {
+        const char *e = std::getenv("KH2_PARTY_FACE_SCALE");
+        const float v = e ? float(std::atof(e)) : 0.7f;
+        return v > 0.1f && v <= 1.0f ? v : 0.7f;
+    }();
+    return scale;
+}
+void makeFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t face = getRegU32(ctx, 4), obj = getRegU32(ctx, 5), kind = getRegU32(ctx, 6);
+    kh2::callOriginal(g_makeFace, rdram, ctx, runtime);
+    // A party member (objentry type 1) in Sora's or Roxas's look (P_EX1xx):
+    // a stand-in, also before update() has seen it (gauges are made with the room).
+    const uint32_t rec = obj && obj < 0x02000000u ? rd<uint32_t>(rdram, obj + kh2state::addr::ObjEntry) : 0;
+    if (!rec || rec >= 0x02000000u || rd<uint8_t>(rdram, rec + 4) != 1 ||
+        std::memcmp(rdram + ((rec + 8) & 0x01FFFFFFu), "P_EX1", 5) != 0)
+        return;
+    const float sc = faceScale();
+    const uint32_t seq = face + 0x18;
+    wr<float>(rdram, seq + 0x134, sc);
+    wr<float>(rdram, seq + 0x138, sc);
+    wr<float>(rdram, seq + 0x13C, 1.0f);
+    wr<uint32_t>(rdram, seq + 0xB8, rd<uint32_t>(rdram, seq + 0xB8) | 2u);
+    std::printf("[partner] party face of stand-in %08X drawn at %.0f%% (face %08X, kind %u)\n", obj, sc * 100.0f, face, kind);
+    std::fflush(stdout);
+}
 } // namespace
 
 bool install(PS2Runtime &runtime)
 {
     for (auto [address, original, hook] :
-         {std::tuple{kVoicePart, &g_voicePart, &voicePartHook}, std::tuple{kVoiceSay, &g_voiceSay, &voiceSayHook}})
+         {std::tuple{kVoicePart, &g_voicePart, &voicePartHook}, std::tuple{kVoiceSay, &g_voiceSay, &voiceSayHook},
+          std::tuple{kMakeFace, &g_makeFace, &makeFaceHook}})
     {
         *original = runtime.lookupFunction(address);
         if (!*original || !runtime.replaceFunction(address, hook))

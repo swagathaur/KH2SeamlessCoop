@@ -6,6 +6,17 @@ New-Item -ItemType Directory -Force logs | Out-Null
 if (Test-Path logs\play.log) { Move-Item -Force logs\play.log logs\play.prev.log }
 if (Test-Path logs\play.err.log) { Move-Item -Force logs\play.err.log logs\play.prev.err.log }
 
+# Not built yet (a fresh clone): the game is built on this PC by the setup.
+if (-not (Test-Path build\win\kh2recomp.exe) -or -not (Test-Path game\SLPM_666.75)) {
+    $what = if (-not (Test-Path game\SLPM_666.75)) { 'set up (your disc image is not unpacked yet)' } else { 'built yet' }
+    "The game is not $what. 'First-time setup.bat' does it: it installs the build tools if needed,"
+    "checks your disc image and builds the game (the first build takes 30-90 minutes)."
+    $a = Read-Host 'Run it now? [Y/n]'
+    if ($a -match '^\s*(y|yes)?\s*$') {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\setup.ps1"
+        if ($LASTEXITCODE -or -not (Test-Path build\win\kh2recomp.exe)) { exit 1 }
+    } else { exit 1 }
+}
 . "$PSScriptRoot\pc-release.ps1" # Find-PCRelease
 $pc = Find-PCRelease
 $python = Get-Command python -ErrorAction SilentlyContinue

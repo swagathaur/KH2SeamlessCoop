@@ -255,8 +255,8 @@ the first companion's place and the other the second (Goofy's), in
 the way Dark Souls III's seamless co-op puts a friend in your world:
 
 - They look like themselves, with their own weapon. When someone joins (or
-  changes look, e.g. a drive form), the room reloads once you are free to
-  move and out of battle, and puts you back where you stood.
+  changes look, e.g. a drive form), their companion is made again in their
+  look where it stands; nobody else is moved.
 - While they are in another room, your companion waits out of sight.
 - The companion stops acting on its own: it stands, walks and moves where
   that player does in their game, playing their motions.

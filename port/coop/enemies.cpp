@@ -65,6 +65,7 @@ struct Follow
     double firstSeen = -1;   // when our game made it (one the host never has goes)
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
+std::map<uint32_t, double> g_killed;  // objects we finished off this room (when), whatever their serial
 // The host's enemies this room has had (serial -> entry): one gone from the
 // host died there, and our game's own of that serial (made when we walked
 // into the same trigger later) dies too, rather than being fought alone.
@@ -143,6 +144,7 @@ void killCopy(uint8_t *rdram, Follow &f, const Local &e, double now)
     }
     f.killed = true;
     f.killedAt = now;
+    g_killed[e.object] = now;
     postAddHp(e.object, -(e.hp > 0 ? e.hp : 0));
 }
 
@@ -337,6 +339,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     if (key != g_followRoom)
     {
         g_follow.clear();
+        g_killed.clear();
         g_hostSeen.clear();
         g_made.clear();
         g_preloaded.clear();
@@ -372,11 +375,18 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         Follow &f = g_follow[e.serial];
         if (f.object != e.object)
         {
+            // Another object with this serial (our game made its own after
+            // our copy went): nothing of the old one's record applies. Kept,
+            // "killed" stopped the game's own new one dying with the host's.
+            f = Follow{};
             f.object = e.object;
             f.entry = e.entry;
-            f.frozen = false;
-            f.motion = 0xFFFF;
             f.firstSeen = now;
+            if (auto k = g_killed.find(e.object); k != g_killed.end() && now - k->second < 10.0)
+            {
+                f.killed = true; // (two of one serial for a moment: ours dying, the game's own)
+                f.killedAt = k->second;
+            }
         }
         if (!h)
         {
@@ -533,6 +543,7 @@ void reset()
     g_host = {};
     g_hostTime = -1;
     g_follow.clear();
+    g_killed.clear();
     g_hostSeen.clear();
     g_made.clear();
     g_preloaded.clear();

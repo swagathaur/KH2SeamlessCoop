@@ -66,16 +66,30 @@ next to the executable, **Alt+Enter** or **F11** toggles fullscreen.
 ## Speed: compiled VU1 programs
 
 KH2 does its 3D transforms in VU1 microprograms. Interpreted, they cap 3D
-scenes at roughly 10 fps; compiled to native code they run at full speed. The
-programs come from the game's data, so they are recorded locally and compiled
-by the build:
+scenes at roughly 10-20 fps; compiled to native code they run at full speed.
+The programs come from the game's data, so they are recorded locally (never
+committed) and compiled on your PC:
+
+- **While you play** (`Play KH2.bat`): a program the game has not compiled in
+  is recorded the first time it runs and compiled in the background
+  (`port/runtime/vu_hot.cpp`, `tools/win/vu-hot.ps1`: the build's own
+  generator and compiler, into a small DLL linked against the game's
+  exports). It is used as soon as it is ready, without a restart: about one
+  to three minutes for a new area's programs on a fast PC, longer on fewer
+  cores; until then that scene runs interpreted. A "3D programs optimised"
+  message says when. The modules are kept in `build\vu-hot` and loaded at
+  once in later sessions of the same build. Needs the Visual Studio build
+  tools (as for building); `KH2_VU_HOT=0` turns it off.
+- **In the build**: everything recorded in `build\vu-profile` is compiled
+  into the game by the next `tools\win\build.ps1`. `First-time setup.bat`
+  records the first room of every world before your first play
+  (`tools\win\vu-warmup.ps1`, unattended) and builds them in.
 
 ```powershell
-tools\win\vu-record.ps1        # play a while (new areas add new programs)
-tools\win\build.ps1            # compiles everything recorded in build\vu-profile
+tools\win\vu-warmup.ps1      # record every world's first room (5-10 minutes)
+tools\win\vu-record.ps1      # or play a while recording
+tools\win\build.ps1          # compiles everything recorded in build\vu-profile
 ```
-
-Programs not recorded yet still run, interpreted. Recording more is always safe.
 
 Measured on an RTX 3080 (GPU renderer, 1x super-sampling, compiled VU1
 programs, real-time pacing), warping into the first room of each world: Twilight

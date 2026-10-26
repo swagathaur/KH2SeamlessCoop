@@ -125,6 +125,9 @@ set(KH2_VU_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-profile")
 if(EXISTS "${KH2_VU_PROFILE_DIR}/entries.txt")
     set(PS2X_VU_PROGRAM_PROFILES "${KH2_VU_PROFILE_DIR}" CACHE STRING "" FORCE)
     message(STATUS "kh2: compiling VU1 programs recorded in ${KH2_VU_PROFILE_DIR}")
+else()
+    # Recordings gone (moved or deleted): stop depending on them.
+    set(PS2X_VU_PROGRAM_PROFILES "" CACHE STRING "" FORCE)
 endif()
 set(PS2X_BUILD_RECOMP OFF CACHE BOOL "" FORCE)
 set(PS2X_BUILD_ANALYZER OFF CACHE BOOL "" FORCE)
@@ -138,6 +141,9 @@ if(MSVC AND TARGET ps2_runtime)
     # Whole-program optimisation makes linking a 12k-function corpus take hours
     # (DQ8Recomp measured this); compile the runtime normally instead.
     set_property(TARGET ps2_runtime PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+    # The members compiled VU1 programs call are exported from kh2recomp.exe,
+    # for programs compiled while the game runs (port/runtime/vu_hot.cpp).
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_VU_HOT_EXPORT=1)
     get_target_property(_opts ps2_runtime COMPILE_OPTIONS)
     if(_opts)
         list(REMOVE_ITEM _opts /GL)
@@ -270,6 +276,7 @@ add_executable(kh2recomp
     port/runtime/game_patches.cpp
     port/runtime/watchdog.cpp
     port/runtime/overlay_ui.cpp
+    port/runtime/vu_hot.cpp
     port/coop/game_state.cpp
     port/coop/coop.cpp
     port/coop/puppets.cpp
@@ -326,6 +333,26 @@ if(KH2_BUILD_TESTS)
 endif()
 if(WIN32)
     target_link_libraries(kh2recomp PRIVATE ws2_32 iphlpapi)
+endif()
+if(MSVC)
+    # An import library (kh2recomp.lib) for the VU1 program modules built while
+    # the game runs (tools/win/vu-hot.ps1).
+    set_target_properties(kh2recomp PROPERTIES ENABLE_EXPORTS ON)
+    # VU1Interpreter's members, found in the runtime's objects just before
+    # linking (tools/vu_hot_exports.py), as a .def.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(KH2_VU_HOT_DEF "${CMAKE_BINARY_DIR}/kh2recomp_vu_exports.def")
+    add_custom_command(TARGET kh2recomp PRE_LINK
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/vu_hot_exports.py"
+                "${CMAKE_LINKER}" "${CMAKE_BINARY_DIR}/ps2recomp/ps2xRuntime/CMakeFiles/ps2_runtime.dir" "${KH2_VU_HOT_DEF}"
+        VERBATIM)
+    target_link_options(kh2recomp PRIVATE "/DEF:${KH2_VU_HOT_DEF}")
+endif()
+if(EXISTS "${KH2_VU_PROFILE_DIR}/entries.txt")
+    # What this build compiled in: the running game compiles only the rest.
+    add_custom_command(TARGET kh2recomp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KH2_VU_PROFILE_DIR}/entries.txt"
+                "$<TARGET_FILE_DIR:kh2recomp>/vu-static-entries.txt")
 endif()
 if(KH2_SDL3)
     target_link_libraries(kh2recomp PRIVATE SDL3::SDL3-static)

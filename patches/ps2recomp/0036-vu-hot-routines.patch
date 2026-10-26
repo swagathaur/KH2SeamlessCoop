@@ -1,0 +1,119 @@
+Subject: [PATCH] 0036 VU1 routines added at run time (addRoutines); Run and Access exported on Windows
+
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+index 36ea65a..0a7589a 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+@@ -14,6 +14,7 @@
+ #include <set>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ #ifdef PS2X_VU_PROGRAM_EXTERN_INCLUDE
+ #include PS2X_VU_PROGRAM_EXTERN_INCLUDE
+@@ -56,6 +57,28 @@ struct CacheSlot
+ };
+ 
+ std::atomic<uint64_t> g_epoch{0u};
++
++// Routines added at run time (addRoutines), sorted by PC. Each addition
++// publishes a new list; old ones are kept, as readers may still hold them.
++struct Added
++{
++    std::vector<Entry> entries;
++};
++std::atomic<const Added *> g_added{nullptr};
++std::mutex g_addMutex;
++}
++
++void addRoutines(const Entry *entries, size_t count)
++{
++    const std::lock_guard lock(g_addMutex);
++    auto *next = new Added;
++    if (const Added *current = g_added.load(std::memory_order_acquire))
++        next->entries = current->entries;
++    next->entries.insert(next->entries.end(), entries, entries + count);
++    std::stable_sort(next->entries.begin(), next->entries.end(),
++                     [](const Entry &a, const Entry &b) { return a.pc < b.pc; });
++    g_added.store(next, std::memory_order_release); // the old list stays allocated
++    forgetRoutines();
+ }
+ 
+ void forgetRoutines()
+@@ -86,6 +109,23 @@ Routine find(const uint8_t *code, uint32_t codeSize, uint32_t pc, uint64_t gener
+             break;
+         }
+     }
++    if (!routine)
++    {
++        if (const Added *added = g_added.load(std::memory_order_acquire))
++        {
++            const auto &list = added->entries;
++            auto it = std::lower_bound(list.begin(), list.end(), pc,
++                                       [](const Entry &candidate, uint32_t value) { return candidate.pc < value; });
++            for (; it != list.end() && it->pc == pc; ++it)
++            {
++                if (matches(*it, code, codeSize))
++                {
++                    routine = it->run;
++                    break;
++                }
++            }
++        }
++    }
+     slot = {code, generation, epoch, routine, true};
+     return routine;
+ }
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+index 7a4c75d..1b92229 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+@@ -40,6 +40,17 @@
+ #define PS2_VU_PROGRAM_SSE 0
+ #endif
+ 
++// Run and Access are exported from the executable on Windows, for VU1
++// programs compiled while the game runs (a DLL loaded then; the port's
++// vu_hot.cpp). VU1Interpreter's members are exported by a generated .def.
++#if defined(_WIN32) && defined(PS2X_VU_HOT_EXPORT)
++#define PS2_VU_API __declspec(dllexport)
++#elif defined(_WIN32) && defined(PS2X_VU_HOT_IMPORT)
++#define PS2_VU_API __declspec(dllimport)
++#else
++#define PS2_VU_API
++#endif
++
+ namespace ps2_vu_program
+ {
+ using Unit = VU1Interpreter::Unit;
+@@ -65,6 +76,11 @@ inline constexpr uint64_t kMinimumBudget = 4096u;
+ 
+ Routine find(const uint8_t *code, uint32_t codeSize, uint32_t pc, uint64_t generation);
+ 
++// Adds routines compiled while the game runs (a module loaded then): find()
++// consults them after the built-in ones. The entries must stay valid for the
++// rest of the run; any thread may call this.
++void addRoutines(const Entry *entries, size_t count);
++
+ // find() remembers its answers by code address and generation, which a new
+ // interpreter or memory can repeat; a VU1 reset starts the answers over.
+ void forgetRoutines();
+@@ -80,7 +96,7 @@ void setProfileDirectory(std::string directory);
+ // delay slot issued, false when the interpreter has to continue.
+ bool run(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint64_t budgetEnd, Routine first);
+ 
+-struct Access
++struct PS2_VU_API Access
+ {
+     using Decoded = VU1Interpreter::DecodedInstructionPair;
+     using Usage = VU1Interpreter::InstructionUsage;
+@@ -391,7 +407,7 @@ PS2_VU_FORCE_INLINE __m128 productSum(__m128 acc, __m128 left, __m128 right)
+ }
+ #endif
+ 
+-class Run
++class PS2_VU_API Run
+ {
+ public:
+     explicit Run(VU1Interpreter &vu);

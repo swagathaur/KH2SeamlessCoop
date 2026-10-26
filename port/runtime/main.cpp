@@ -64,6 +64,7 @@
 #include "hd_textures.h"
 #include "file_override.h"
 #include "overlay_ui.h"
+#include "vu_hot.h"
 
 namespace ps2_stubs
 {
@@ -1686,6 +1687,12 @@ int main(int argc, char **argv)
     if (!opt.trace.empty())
         kh2trace::install(runtime, opt.trace); // last, so it wraps the final implementations
 
+    {
+        // 3D programs met for the first time compiled in the background and
+        // used as soon as they are ready (vu_hot.cpp).
+        std::error_code ec;
+        kh2vuhot::start(std::filesystem::absolute(argv[0], ec).parent_path());
+    }
     harness.start = harness.lastStatus = std::chrono::steady_clock::now();
     std::printf("[kh2] starting at 0x%08X\n", runtime.cpu().pc);
     std::fflush(stdout);
@@ -1745,6 +1752,7 @@ int main(int argc, char **argv)
     kh2coop::shutdown();
     kh2watch::stop();
     kh2prof::stopAndReport();
+    kh2vuhot::stop();
     kh2pgs::shutdown();
 
     if (!opt.headless && !(opt.frames || opt.timeoutSeconds > 0))

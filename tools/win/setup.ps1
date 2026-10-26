@@ -14,8 +14,9 @@
 #   5. Optionally, the build: recompiler, translation, game (tools\win\build.ps1).
 #
 # Options: -Yes answers yes to every question (unattended), -NoBuild stops
-# before step 5, -NoInstall only reports missing tools.
-param([switch]$Yes, [switch]$NoBuild, [switch]$NoInstall)
+# before step 5, -NoInstall only reports missing tools, -NoWarmup skips
+# recording the 3D programs after the first build (tools\win\vu-warmup.ps1).
+param([switch]$Yes, [switch]$NoBuild, [switch]$NoInstall, [switch]$NoWarmup)
 
 $ErrorActionPreference = 'Continue'
 $Root = Split-Path $PSScriptRoot -Parent | Split-Path -Parent
@@ -223,6 +224,17 @@ $start = Get-Date
 & powershell -NoProfile -ExecutionPolicy Bypass -File tools\win\build.ps1 | Out-Host
 if ($LASTEXITCODE) { Fail 'The build failed (logs\build.log).' }
 Say ("  Built in {0:N0} min." -f ((Get-Date) - $start).TotalMinutes) 'Green'
+# 3D at full speed from the first play: record the programs of every world's
+# first room (unattended, 5-10 minutes) and build them in.
+if (-not $NoWarmup -and -not (Test-Path build\vu-profile\entries.txt)) {
+    Say '  Recording the 3D programs every world uses (5-10 minutes, nothing to do) ...'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File tools\win\vu-warmup.ps1 | Out-Host
+    if (Test-Path build\vu-profile\entries.txt) {
+        Say '  Building them in (a few minutes) ...'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File tools\win\build.ps1 | Select-Object -Last 2 | Out-Host
+        if ($LASTEXITCODE) { Fail 'The build failed (logs\build.log).' }
+    }
+}
 Say ''
 Say 'All set: double-click "Play KH2.bat" to play.' 'Green'
 Done

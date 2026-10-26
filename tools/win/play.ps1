@@ -17,6 +17,9 @@ if (-not (Test-Path build\win\kh2recomp.exe) -or -not (Test-Path game\SLPM_666.7
         if ($LASTEXITCODE -or -not (Test-Path build\win\kh2recomp.exe)) { exit 1 }
     } else { exit 1 }
 }
+# 3D programs (VU1) the build has not compiled in are recorded as the game
+# meets them and compiled in the background while it runs (port/runtime/vu_hot.cpp).
+$env:PS2_VU_PROGRAM_PROFILE = (New-Item -ItemType Directory -Force build\vu-profile).FullName
 . "$PSScriptRoot\pc-release.ps1" # Find-PCRelease
 $pc = Find-PCRelease
 $python = Get-Command python -ErrorAction SilentlyContinue

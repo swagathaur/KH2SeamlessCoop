@@ -13,7 +13,29 @@ if ($drive -and $drive.Free -lt $need) {
 New-Item -ItemType Directory -Force logs | Out-Null
 cmake -S . -B build\win -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | Select-String -Pattern 'kh2:|Error|error|Generating done' | Out-Host
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-cmake --build build\win --target kh2recomp coop_net_test key_bindings_test --parallel 2>&1 | Out-File -Encoding utf8 logs\build.log
+# Compiling: ninja prints "[done/total] ..." per step. The full output goes to
+# logs\build.log; here a progress bar and a line every 5% (a first build has
+# about 20,000 steps and takes a while, so it should not look stuck).
+Write-Host 'Compiling (full output: logs\build.log) ...'
+$writer = New-Object System.IO.StreamWriter((Join-Path (Get-Location) 'logs\build.log'), $false, [Text.UTF8Encoding]::new($false))
+$lastPct = -1; $lastShown = -5; $started = Get-Date
+cmake --build build\win --target kh2recomp coop_net_test key_bindings_test --parallel 2>&1 | ForEach-Object {
+    $line = "$_"
+    $writer.WriteLine($line)
+    if ($line -match '^\[(\d+)/(\d+)\]') {
+        $pct = [int](100 * [int]$Matches[1] / [math]::Max(1, [int]$Matches[2]))
+        if ($pct -ne $lastPct) {
+            $lastPct = $pct
+            Write-Progress -Activity 'Building' -Status "$pct% ($($Matches[1]) of $($Matches[2]) steps)" -PercentComplete $pct
+            if ($pct -ge $lastShown + 5 -and [int]$Matches[2] -gt 50) {
+                $lastShown = $pct - ($pct % 5)
+                Write-Host ("  {0,3}%  ({1} of {2} steps, {3:N0} min so far)" -f $pct, $Matches[1], $Matches[2], ((Get-Date) - $started).TotalMinutes)
+            }
+        }
+    }
+}
 $code = $LASTEXITCODE
+$writer.Close()
+Write-Progress -Activity 'Building' -Completed
 Get-Content logs\build.log -Tail 25
 exit $code

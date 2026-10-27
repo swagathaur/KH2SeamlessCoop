@@ -15,6 +15,7 @@
 #include <android/window.h>
 #include <android_native_app_glue.h>
 #include <jni.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -117,6 +118,13 @@ void openLogFile(const std::string &dir)
 }
 
 // ---- JNI --------------------------------------------------------------------
+// The thread's JNI environment. A thread is attached once and stays attached
+// until it exits (a key destructor detaches it); never detached in between,
+// since the calls nest (detaching in an inner call left the outer one with a
+// dead environment: the first-launch crash).
+pthread_key_t g_jniKey;
+std::once_flag g_jniKeyOnce;
+
 struct Jni
 {
     JNIEnv *env = nullptr;
@@ -124,9 +132,28 @@ struct Jni
     Jni()
     {
         vm = g_app->activity->vm;
+        if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK)
+        {
+            pushFrame();
+            return;
+        }
         vm->AttachCurrentThread(&env, nullptr);
+        std::call_once(g_jniKeyOnce, [] {
+            pthread_key_create(&g_jniKey, [](void *v) { static_cast<JavaVM *>(v)->DetachCurrentThread(); });
+        });
+        pthread_setspecific(g_jniKey, vm);
+        pushFrame();
     }
-    ~Jni() { vm->DetachCurrentThread(); }
+    // Local references made here are freed when this goes out of scope (the
+    // thread has no Java frame of its own to free them, and some calls repeat
+    // every frame while waiting for the permission).
+    void pushFrame() { framed = env->PushLocalFrame(64) == 0; }
+    ~Jni()
+    {
+        if (framed)
+            env->PopLocalFrame(nullptr);
+    }
+    bool framed = false;
     void clear()
     {
         if (env->ExceptionCheck())

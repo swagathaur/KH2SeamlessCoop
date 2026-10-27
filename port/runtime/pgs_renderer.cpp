@@ -1442,6 +1442,16 @@ bool init(const Options &options)
         hacks.disable_mipmaps = g_opt.disableMipmaps;
         g_gs->set_hacks(hacks);
     }
+#if defined(__ANDROID__)
+    {
+        // The texture-region analysis pass (an upload optimisation) does not
+        // build on Adreno drivers ("Failed to link shaders"); without it whole
+        // textures are uploaded, which is fine at native resolution.
+        DebugMode dbg = {};
+        dbg.disable_sampler_feedback = true;
+        g_gs->set_debug_mode(dbg);
+    }
+#endif
     if (ParallelGS::TextureReplacer *replacer = kh2hd::attach(g_device))
         g_gs->set_texture_replacer(replacer);
     const auto &props = g_device->get_gpu_properties();

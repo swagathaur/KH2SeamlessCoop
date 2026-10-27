@@ -90,6 +90,11 @@ std::unique_ptr<Device> g_headlessDevice;
 Device *g_device = nullptr;
 std::unique_ptr<GSInterface> g_gs;
 ScanoutResult g_last;
+// Render thread: the frame scanned out last time. Each frame presents the one
+// before it, so the GPU has a whole frame to finish it before Android takes the
+// buffer (its display queue waits for the previous frame's GPU work, and
+// presenting at once made CPU and GPU take turns). One frame more latency.
+ScanoutResult g_heldScanout;
 VkImageLayout g_lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 Program *g_blitProgram = nullptr;
@@ -560,7 +565,7 @@ bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, u
     if (g_rbPending && g_rbAsync && size_t(rrw) * rrh * bits / 8u <= kAsyncReadbackMaxBytes)
     {
         char k[96];
-        std::snprintf(k, sizeof(k), "%u/%u/%u/%u,%u/%ux%u", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
+        std::snprintf(k, sizeof(k), "%u/%u/%u/%ux%u", sbp, sbw, spsm, rrw, rrh);
         auto it = g_rbCache.find(k);
         if (it != g_rbCache.end())
         {
@@ -588,7 +593,9 @@ bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, u
     g_rbAfter = after;
     g_rbDone = false;
     char key[96];
-    std::snprintf(key, sizeof(key), "%u/%u/%u/%u,%u/%ux%u", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
+    // Not the position: KH2's sun-flare probe follows the sun across the screen
+    // as the camera turns, and a miss there meant a full GPU round trip.
+    std::snprintf(key, sizeof(key), "%u/%u/%u/%ux%u", sbp, sbw, spsm, rrw, rrh);
     g_rbKey = key;
 #if defined(__ANDROID__)
     if (g_rbBytes <= kAsyncReadbackMaxBytes)
@@ -1867,6 +1874,7 @@ void shutdown()
     }
 #endif
     g_last = {};
+    g_heldScanout = {};
     g_fsrTarget.reset();
     g_gs.reset();
     g_blitProgram = g_upscaleProgram = g_sharpenProgram = nullptr;
@@ -2000,7 +2008,14 @@ void processFrame(const PrivSnapshot &priv, uint64_t vsyncTick, FrameJob *job)
         info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
         {
             StepTimer st(2);
-            g_last = g_gs->vsync(info);
+            ScanoutResult scan = g_gs->vsync(info);
+            if (g_renderThreadOn)
+            {
+                g_last = g_heldScanout.image ? g_heldScanout : scan;
+                g_heldScanout = std::move(scan);
+            }
+            else
+                g_last = std::move(scan);
         }
         g_guestRate.tick(nowSeconds());
 #if defined(__ANDROID__)

@@ -29,6 +29,12 @@
 #include <algorithm>
 #include <climits>
 #include <atomic>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <pthread.h>
+#endif
+#include <thread>
+#include <deque>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -69,6 +75,8 @@ using namespace ParallelGS;
 
 namespace kh2pgs
 {
+void stopRenderThread();
+void renderLoop();
 namespace
 {
 Options g_opt;
@@ -133,10 +141,58 @@ void registerThread()
 // with the runtime's own GS, so feeding it a little later is safe.
 std::mutex g_queueMutex;
 std::condition_variable g_queueDrained;
+
+// Render thread (Options::renderThread; on by default on Android). The guest's
+// vsync hands its frame over as a job (the GIF packets since the last one and
+// the display registers) and goes on; this thread feeds paraLLEl-GS, answers
+// readbacks as soon as their packets are in, and scans out and presents each
+// job in order. Without it all of that ran in the vsync call itself, and the
+// guest waited on it (on Android, mostly on GPU submissions).
+struct PrivSnapshot
+{
+    uint64_t regs[15] = {};
+};
+struct FrameJob
+{
+    std::vector<uint8_t> packets;
+    uint64_t end = 0; // packet count after them
+    PrivSnapshot priv;
+    uint64_t tick = 0;
+    bool redraw = false; // present again without a new guest frame (paused)
+};
+std::deque<FrameJob> g_jobs; // under g_queueMutex
+std::condition_variable g_renderWake, g_jobDone;
+std::thread g_renderThread;
+std::atomic<bool> g_renderStop{false};
+std::atomic<bool> g_rbWake{false};
+bool g_renderThreadOn = false;
+constexpr size_t kMaxJobsAhead = 2;
+// Where the time goes (logged with the GPU times): guest waits for readbacks
+// and for a full queue, and the render thread feeding paraLLEl-GS.
+// Main-thread frame steps (ns per 3 s): drain, flush, vsync, present parts.
+std::atomic<uint64_t> g_stepNs[8];
+const char *const kStepNames[8] = {"drain", "pgs flush", "pgs vsync", "begin_frame", "blit+ui", "submit", "end_frame", "next begin_frame"};
+struct StepTimer
+{
+    int i;
+    uint64_t t0;
+    explicit StepTimer(int idx);
+    ~StepTimer();
+};
+std::atomic<uint64_t> g_statReadbacksSkipped{0}, g_statReadbacksAsync{0}, g_statReadbacks{0}, g_statReadbackNs{0}, g_statQueueWaitNs{0}, g_statDrainNs{0},
+    g_statReadbackServeNs{0};
+uint64_t statNow()
+{
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+StepTimer::StepTimer(int idx) : i(idx), t0(statNow()) {}
+StepTimer::~StepTimer() { g_stepNs[i] += statNow() - t0; }
 std::vector<uint8_t> g_queue;    // [u32 size][size bytes]...
 std::vector<uint8_t> g_draining; // the render thread's side of the swap
 uint64_t g_enqueued = 0;         // packets queued so far (under g_queueMutex)
 uint64_t g_processed = 0;        // packets fed to paraLLEl-GS (render thread)
+size_t g_lastPacketAt = 0;       // offset in g_queue of the newest packet (under g_queueMutex)
 constexpr size_t kQueueLimit = 256u << 20; // past this the producer waits (render thread stuck)
 
 // KH2_PGS_TRACE_FBP=<fbp>[:fromVsync[:lines]]: logs every change of drawing
@@ -350,8 +406,24 @@ void tapPacket(const uint8_t *data, uint32_t size, void *)
     if (g_trace.on)
         g_trace.packet(data, size);
     std::unique_lock<std::mutex> lock(g_queueMutex);
-    if (g_queue.size() > kQueueLimit &&
-        !g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; }))
+    // Render thread: the guest stays at most kMaxJobsAhead frames ahead of the
+    // screen (nothing else held it back once readbacks stopped waiting, and it
+    // ran ahead drawing frames nobody would see).
+    if (g_renderThreadOn && g_jobs.size() >= kMaxJobsAhead && !g_renderStop)
+    {
+        const uint64_t waitStart = statNow();
+        g_jobDone.wait_for(lock, std::chrono::milliseconds(200),
+                           [] { return g_jobs.size() < kMaxJobsAhead || g_renderStop.load(); });
+        g_statQueueWaitNs += statNow() - waitStart;
+    }
+    bool queueOk = true;
+    if (g_queue.size() > kQueueLimit)
+    {
+        const uint64_t waitStart = statNow();
+        queueOk = g_queueDrained.wait_for(lock, std::chrono::milliseconds(100), [] { return g_queue.size() <= kQueueLimit; });
+        g_statQueueWaitNs += statNow() - waitStart;
+    }
+    if (!queueOk)
     {
         // Nobody is drawing (shutting down, or the render thread is stuck):
         // drop the backlog rather than crawl the guest along 100 ms a packet.
@@ -364,6 +436,7 @@ void tapPacket(const uint8_t *data, uint32_t size, void *)
         g_queue.clear();
     }
     const size_t at = g_queue.size();
+    g_lastPacketAt = at;
     g_queue.resize(at + 4 + size);
     std::memcpy(g_queue.data() + at, &size, 4);
     std::memcpy(g_queue.data() + at + 4, data, size);
@@ -381,6 +454,18 @@ bool g_rbPending = false, g_rbDone = false;
 uint64_t g_rbAfter = 0; // the request's packets are queued once this many were
 size_t g_rbBytes = 0;
 std::vector<uint8_t> g_rbData;
+// Small reads that repeat every frame (on Android: KH2's 32x8 depth probe for
+// the sun's lens flare) get the previous result at once and are refreshed in
+// the background; waiting for the GPU each frame cost ~20-30 ms there.
+bool g_rbAsync = false;
+std::string g_rbKey;
+std::map<std::string, std::vector<uint8_t>> g_rbCache;
+std::atomic<uint64_t> g_rbAfterAtomic{UINT64_MAX}; // packet index to serve at, mid-batch
+constexpr size_t kAsyncReadbackMaxBytes = 16u << 10;
+// Answering a readback from the cache and dropping it from the stream (no GPU
+// read at all) made things far slower on Turnip: the readback's flush was what
+// kept paraLLEl-GS's batches small. Kept for experiments.
+constexpr bool kCancelReadbacks = true;
 
 uint32_t transferBits(uint32_t psm)
 {
@@ -395,11 +480,65 @@ uint32_t transferBits(uint32_t psm)
     }
 }
 
+// Turns the newest queued packet's TRXDIR = 1 (local -> host) into 3 (transfer
+// off), so paraLLEl-GS does not flush and wait for the GPU for a readback that
+// is answered from the cache. Under g_queueMutex. False if it is not there.
+bool cancelQueuedReadback()
+{
+    if (g_lastPacketAt + 4 > g_queue.size())
+        return false;
+    uint32_t size;
+    std::memcpy(&size, g_queue.data() + g_lastPacketAt, 4);
+    uint8_t *pkt = g_queue.data() + g_lastPacketAt + 4;
+    if (g_lastPacketAt + 4 + size > g_queue.size())
+        return false;
+    uint64_t *found = nullptr;
+    size_t q = 0;
+    const size_t qwords = size / 16u;
+    while (q < qwords)
+    {
+        uint64_t tag[2];
+        std::memcpy(tag, pkt + q * 16, 16);
+        ++q;
+        const uint32_t nloop = uint32_t(tag[0] & 0x7FFF);
+        const uint32_t flg = uint32_t((tag[0] >> 58) & 3);
+        uint32_t nreg = uint32_t((tag[0] >> 60) & 15);
+        if (nreg == 0)
+            nreg = 16;
+        if (flg == 0) // PACKED
+        {
+            for (uint32_t l = 0; l < nloop && q < qwords; ++l)
+                for (uint32_t r = 0; r < nreg && q < qwords; ++r, ++q)
+                {
+                    const uint32_t desc = uint32_t((tag[1] >> (4 * r)) & 15);
+                    if (desc != 0xE)
+                        continue;
+                    uint64_t *data = reinterpret_cast<uint64_t *>(pkt + q * 16);
+                    if ((data[1] & 0xFF) == 0x53 && (data[0] & 3) == 1)
+                        found = data;
+                }
+        }
+        else if (flg == 1) // REGLIST
+            q += (size_t(nloop) * nreg + 1) / 2;
+        else // IMAGE
+            q += nloop;
+    }
+    if (!found)
+        return false;
+    found[0] = (found[0] & ~3ull) | 3ull;
+    return true;
+}
+
 bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, uint32_t ssay, uint32_t rrw, uint32_t rrh,
                      std::vector<uint8_t> &out, void *)
 {
     static int logged = 0;
-    static const int logLimit = std::getenv("KH2_PGS_READBACK_LOG") ? std::atoi(std::getenv("KH2_PGS_READBACK_LOG")) : 0;
+    static const int logLimit = std::getenv("KH2_PGS_READBACK_LOG") ? std::atoi(std::getenv("KH2_PGS_READBACK_LOG"))
+#if defined(__ANDROID__)
+                                                                        : 40;
+#else
+                                                                        : 0;
+#endif
     if (logged++ < logLimit)
         std::printf("[pgs] readback sbp %u sbw %u psm 0x%02X at %u,%u %ux%u\n", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
     static const bool disabled = std::getenv("KH2_PGS_NO_READBACK") != nullptr; // diagnostics
@@ -414,11 +553,85 @@ bool readbackFromGpu(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t ssax, u
         after = g_enqueued;
     }
     std::unique_lock<std::mutex> lock(g_rbMutex);
+    const uint64_t rbStart = statNow();
+#if defined(__ANDROID__)
+    // A background read still in flight: answer this one from the cache too,
+    // without waiting for it.
+    if (g_rbPending && g_rbAsync && size_t(rrw) * rrh * bits / 8u <= kAsyncReadbackMaxBytes)
+    {
+        char k[96];
+        std::snprintf(k, sizeof(k), "%u/%u/%u/%u,%u/%ux%u", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
+        auto it = g_rbCache.find(k);
+        if (it != g_rbCache.end())
+        {
+            bool cancelled;
+            {
+                std::lock_guard<std::mutex> q(g_queueMutex);
+                cancelled = kCancelReadbacks && cancelQueuedReadback();
+            }
+            if (cancelled)
+            {
+                out = it->second;
+                g_statReadbacksSkipped++;
+                return true;
+            }
+        }
+    }
+#endif
+    // An earlier background read is served first (it is ahead in the stream).
+    if (g_rbPending && !g_rbCond.wait_for(lock, std::chrono::seconds(2), [] { return !g_rbPending; }))
+    {
+        g_rbPending = false;
+        g_rbAfterAtomic = UINT64_MAX;
+    }
     g_rbBytes = size_t(rrw) * rrh * bits / 8u;
     g_rbAfter = after;
     g_rbDone = false;
+    char key[96];
+    std::snprintf(key, sizeof(key), "%u/%u/%u/%u,%u/%ux%u", sbp, sbw, spsm, ssax, ssay, rrw, rrh);
+    g_rbKey = key;
+#if defined(__ANDROID__)
+    if (g_rbBytes <= kAsyncReadbackMaxBytes)
+    {
+        auto it = g_rbCache.find(g_rbKey);
+        if (it != g_rbCache.end())
+        {
+            out = it->second;
+            // Refresh every 8th time; the others skip paraLLEl-GS's flush and GPU wait.
+            static unsigned s_refresh = 0;
+            if ((++s_refresh & 7u) != 0)
+            {
+                bool cancelled;
+                {
+                    std::lock_guard<std::mutex> q(g_queueMutex);
+                    cancelled = kCancelReadbacks && cancelQueuedReadback();
+                }
+                if (cancelled)
+                {
+                    g_statReadbacksSkipped++;
+                    return true;
+                }
+            }
+            g_rbAsync = true;
+            g_rbPending = true;
+            g_rbAfterAtomic = after;
+            g_statReadbacksAsync++;
+            g_rbWake = true;
+            g_renderWake.notify_one();
+            g_statReadbackNs += statNow() - rbStart;
+            return true;
+        }
+    }
+#endif
+    g_rbAsync = false;
     g_rbPending = true;
-    if (!g_rbCond.wait_for(lock, std::chrono::seconds(2), [] { return g_rbDone; }))
+    g_rbAfterAtomic = after;
+    g_rbWake = true;
+    g_renderWake.notify_one();
+    const bool rbOk = g_rbCond.wait_for(lock, std::chrono::seconds(2), [] { return g_rbDone; });
+    g_statReadbacks++;
+    g_statReadbackNs += statNow() - rbStart;
+    if (!rbOk)
     {
         g_rbPending = false;
         static bool warned = false;
@@ -453,10 +666,18 @@ void serviceReadback()
         return;
     const uint32_t words = uint32_t((g_rbBytes + 15u) / 16u);
     g_rbData.assign(size_t(words) * 16u, 0);
+    const uint64_t serveStart = statNow();
     g_gs->read_transfer_fifo(g_rbData.data(), words);
+    g_statReadbackServeNs += statNow() - serveStart;
     g_rbData.resize(g_rbBytes);
     g_rbPending = false;
-    g_rbDone = true;
+    g_rbAfterAtomic = UINT64_MAX;
+    if (g_rbBytes <= kAsyncReadbackMaxBytes)
+        g_rbCache[g_rbKey] = g_rbData;
+    if (g_rbAsync)
+        g_rbData.clear();
+    else
+        g_rbDone = true;
     g_rbCond.notify_all();
 }
 
@@ -468,11 +689,47 @@ FILE *g_capFile = nullptr;
 size_t g_capBytes = 0;
 
 // Render thread, under g_mutex.
+// Feeds packets to paraLLEl-GS (render thread, under g_mutex); batchEnd is the
+// packet count after them.
+void feedPackets(std::vector<uint8_t> &buf, uint64_t batchEnd)
+{
+    const uint64_t drainStart = statNow();
+    uint64_t packet = g_processed;
+    if (g_gs)
+    {
+        size_t at = 0;
+        while (at + 4 <= buf.size())
+        {
+            uint32_t size;
+            std::memcpy(&size, buf.data() + at, 4);
+            if (g_capFile)
+            {
+                std::fwrite(buf.data() + at, 1, 4u + size, g_capFile);
+                g_capBytes += 4u + size;
+            }
+            g_gs->gif_transfer(3, buf.data() + at + 4, size);
+            at += 4 + size;
+            // A background readback is read right where it was asked for, before
+            // what the guest drew after it.
+            if (++packet == g_rbAfterAtomic.load(std::memory_order_relaxed))
+            {
+                g_processed = packet;
+                serviceReadback();
+            }
+        }
+    }
+    g_statDrainNs += statNow() - drainStart;
+    g_processed = batchEnd;
+    serviceReadback();
+}
+
 void drainQueue()
 {
     uint64_t batchEnd;
     {
         std::lock_guard<std::mutex> lock(g_queueMutex);
+        if (!g_jobs.empty())
+            return; // frames handed over come first (render thread)
         if (g_queue.empty())
         {
             g_processed = g_enqueued;
@@ -483,27 +740,10 @@ void drainQueue()
         batchEnd = g_enqueued;
     }
     g_queueDrained.notify_all();
-    if (g_gs)
-    {
-        size_t at = 0;
-        while (at + 4 <= g_draining.size())
-        {
-            uint32_t size;
-            std::memcpy(&size, g_draining.data() + at, 4);
-            if (g_capFile)
-            {
-                std::fwrite(g_draining.data() + at, 1, 4u + size, g_capFile);
-                g_capBytes += 4u + size;
-            }
-            g_gs->gif_transfer(3, g_draining.data() + at + 4, size);
-            at += 4 + size;
-        }
-    }
+    feedPackets(g_draining, batchEnd);
     g_draining.clear();
     if (g_draining.capacity() > (64u << 20))
         g_draining.shrink_to_fit();
-    g_processed = batchEnd;
-    serviceReadback();
 }
 
 void tapRegister(uint8_t reg, uint64_t value, void *)
@@ -1035,14 +1275,26 @@ void renderBlit(CommandBuffer &cmd, const ImageView &view, float x, float y, flo
     cmd.draw(3);
 }
 
-void copyPrivRegisters(const GSRegisters &src)
+PrivSnapshot snapshotPriv(const GSRegisters &src)
 {
-    PrivRegisterState &dst = g_gs->get_priv_register_state();
+    PrivSnapshot p;
     const uint64_t regs[] = {src.pmode,  src.smode1,   src.smode2,   src.srfsh,    src.synch1,
                              src.synch2, src.syncv,    src.dispfb1,  src.display1, src.dispfb2,
                              src.display2, src.extbuf, src.extdata,  src.extwrite, src.bgcolor};
-    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); ++i)
+    std::memcpy(p.regs, regs, sizeof(regs));
+    return p;
+}
+
+void copyPrivRegisters(const PrivSnapshot &snap)
+{
+    PrivRegisterState &dst = g_gs->get_priv_register_state();
+    const uint64_t *regs = snap.regs;
+    for (size_t i = 0; i < 15; ++i)
         dst.qwords_lo[i * 2] = regs[i];
+    struct
+    {
+        uint64_t smode1, smode2;
+    } src = {regs[1], regs[2]};
     // The runtime's SetGsCrt does not fill in SMODE1/SMODE2 the way the BIOS
     // does; paraLLEl-GS needs them to pick the video mode. KH2 runs NTSC
     // interlaced: SMODE1 LC=32 (bits 3-9), CMOD=NTSC (bits 13-14); SMODE2 INT.
@@ -1077,6 +1329,48 @@ struct RateCounter
     }
 };
 RateCounter g_guestRate, g_presentRate;
+
+#if defined(__ANDROID__)
+// GPU time per paraLLEl-GS stage (and its CPU-side waits), every 3 seconds:
+// "[gpu] shading 9.81 ms/frame (x14.2)" = 9.81 ms of GPU time per presented
+// frame, in 14.2 dispatches per frame on average.
+void logGpuTimes(Device &dev)
+{
+    static double s_last = 0.0;
+    const double now = nowSeconds();
+    if (s_last == 0.0)
+        s_last = now;
+    if (now - s_last < 3.0)
+        return;
+    s_last = now;
+    std::string line = "[gpu]";
+    dev.timestamp_log([&](const std::string &tag, const TimestampIntervalReport &r) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), " | %s %.2f ms (x%.1f)", tag.c_str(), 1000.0 * r.time_per_frame_context,
+                      r.accumulations_per_frame_context);
+        line += buf;
+    });
+    const double secs = 3.0;
+    std::printf("%s | game %.1f fps, present %.1f fps\n", line.c_str(), g_guestRate.rate, g_presentRate.rate);
+    std::string steps = "[frame] ms per second:";
+    for (int i = 0; i < 8; ++i)
+    {
+        char b[64];
+        std::snprintf(b, sizeof(b), " %s %.0f |", kStepNames[i], double(g_stepNs[i].exchange(0)) / 1e6 / secs);
+        steps += b;
+    }
+    std::printf("%s\n", steps.c_str());
+    std::printf("[cpu] readbacks %.1f/s (+%.1f/s from the previous frame, %.1f/s of them without a GPU read), guest waits %.1f ms/s for them (GPU side %.1f ms/s) | guest waits for a full "
+                "queue %.1f ms/s | render thread feeding paraLLEl-GS %.1f ms/s\n",
+                double(g_statReadbacks.exchange(0)) / secs, double(g_statReadbacksAsync.exchange(0) + g_statReadbacksSkipped.load()) / secs,
+                double(g_statReadbacksSkipped.exchange(0)) / secs,
+                double(g_statReadbackNs.exchange(0)) / 1e6 / secs,
+                double(g_statReadbackServeNs.exchange(0)) / 1e6 / secs, double(g_statQueueWaitNs.exchange(0)) / 1e6 / secs,
+                double(g_statDrainNs.exchange(0)) / 1e6 / secs);
+    dev.timestamp_log_reset();
+}
+#endif
+
 
 // ImGui 1.92 texture requests (the font atlas), as Granite images.
 void uiUpdateTextures(CommandBuffer &cmd)
@@ -1229,10 +1523,14 @@ void present()
         return;
 #endif
     if (!g_platform->g_inFrame)
+    {
+        StepTimer st(3);
         g_platform->g_inFrame = g_wsi->begin_frame();
+    }
     if (!g_platform->g_inFrame)
         return;
     Device &dev = g_wsi->get_device();
+    StepTimer stBlit(4);
     float vpX = 0, vpY = 0, vpW = 0, vpH = 0;
     if (g_last.image)
     {
@@ -1285,11 +1583,23 @@ void present()
     if (ui)
         uiDraw(*cmd, dev.get_swapchain_view().get_view_width(), dev.get_swapchain_view().get_view_height());
     cmd->end_render_pass();
-    dev.submit(cmd);
-    g_wsi->end_frame();
+    {
+        StepTimer st(5);
+        dev.submit(cmd);
+    }
+    {
+        StepTimer st(6);
+        g_wsi->end_frame();
+    }
     g_presentRate.tick(nowSeconds());
+#if defined(__ANDROID__)
+    logGpuTimes(dev);
+#endif
     // Begin the next frame right away, for pacing (as the PCSX2 integration does).
-    g_platform->g_inFrame = g_wsi->begin_frame();
+    {
+        StepTimer st(7);
+        g_platform->g_inFrame = g_wsi->begin_frame();
+    }
 }
 #endif
 } // namespace
@@ -1367,7 +1677,11 @@ bool init(const Options &options)
 {
     g_opt = options;
     registerThread();
+#if defined(__ANDROID__)
+    if (!Context::init_loader(reinterpret_cast<PFN_vkGetInstanceProcAddr>(kh2android::vulkanLoader())))
+#else
     if (!Context::init_loader(nullptr))
+#endif
     {
         std::fprintf(stderr, "[pgs] no Vulkan loader; using the software renderer\n");
         return false;
@@ -1385,6 +1699,9 @@ bool init(const Options &options)
         if (!g_wsi->init_simple(1, {}))
         {
             std::fprintf(stderr, "[pgs] Vulkan device/swapchain creation failed; using the software renderer\n");
+#if defined(__ANDROID__)
+            kh2android::vulkanFailed("no Vulkan device");
+#endif
             g_wsi.reset();
 #if defined(_WIN32)
             DestroyWindow(g_hwnd);
@@ -1412,6 +1729,16 @@ bool init(const Options &options)
         g_headlessDevice->set_context(*g_context);
         g_device = g_headlessDevice.get();
     }
+#if defined(__ANDROID__)
+    {
+        const auto &gp = g_device->get_gpu_properties();
+        const auto &df = g_device->get_device_features();
+        std::string info = gp.deviceName;
+        if (df.vk12_props.driverName[0])
+            info += std::string(", ") + df.vk12_props.driverName + " " + df.vk12_props.driverInfo;
+        kh2android::vulkanStarted(info);
+    }
+#endif
     loadPipelineCache();
     g_device->init_frame_contexts(12);
 
@@ -1433,6 +1760,9 @@ bool init(const Options &options)
     if (!g_gs->init(g_device, gsOpt))
     {
         std::fprintf(stderr, "[pgs] GS initialisation failed (missing GPU features?); using the software renderer\n");
+#if defined(__ANDROID__)
+        kh2android::vulkanFailed("paraLLEl-GS cannot run");
+#endif
         g_gs.reset();
         return false;
     }
@@ -1449,6 +1779,8 @@ bool init(const Options &options)
         // textures are uploaded, which is fine at native resolution.
         DebugMode dbg = {};
         dbg.disable_sampler_feedback = true;
+        // GPU time per stage, logged every few seconds (logGpuTimes).
+        dbg.timestamps = true;
         g_gs->set_debug_mode(dbg);
     }
 #endif
@@ -1491,6 +1823,13 @@ bool init(const Options &options)
     ps2SetGsReadback(&readbackFromGpu, nullptr);
     ps2SetSoftwareRasterEnabled(g_opt.keepSoftwareRaster);
     g_active = true;
+    g_renderThreadOn = options.renderThread;
+    if (g_renderThreadOn)
+    {
+        g_renderStop = false;
+        g_renderThread = std::thread(renderLoop);
+        std::printf("[pgs] render thread on\n");
+    }
     return true;
 }
 
@@ -1503,6 +1842,7 @@ void shutdown()
     ps2SetGifTap(nullptr, nullptr, nullptr);
     ps2SetGsReadback(nullptr, nullptr);
     ps2SetSoftwareRasterEnabled(true);
+    stopRenderThread();
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     g_device->wait_idle();
@@ -1576,24 +1916,27 @@ void applyPending()
     }
 }
 
-bool frame(const GSRegisters &priv, uint64_t vsyncTick)
+// One guest frame: its GIF packets (the job's, or what is queued), then
+// scanout and present. Under g_mutex.
+void processFrame(const PrivSnapshot &priv, uint64_t vsyncTick, FrameJob *job)
 {
-#if KH2_WSI
-    if (g_opt.windowed)
-        pumpMessages();
-#endif
-    if (!g_active)
-        return !g_closed;
     g_trace.vsync = vsyncTick;
+    auto drainForFrame = [job] {
+        if (job)
+        {
+            feedPackets(job->packets, job->end);
+            job->packets.clear();
+        }
+        else
+            drainQueue();
+    };
     {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        registerThread();
         {
             std::lock_guard<std::mutex> cap(g_capMutex);
             if (g_capState == 2)
             {
                 // Packets of the frame that just ended were drained before this call.
-                drainQueue();
+                drainForFrame();
                 std::fclose(g_capFile);
                 g_capFile = nullptr;
                 g_capState = 0;
@@ -1601,15 +1944,21 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
             }
             else if (g_capState == 1)
             {
-                drainQueue(); // the previous frame's tail stays out
+                drainForFrame(); // the previous frame's tail stays out
                 g_capFile = std::fopen(g_capPath.c_str(), "wb");
                 g_capBytes = 0;
                 g_capState = g_capFile ? 2 : 0;
             }
         }
-        drainQueue();
+        {
+            StepTimer st(0);
+            drainForFrame();
+        }
         savePipelineCache(false);
-        g_gs->flush();
+        {
+            StepTimer st(1);
+            g_gs->flush();
+        }
         // KH2_PGS_VRAM_DUMP=<tick>[,<tick>...]: writes paraLLEl-GS's VRAM
         // (4 MB, swizzled) to vram_<tick>.bin. Diagnostics only.
         if (const char *dump = std::getenv("KH2_PGS_VRAM_DUMP"))
@@ -1649,8 +1998,20 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
         info.dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         info.dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT;
         info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
-        g_last = g_gs->vsync(info);
+        {
+            StepTimer st(2);
+            g_last = g_gs->vsync(info);
+        }
         g_guestRate.tick(nowSeconds());
+#if defined(__ANDROID__)
+        {
+            static double s_lastFrame = 0.0;
+            const double t = nowSeconds();
+            if (s_lastFrame > 0.0)
+                kh2android::frameTimeHint(int64_t((t - s_lastFrame) * 1e9));
+            s_lastFrame = t;
+        }
+#endif
         g_lastLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 #if KH2_WSI
         if (g_opt.windowed)
@@ -1663,6 +2024,106 @@ bool frame(const GSRegisters &priv, uint64_t vsyncTick)
 #endif
             g_device->next_frame_context();
     }
+}
+
+// Hands a frame to the render thread; waits only while it is kMaxJobsAhead
+// frames behind.
+void postJob(const PrivSnapshot &priv, uint64_t tick, bool redraw)
+{
+    std::unique_lock<std::mutex> lock(g_queueMutex);
+    g_jobDone.wait(lock, [] { return g_jobs.size() < kMaxJobsAhead || g_renderStop.load(); });
+    if (g_renderStop)
+        return;
+    FrameJob job;
+    job.packets.swap(g_queue);
+    job.end = g_enqueued;
+    job.priv = priv;
+    job.tick = tick;
+    job.redraw = redraw;
+    g_jobs.push_back(std::move(job));
+    lock.unlock();
+    g_queueDrained.notify_all();
+    g_renderWake.notify_one();
+}
+
+void renderLoop()
+{
+#if defined(__ANDROID__) || defined(__linux__)
+    pthread_setname_np(pthread_self(), "PGS-Render");
+#endif
+    while (!g_renderStop)
+    {
+        FrameJob job;
+        bool haveJob = false;
+        {
+            std::unique_lock<std::mutex> lock(g_queueMutex);
+            g_renderWake.wait_for(lock, std::chrono::milliseconds(2),
+                                  [] { return g_renderStop.load() || !g_jobs.empty() || g_rbWake.load(); });
+            if (g_renderStop)
+                break;
+            if (!g_jobs.empty())
+            {
+                job = std::move(g_jobs.front());
+                g_jobs.pop_front();
+                haveJob = true;
+            }
+        }
+        if (haveJob)
+            g_jobDone.notify_all();
+        std::lock_guard<std::mutex> lock(g_mutex);
+        registerThread();
+        if (!g_gs)
+            continue;
+        if (!haveJob)
+        {
+            // Between frames: keep paraLLEl-GS fed, and serve readbacks.
+            g_rbWake = false;
+            drainQueue();
+        }
+        else if (job.redraw)
+        {
+            feedPackets(job.packets, job.end);
+            g_gs->flush();
+#if KH2_WSI
+            if (g_opt.windowed && g_clientW && g_clientH)
+                present();
+#endif
+        }
+        else
+            processFrame(job.priv, job.tick, &job);
+    }
+}
+
+void stopRenderThread()
+{
+    if (!g_renderThread.joinable())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_renderStop = true;
+    }
+    g_renderWake.notify_all();
+    g_jobDone.notify_all();
+    g_renderThread.join();
+    g_renderThreadOn = false;
+}
+
+bool frame(const GSRegisters &priv, uint64_t vsyncTick)
+{
+#if KH2_WSI
+    if (g_opt.windowed)
+        pumpMessages();
+#endif
+    if (!g_active)
+        return !g_closed;
+    if (g_renderThreadOn)
+    {
+        postJob(snapshotPriv(priv), vsyncTick, false);
+        return !g_closed;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    registerThread();
+    processFrame(snapshotPriv(priv), vsyncTick, nullptr);
     return !g_closed;
 }
 
@@ -1773,7 +2234,9 @@ bool pumpWindow()
     if (g_opt.windowed)
         pumpMessages();
 #endif
-    if (g_active)
+    if (g_active && g_renderThreadOn)
+        g_renderWake.notify_one();
+    else if (g_active)
     {
         // Keep up between frames so a frame's worth never piles up.
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -1795,6 +2258,17 @@ bool redraw()
     if (now - last < 1.0 / 60.0)
         return !g_closed;
     last = now;
+    if (g_active && g_renderThreadOn)
+    {
+        bool idle;
+        {
+            std::lock_guard<std::mutex> q(g_queueMutex);
+            idle = g_jobs.empty();
+        }
+        if (idle)
+            postJob(PrivSnapshot{}, 0, true);
+        return !g_closed;
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
     if (g_active && g_clientW && g_clientH)

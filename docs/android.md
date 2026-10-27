@@ -28,3 +28,32 @@ it works with the D-pad/A or by touch. Text fields open an on-screen keypad.
 
 Settings are in `KH2/kh2recomp.ini`; the log is `KH2/logs/play.log` (also in
 logcat, tag `kh2`).
+
+## GPU driver
+
+Use Mesa's Turnip driver for Adreno: it is much faster here than the
+Qualcomm driver (about 45 fps against 15 in a crowded Twilight Town street
+on an AYN Thor). Download a Turnip package made for Android emulators (a .zip
+with meta.json; tested: Turnip T28 by Mr_Purple_666), then in the menu:
+GPU driver, Choose driver file..., pick the .zip, Close app, open it again.
+"Use system driver" goes back. A driver that cannot run the renderer is
+dropped automatically (the app closes; open it again).
+
+## Performance notes
+
+- The renderer runs on a thread of its own on Android (`render-thread = 1`,
+  the default there). The guest stays at most two frames ahead of it.
+- Turnip on Qualcomm's kernel driver: zero-timeout timestamp polls waited for
+  the GPU; android_kgsl_hook.c patches the driver's ioctl() to answer them at
+  once. paraLLEl-GS uses fences instead of timeline semaphores with Turnip.
+- Adreno: one GPU queue for everything; the hierarchical binner is off (it left
+  rows of tiles unrendered); the sampler-feedback pass is off (does not link on
+  Qualcomm's driver).
+- KH2 reads a 32x8 depth patch back every frame (the sun's lens flare); on
+  Android the game gets the previous result and only every 8th read reaches
+  the GPU.
+- The log has GPU time per stage (`[gpu]`), frame steps (`[frame]`) and the
+  driver hook's counts (`kh2-kgsl`) every 3 s. With USB debugging,
+  `simpleperf record --app com.kh2coop.recomp` profiles it (the APK is
+  profileable).
+- Movies are skipped: the Android build has no MPEG decoder yet.

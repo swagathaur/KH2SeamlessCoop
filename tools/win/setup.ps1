@@ -145,6 +145,15 @@ if ($diff) {
         Say '  Applied the renderer changes.' 'Green'
     }
 }
+# ... and those to Granite (its Vulkan layer, a library inside it).
+$gdiff = (Resolve-Path patches\parallel-gs\granite.diff -ErrorAction SilentlyContinue).Path
+if ($gdiff) {
+    & git -C "$pgs\Granite" apply --check --reverse --whitespace=nowarn $gdiff 2>$null
+    if ($LASTEXITCODE) {
+        & git -C "$pgs\Granite" apply --whitespace=nowarn $gdiff
+        if ($LASTEXITCODE) { Fail "Could not apply $gdiff to $pgs\Granite (it has other local changes?)." }
+    }
+}
 
 # ---- 3. PC release --------------------------------------------------------------------
 Step '3/5  KINGDOM HEARTS HD 1.5+2.5 ReMIX (Steam or Epic), for English text and HD textures'

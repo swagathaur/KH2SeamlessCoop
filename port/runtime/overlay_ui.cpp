@@ -29,6 +29,7 @@
 #include "movie_eof.h"
 #include "cutscene_skip.h"
 #include "pgs_renderer.h"
+#include "android_host.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_native_iop.h"
@@ -374,6 +375,9 @@ void draw()
     if (ImGui::Checkbox("Show game state (F3)", &hud))
         kh2pgs::setHudVisible(hud);
 
+#if defined(__ANDROID__)
+    kh2android::drawDriverMenu();
+#endif
     ImGui::SeparatorText("Sound");
     int vol = int(g_opt.volume * 100.0f + 0.5f);
     if (ImGui::SliderInt("Volume", &vol, 0, 100, "%d%%"))

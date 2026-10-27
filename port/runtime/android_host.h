@@ -80,6 +80,27 @@ Touch touch();
 
 // The data folder found by prepare(), e.g. /storage/emulated/0/KH2.
 const std::string &dataDir();
+
+// The app's private storage (e.g. /data/user/0/<package>/files) and the folder
+// its native libraries were unpacked to.
+std::string internalDataDir();
+std::string nativeLibraryDir();
+// Closes the app (the player reopens it, e.g. after choosing a GPU driver).
+void closeApp();
+
+// GPU driver (android_driver.cpp): vkGetInstanceProcAddr of the driver chosen in
+// the menu, or null for the system one; vulkanStarted() once the device exists.
+void *vulkanLoader();
+void vulkanStarted(const std::string &deviceInfo);
+// The GPU renderer could not start: with a chosen driver, that choice is
+// dropped and the app closes (the next start uses the system driver).
+void vulkanFailed(const char *why);
+// The menu section for it (ImGui, inside the settings window).
+void drawDriverMenu();
+
+// Once per presented frame: the frame's duration, for Android's performance hint
+// (the CPU governor raises the game threads' clocks when frames run late).
+void frameTimeHint(int64_t frameNs);
 } // namespace kh2android
 
 #endif

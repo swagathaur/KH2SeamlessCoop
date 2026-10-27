@@ -25,6 +25,7 @@ Say '== Getting the latest version ...' 'White'
 $pinRecomp = (& git rev-parse HEAD:third_party/PS2Recomp 2>$null)
 $pinPgs = (& git rev-parse HEAD:third_party/parallel-gs 2>$null)
 $pgsDiffBefore = (& git rev-parse HEAD:patches/parallel-gs/tree.diff 2>$null)
+$graniteDiffBefore = (& git rev-parse HEAD:patches/parallel-gs/granite.diff 2>$null)
 $old = (& git rev-parse HEAD)
 & git pull --ff-only
 if ($LASTEXITCODE) {
@@ -49,7 +50,8 @@ if ((& git rev-parse HEAD:third_party/PS2Recomp) -ne $pinRecomp) {
     if ($LASTEXITCODE) { Fail 'Could not update third_party\PS2Recomp (see above).' }
 }
 $pgsMoved = (& git rev-parse HEAD:third_party/parallel-gs) -ne $pinPgs
-$pgsDiffChanged = (& git rev-parse HEAD:patches/parallel-gs/tree.diff 2>$null) -ne $pgsDiffBefore
+$pgsDiffChanged = ((& git rev-parse HEAD:patches/parallel-gs/tree.diff 2>$null) -ne $pgsDiffBefore) -or
+                  ((& git rev-parse HEAD:patches/parallel-gs/granite.diff 2>$null) -ne $graniteDiffBefore)
 if ($pgsMoved -or $pgsDiffChanged) {
     Say '  The renderer library or its changes moved ...'
     & git -C $pgs reset -q --hard
@@ -62,6 +64,14 @@ if ($pgsDiff) {
     if ($LASTEXITCODE) {
         & git -C $pgs apply --whitespace=nowarn $pgsDiff
         if ($LASTEXITCODE) { Fail "Could not apply $pgsDiff to $pgs." }
+    }
+}
+$graniteDiff = (Resolve-Path patches\parallel-gs\granite.diff -ErrorAction SilentlyContinue).Path
+if ($graniteDiff) {
+    & git -C "$pgs\Granite" apply --check --reverse --whitespace=nowarn $graniteDiff 2>$null
+    if ($LASTEXITCODE) {
+        & git -C "$pgs\Granite" apply --whitespace=nowarn $graniteDiff
+        if ($LASTEXITCODE) { Fail "Could not apply $graniteDiff to $pgs\Granite." }
     }
 }
 

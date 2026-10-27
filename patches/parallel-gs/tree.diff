@@ -362,7 +362,7 @@ index 9f05da8..a3967a1 100644
  	std::vector<uint32_t> sync_host_vram_blocks;
  	std::vector<uint32_t> sync_vram_host_pages;
 diff --git a/gs/gs_renderer.cpp b/gs/gs_renderer.cpp
-index dbe032d..f9edb61 100644
+index dbe032d..08fd2a3 100644
 --- a/gs/gs_renderer.cpp
 +++ b/gs/gs_renderer.cpp
 @@ -3,6 +3,7 @@
@@ -373,7 +373,76 @@ index dbe032d..f9edb61 100644
  #include "gs_renderer.hpp"
  #include "logging.hpp"
  #include "gs_interface.hpp"
-@@ -860,6 +861,18 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
+@@ -24,6 +25,22 @@
+ #pragma GCC diagnostic ignored "-Wformat-security"
+ #endif
+ 
++#ifdef __ANDROID__
++// kh2recomp (Android): Turnip on Qualcomm's kernel driver emulates timeline
++// semaphores, and signalling one waited for earlier GPU work at every flush.
++// There, paraLLEl-GS's own progress is a fence per flush instead, waited for
++// by the PGS-Waiter thread (see flush_submit, init and the waiter).
++#include <atomic>
++#include <deque>
++struct KH2FencePoint
++{
++	uint64_t value;
++	uint64_t descriptor_value;
++	Vulkan::Fence fence;
++};
++static std::deque<KH2FencePoint> kh2_fences; // under timeline_lock
++static std::atomic<uint64_t> kh2_descriptor_done{0};
++#endif
+ namespace ParallelGS
+ {
+ // If we've seen a normal render pass, just flush right away.
+@@ -771,8 +788,27 @@ GSRenderer::GSRenderer(PageTracker &tracker_)
+ 			if (last_submitted_timeline == UINT64_MAX)
+ 				break;
+ 
+-			last_waited++;
+-			timeline->wait_timeline(last_waited);
++#ifdef __ANDROID__
++			if (!timeline)
++			{
++				KH2FencePoint point;
++				{
++					std::lock_guard<std::mutex> holder{timeline_lock};
++					if (kh2_fences.empty())
++						continue;
++					point = std::move(kh2_fences.front());
++					kh2_fences.pop_front();
++				}
++				point.fence->wait();
++				last_waited = point.value;
++				kh2_descriptor_done.store(point.descriptor_value, std::memory_order_release);
++			}
++			else
++#endif
++			{
++				last_waited++;
++				timeline->wait_timeline(last_waited);
++			}
+ 
+ 			{
+ 				std::lock_guard<std::mutex> holder{timeline_lock};
+@@ -840,8 +876,13 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
+ 			std::max<VkDeviceSize>(16, device->get_gpu_properties().limits.minStorageBufferOffsetAlignment);
+ 
+ 	init_vram(options);
+-	timeline = device->request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
+-	descriptor_timeline = device->request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
++#ifdef __ANDROID__
++	if (device->get_device_features().vk12_props.driverID != VK_DRIVER_ID_MESA_TURNIP)
++#endif
++	{
++		timeline = device->request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
++		descriptor_timeline = device->request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
++	}
+ 	init_luts();
+ 
+ 	kick_compilation_tasks();
+@@ -860,6 +901,18 @@ bool GSRenderer::init(Vulkan::Device *device_, const GSOptions &options)
  		}
  	}
  
@@ -392,7 +461,50 @@ index dbe032d..f9edb61 100644
  	LOGI("Using image slab size of %llu MiB.\n",
  	     static_cast<unsigned long long>(max_image_slab_size / (1024 * 1024)));
  	LOGI("Using max allocated image memory per flush of %llu MiB.\n",
-@@ -2539,6 +2552,17 @@ void GSRenderer::dispatch_read_aliased_depth_passes(Vulkan::CommandBuffer &cmd,
+@@ -1194,6 +1247,18 @@ void GSRenderer::flush_submit(uint64_t value)
+ 	if (direct_cmd)
+ 		device->submit(direct_cmd);
+ 
++#ifdef __ANDROID__
++	if (value && !timeline)
++	{
++		Vulkan::Fence fence;
++		device->submit_empty(Vulkan::CommandBuffer::Type::Generic, &fence, nullptr);
++		std::lock_guard<std::mutex> holder{timeline_lock};
++		kh2_fences.push_back({ value, next_descriptor_timeline_signal++, std::move(fence) });
++		last_submitted_timeline = value;
++		timeline_cond.notify_all();
++	}
++	else
++#endif
+ 	if (value)
+ 	{
+ 		auto binary = device->request_timeline_semaphore_as_binary(*timeline, value);
+@@ -1627,7 +1692,12 @@ void GSRenderer::ensure_command_buffer(Vulkan::CommandBufferHandle &cmd, Vulkan:
+ 
+ Vulkan::BindlessDescriptorPoolHandle GSRenderer::get_bindless_pool()
+ {
++#ifdef __ANDROID__
++	uint64_t progress = descriptor_timeline ? query_timeline(*descriptor_timeline)
++	                                        : kh2_descriptor_done.load(std::memory_order_acquire);
++#else
+ 	uint64_t progress = query_timeline(*descriptor_timeline);
++#endif
+ 
+ 	if (!exhausted_descriptor_pools.empty() && progress >= exhausted_descriptor_pools.front().timeline)
+ 	{
+@@ -1819,7 +1889,9 @@ void GSRenderer::allocate_scratch_buffers(Vulkan::CommandBuffer &cmd, const Rend
+ uint32_t GSRenderer::get_target_hierarchical_binning(
+ 		uint32_t num_primitives, uint32_t coarse_tiles_width, uint32_t coarse_tiles_height) const
+ {
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__ANDROID__)
++	// kh2recomp: on Android (Adreno, Qualcomm's driver and Turnip) the
++	// hierarchical binner left whole rows of tiles unrendered with many primitives.
+ 	// Broken Metal drivers can't deal with the hierarchical binning for some reason.
+ 	return 1;
+ #endif
+@@ -2539,6 +2611,17 @@ void GSRenderer::dispatch_read_aliased_depth_passes(Vulkan::CommandBuffer &cmd,
  	}
  }
  
@@ -410,7 +522,7 @@ index dbe032d..f9edb61 100644
  void GSRenderer::dispatch_shading(Vulkan::CommandBuffer &cmd, const RenderPass &rp, uint32_t instance,
                                    uint32_t base_primitive, uint32_t num_primitives)
  {
-@@ -2668,6 +2692,7 @@ void GSRenderer::dispatch_shading(Vulkan::CommandBuffer &cmd, const RenderPass &
+@@ -2668,6 +2751,7 @@ void GSRenderer::dispatch_shading(Vulkan::CommandBuffer &cmd, const RenderPass &
  		base_primitive,
  		base_primitive + num_primitives - 1,
  		0, // Offset filled in later.
@@ -418,7 +530,7 @@ index dbe032d..f9edb61 100644
  	};
  
  	// First, dispatch any work which is not reliant on Z at all.
-@@ -4126,9 +4151,20 @@ void GSRenderer::transfer_overlap_barrier()
+@@ -4126,9 +4210,20 @@ void GSRenderer::transfer_overlap_barrier()
  	stats.num_copy_barriers++;
  }
  
@@ -440,7 +552,7 @@ index dbe032d..f9edb61 100644
  {
  	cmd.image_barrier(img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
  	                  0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-@@ -4149,17 +4185,15 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
+@@ -4149,17 +4244,15 @@ void GSRenderer::sample_crtc_circuit(Vulkan::CommandBuffer &cmd, const Vulkan::I
  		cmd.set_storage_buffer(0, 0, *buffers.gpu);
  
  	auto valid_extent = rect.valid_extent;
@@ -462,7 +574,7 @@ index dbe032d..f9edb61 100644
  
  	struct Registers
  	{
-@@ -4622,6 +4656,9 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4622,6 +4715,9 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  		}
  	}
  
@@ -472,7 +584,7 @@ index dbe032d..f9edb61 100644
  	if (EN1)
  	{
  		if (device->consumes_debug_markers())
-@@ -4643,13 +4680,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4643,13 +4739,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  
  		if (image_info.width && image_info.height)
  		{
@@ -489,7 +601,7 @@ index dbe032d..f9edb61 100644
  			device->set_name(*circuit1, "Circuit1");
  		}
  
-@@ -4701,13 +4735,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4701,13 +4794,10 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  
  		if (image_info.width && image_info.height)
  		{
@@ -506,7 +618,7 @@ index dbe032d..f9edb61 100644
  			device->set_name(*circuit2, "Circuit2");
  		}
  
-@@ -4763,11 +4794,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4763,11 +4853,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  		uint32_t horiz_resolution1 = circuit2 ? circuit2->get_width() : 0;
  
  		// Need to do all the CRTC offset math in single sampled domain to avoid lots of confusing cases later.
@@ -520,7 +632,7 @@ index dbe032d..f9edb61 100644
  
  		uint32_t magh1 = priv.display1.MAGH + 1;
  		uint32_t magh2 = priv.display2.MAGH + 1;
-@@ -4811,11 +4839,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4811,11 +4898,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  		auto effective_mode_width = mode_width;
  		auto effective_mode_height = mode_height;
  
@@ -534,7 +646,7 @@ index dbe032d..f9edb61 100644
  
  		bool is_raw_circuit1 =
  				circuit1 && !circuit2 && MMOD == PMODEBits::MMOD_ALPHA_ALP && ALP == 0xff &&
-@@ -4837,8 +4862,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4837,8 +4921,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  			                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
  			                  info.dst_stage, info.dst_access);
  
@@ -545,7 +657,7 @@ index dbe032d..f9edb61 100644
  			result.double_strike = double_strike;
  
  			flush_submit(0);
-@@ -4848,8 +4873,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4848,8 +4932,8 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  
  	result.internal_width = mode_width;
  	result.internal_height = mode_height;
@@ -556,7 +668,7 @@ index dbe032d..f9edb61 100644
  
  	if (field_aware_rendering)
  	{
-@@ -4920,10 +4945,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4920,10 +5004,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  
  			if (high_resolution_scanout)
  			{
@@ -572,7 +684,7 @@ index dbe032d..f9edb61 100644
  
  				if (field_aware_rendering && !info.phase)
  					vp.y -= 1.0f;
-@@ -4953,10 +4979,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
+@@ -4953,10 +5038,11 @@ ScanoutResult GSRenderer::vsync(const PrivRegisterState &priv, const VSyncInfo &
  
  			if (high_resolution_scanout)
  			{

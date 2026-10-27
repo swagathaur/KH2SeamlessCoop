@@ -14,6 +14,7 @@
 #include <android/native_window.h>
 #include <android/window.h>
 #include <android_native_app_glue.h>
+#include <dlfcn.h>
 #include <jni.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -497,6 +499,116 @@ void writeDefaultSettings(const fs::path &dir)
     std::fclose(f);
 }
 } // namespace
+
+// ---- Performance hint (Android 13+, APerformanceHint via dlsym) ---------------
+// The emulated PS2's threads hand work to each other, so none looks fully busy
+// and the governor kept the big cores at about 60% clock. The hint session
+// tells it the 16.7 ms target and how long frames really take.
+namespace
+{
+struct APerformanceHintManager;
+struct APerformanceHintSession;
+using GetManagerFn = APerformanceHintManager *(*)();
+using CreateSessionFn = APerformanceHintSession *(*)(APerformanceHintManager *, const int32_t *, size_t, int64_t);
+using ReportFn = int (*)(APerformanceHintSession *, int64_t);
+using UpdateTargetFn = int (*)(APerformanceHintSession *, int64_t);
+using SetThreadsFn = int (*)(APerformanceHintSession *, const pid_t *, size_t);
+APerformanceHintSession *g_hint = nullptr;
+ReportFn g_hintReport = nullptr;
+SetThreadsFn g_hintSetThreads = nullptr;
+bool g_hintTried = false;
+size_t g_hintThreads = 0;
+
+std::vector<int32_t> gameThreads()
+{
+    std::vector<int32_t> tids;
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator("/proc/self/task", ec))
+    {
+        std::ifstream comm(e.path() / "comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "GameThread" || name == "Thread-2" || name == "PGS-Waiter" || name == "PGS-Render")
+            tids.push_back(std::atoi(e.path().filename().c_str()));
+    }
+    return tids;
+}
+} // namespace
+
+void frameTimeHint(int64_t frameNs)
+{
+    static int frames = 0;
+    ++frames;
+    if (!g_hintTried && frames > 120)
+    {
+        g_hintTried = true;
+        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+        auto getManager = lib ? reinterpret_cast<GetManagerFn>(dlsym(lib, "APerformanceHint_getManager")) : nullptr;
+        auto create = lib ? reinterpret_cast<CreateSessionFn>(dlsym(lib, "APerformanceHint_createSession")) : nullptr;
+        g_hintReport = lib ? reinterpret_cast<ReportFn>(dlsym(lib, "APerformanceHint_reportActualWorkDuration")) : nullptr;
+        g_hintSetThreads = lib ? reinterpret_cast<SetThreadsFn>(dlsym(lib, "APerformanceHint_setThreads")) : nullptr;
+        APerformanceHintManager *manager = getManager ? getManager() : nullptr;
+        const std::vector<int32_t> tids = gameThreads();
+        if (manager && create && g_hintReport && !tids.empty())
+            g_hint = create(manager, tids.data(), tids.size(), 16666667);
+        g_hintThreads = tids.size();
+        std::printf("[android] performance hint: %s (%zu threads)\n", g_hint ? "on" : "not available", tids.size());
+    }
+    if (!g_hint)
+        return;
+    if (g_hintSetThreads && (frames % 600) == 0)
+    {
+        // Threads come and go (the game starts some later).
+        const std::vector<int32_t> tids = gameThreads();
+        if (tids.size() != g_hintThreads)
+        {
+            g_hintThreads = tids.size();
+            g_hintSetThreads(g_hint, tids.data(), tids.size());
+        }
+    }
+    if (frameNs > 0)
+        g_hintReport(g_hint, frameNs);
+}
+
+std::string internalDataDir()
+{
+    return g_app && g_app->activity->internalDataPath ? g_app->activity->internalDataPath : "";
+}
+
+std::string nativeLibraryDir()
+{
+    Jni j;
+    jobject act = g_app->activity->clazz;
+    jclass actc = j.env->GetObjectClass(act);
+    jmethodID getInfo = j.env->GetMethodID(actc, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    jobject info = getInfo ? j.env->CallObjectMethod(act, getInfo) : nullptr;
+    std::string dir;
+    if (info)
+    {
+        jclass infoc = j.env->GetObjectClass(info);
+        jfieldID f = j.env->GetFieldID(infoc, "nativeLibraryDir", "Ljava/lang/String;");
+        jstring s = f ? (jstring)j.env->GetObjectField(info, f) : nullptr;
+        if (s)
+        {
+            const char *c = j.env->GetStringUTFChars(s, nullptr);
+            dir = c;
+            j.env->ReleaseStringUTFChars(s, c);
+        }
+    }
+    j.clear();
+    return dir;
+}
+
+void closeApp()
+{
+    std::printf("[android] closing\n");
+    std::fflush(stdout);
+    ANativeActivity_finish(g_app->activity);
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        _exit(0);
+    }).detach();
+}
 
 std::vector<std::string> prepare()
 {

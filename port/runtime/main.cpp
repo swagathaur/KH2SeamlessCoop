@@ -150,6 +150,11 @@ struct Options
     int localPlayers = 1;              // --local-players: start this many in all (host + windows)
     bool vsync = false;
     bool fsr = true;
+#if defined(__ANDROID__)
+    bool renderThread = true;
+#else
+    bool renderThread = false;
+#endif
     bool ssaaTextures = true;          // --no-ssaa-textures
     bool backbufferPromotion = false;  // --backbuffer-promotion
     bool noMipmaps = false;            // --no-mipmaps
@@ -249,6 +254,7 @@ void usage()
         "  --pad=N                 read the Nth connected controller (1-4; 0 none; default: the player number)\n"
         "  --vsync                 present in sync with the display's refresh\n"
         "  --no-fsr                bilinear upscale to the window instead of FSR 1 + sharpening\n"
+        "  --render-thread=0|1     feed the GPU renderer on a thread of its own (default: 1 on Android)\n"
         "  --no-ssaa-textures      super-sampling: let the game's full-screen effects drop to 1 sample\n"
         "  --backbuffer-promotion  super-sampling: show the source of the game's final scaling blit\n"
         "  --no-mipmaps            always sample the sharpest texture level\n"
@@ -435,6 +441,7 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a.rfind("--local-players=", 0) == 0) o.localPlayers = std::clamp(std::stoi(value(a)), 1, 3);
         else if (a == "--vsync") o.vsync = true;
         else if (a == "--no-fsr") o.fsr = false;
+        else if (a.rfind("--render-thread=", 0) == 0) o.renderThread = a.substr(16) != "0";
         else if (a == "--no-ssaa-textures") o.ssaaTextures = false;
         else if (a == "--backbuffer-promotion") o.backbufferPromotion = true;
         else if (a == "--no-mipmaps") o.noMipmaps = true;
@@ -1590,6 +1597,7 @@ int main(int argc, char **argv)
         g.fullscreen = opt.fullscreen;
         g.vsync = opt.vsync;
         g.fsr = opt.fsr;
+        g.renderThread = opt.renderThread;
         g.superSampledTextures = opt.ssaaTextures;
         g.backbufferPromotion = opt.backbufferPromotion;
         g.disableMipmaps = opt.noMipmaps;

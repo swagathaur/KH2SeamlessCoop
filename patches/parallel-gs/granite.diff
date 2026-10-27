@@ -1,0 +1,37 @@
+diff --git a/vulkan/context.cpp b/vulkan/context.cpp
+index ded8cab..0dc2653 100644
+--- a/vulkan/context.cpp
++++ b/vulkan/context.cpp
+@@ -1162,6 +1162,17 @@ bool Context::create_device(VkPhysicalDevice gpu_, VkSurfaceKHR surface,
+ 	queue_info.timestamp_valid_bits =
+ 			queue_props[queue_info.family_indices[QUEUE_INDEX_GRAPHICS]].queueFamilyProperties.timestampValidBits;
+ 
++#if defined(ANDROID) || defined(__ANDROID__)
++	// Adreno (Qualcomm's driver and Turnip on KGSL): a wait between two queues is
++	// done on the CPU at submit time, so every async upload stalled the submitting
++	// thread for a GPU round trip. One queue for everything there.
++	if (true)
++	{
++		queue_info.family_indices[QUEUE_INDEX_COMPUTE] = queue_info.family_indices[QUEUE_INDEX_GRAPHICS];
++		queue_indices[QUEUE_INDEX_COMPUTE] = queue_indices[QUEUE_INDEX_GRAPHICS];
++	}
++	else
++#endif
+ 	// Prefer standalone compute queue. If not, fall back to another graphics queue.
+ 	if (!find_vacant_queue(queue_info.family_indices[QUEUE_INDEX_COMPUTE], queue_indices[QUEUE_INDEX_COMPUTE],
+ 	                       VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT, 0.5f) &&
+@@ -1176,6 +1187,14 @@ bool Context::create_device(VkPhysicalDevice gpu_, VkSurfaceKHR surface,
+ 	// For transfer, try to find a queue which only supports transfer, e.g. DMA queue.
+ 	// If not, fallback to a dedicated compute queue.
+ 	// Finally, fallback to same queue as compute.
++#if defined(ANDROID) || defined(__ANDROID__)
++	if (true)
++	{
++		queue_info.family_indices[QUEUE_INDEX_TRANSFER] = queue_info.family_indices[QUEUE_INDEX_COMPUTE];
++		queue_indices[QUEUE_INDEX_TRANSFER] = queue_indices[QUEUE_INDEX_COMPUTE];
++	}
++	else
++#endif
+ 	if (!find_vacant_queue(queue_info.family_indices[QUEUE_INDEX_TRANSFER], queue_indices[QUEUE_INDEX_TRANSFER],
+ 	                       VK_QUEUE_TRANSFER_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0.5f) &&
+ 	    !find_vacant_queue(queue_info.family_indices[QUEUE_INDEX_TRANSFER], queue_indices[QUEUE_INDEX_TRANSFER],

@@ -52,7 +52,11 @@ $stage = Join-Path $out 'apk'
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$stage\lib\arm64-v8a", "$stage\compiled" | Out-Null
 $strip = Join-Path $ndk.FullName 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
-& $strip --strip-unneeded -o "$stage\lib\arm64-v8a\libkh2recomp.so" $so
+# --strip-debug keeps function names (for simpleperf and crash backtraces).
+& $strip --strip-debug -o "$stage\lib\arm64-v8a\libkh2recomp.so" $so
+# GPU driver loader hooks (libadrenotools)
+$hooks = Get-ChildItem (Join-Path $out 'android-hooks') -Filter '*.so'
+foreach ($h in $hooks) { & $strip --strip-unneeded -o "$stage\lib\arm64-v8a\$($h.Name)" $h.FullName }
 $aapt2 = Join-Path $bt.FullName 'aapt2.exe'
 & $aapt2 compile --dir android\res -o "$stage\compiled\res.zip"
 if ($LASTEXITCODE) { exit 1 }
@@ -61,7 +65,9 @@ if ($LASTEXITCODE) { exit 1 }
 if ($LASTEXITCODE) { exit 1 }
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open((Resolve-Path "$stage\base.apk"), 'Update')
-[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path "$stage\lib\arm64-v8a\libkh2recomp.so"), 'lib/arm64-v8a/libkh2recomp.so', 'Optimal') | Out-Null
+foreach ($lib in Get-ChildItem "$stage\lib\arm64-v8a" -Filter '*.so') {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $lib.FullName, "lib/arm64-v8a/$($lib.Name)", 'Optimal') | Out-Null
+}
 $zip.Dispose()
 & (Join-Path $bt.FullName 'zipalign.exe') -p -f 4 "$stage\base.apk" "$stage\aligned.apk"
 if ($LASTEXITCODE) { exit 1 }

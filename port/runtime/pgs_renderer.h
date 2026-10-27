@@ -40,6 +40,9 @@ struct Options
     bool keepSoftwareRaster = false;
     // Sharpened FSR upscale to the window instead of a bilinear blit.
     bool fsr = true;
+    // Feed paraLLEl-GS and present on a thread of its own, so the guest's vsync
+    // only hands its frame over (render-thread = 1; the default on Android).
+    bool renderThread = false;
     // Output aspect ratio; 0 means the game's own (4:3).
     float aspect = 0.0f;
 };

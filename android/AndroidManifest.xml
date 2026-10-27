@@ -29,6 +29,8 @@
         android:requestLegacyExternalStorage="true"
         android:isGame="true"
         android:appCategory="game">
+        <!-- Lets simpleperf (adb) profile it; no effect on play. -->
+        <profileable android:shell="true" />
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"

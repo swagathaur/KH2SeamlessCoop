@@ -270,7 +270,7 @@ target_include_directories(kh2_imgui PUBLIC ${kh2_imgui_src_SOURCE_DIR})
 # Android: the game is the app's native library (libkh2recomp.so, a
 # NativeActivity; tools/android/build-apk.ps1 packages it).
 if(ANDROID)
-    add_library(kh2recomp SHARED port/runtime/android_host.cpp)
+    add_library(kh2recomp SHARED port/runtime/android_host.cpp port/runtime/android_driver.cpp port/runtime/android_kgsl_hook.c)
 else()
     add_executable(kh2recomp)
 endif()
@@ -324,6 +324,22 @@ if(ANDROID)
     target_link_libraries(kh2recomp PRIVATE android log)
     # raylib's native-activity glue is the entry point.
     target_link_options(kh2recomp PRIVATE "-Wl,--undefined=ANativeActivity_onCreate" "-Wl,--gc-sections")
+endif()
+# libadrenotools (BSD-2): loads a GPU driver the player picked (e.g. Mesa Turnip)
+# instead of the system one. Its hook libraries go into the APK next to ours.
+if(ANDROID)
+    if(NOT CMAKE_ANDROID_ARCH_ABI)
+        set(CMAKE_ANDROID_ARCH_ABI ${ANDROID_ABI})
+    endif()
+    FetchContent_Declare(kh2_adrenotools
+        GIT_REPOSITORY https://github.com/bylaws/libadrenotools.git
+        GIT_TAG 8fae8ce254dfc1344527e05301e43f37dea2df80
+        GIT_SUBMODULES_RECURSE TRUE)
+    FetchContent_MakeAvailable(kh2_adrenotools)
+    target_link_libraries(kh2recomp PRIVATE adrenotools z)
+    set(KH2_ADRENO_HOOKS hook_impl main_hook file_redirect_hook gsl_alloc_hook)
+    set_target_properties(${KH2_ADRENO_HOOKS} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/android-hooks")
+    add_dependencies(kh2recomp ${KH2_ADRENO_HOOKS})
 endif()
 if(MSVC)
     target_compile_options(kh2recomp PRIVATE /W3)

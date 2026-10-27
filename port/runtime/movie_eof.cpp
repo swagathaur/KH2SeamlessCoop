@@ -44,7 +44,13 @@ bool g_skipOnce = false;
 unsigned g_streams = 0;
 } // namespace
 
+#if defined(__ANDROID__)
+// No MPEG decoder in the Android build yet (no FFmpeg): movies would be a black
+// screen, so they are always skipped there.
+void setSkip(bool) { g_skip = true; }
+#else
 void setSkip(bool skip) { g_skip = skip; }
+#endif
 bool skipping() { return g_skip; }
 bool playing() { return g_streaming; }
 void skipCurrent()

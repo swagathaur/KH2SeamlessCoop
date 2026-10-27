@@ -94,7 +94,8 @@ ScanoutResult g_last;
 // before it, so the GPU has a whole frame to finish it before Android takes the
 // buffer (its display queue waits for the previous frame's GPU work, and
 // presenting at once made CPU and GPU take turns). One frame more latency.
-ScanoutResult g_heldScanout;
+std::deque<ScanoutResult> g_heldScanouts;
+unsigned g_presentDelay = 1; // frames (2 tested: no better)
 VkImageLayout g_lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 Program *g_blitProgram = nullptr;
@@ -1874,7 +1875,7 @@ void shutdown()
     }
 #endif
     g_last = {};
-    g_heldScanout = {};
+    g_heldScanouts.clear();
     g_fsrTarget.reset();
     g_gs.reset();
     g_blitProgram = g_upscaleProgram = g_sharpenProgram = nullptr;
@@ -2011,8 +2012,10 @@ void processFrame(const PrivSnapshot &priv, uint64_t vsyncTick, FrameJob *job)
             ScanoutResult scan = g_gs->vsync(info);
             if (g_renderThreadOn)
             {
-                g_last = g_heldScanout.image ? g_heldScanout : scan;
-                g_heldScanout = std::move(scan);
+                g_heldScanouts.push_back(std::move(scan));
+                while (g_heldScanouts.size() > g_presentDelay + 1u)
+                    g_heldScanouts.pop_front();
+                g_last = g_heldScanouts.front();
             }
             else
                 g_last = std::move(scan);

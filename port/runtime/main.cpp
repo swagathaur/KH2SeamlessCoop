@@ -1377,7 +1377,18 @@ bool playPump(void *userData)
     kh2movie::poll(*h.runtime);
     kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
     kh2patches::tick(h.runtime->memory().getRDRAM());
-    kh2files::tick(h.runtime->memory().getRDRAM());
+    {
+        // The pump runs ~1000 times a second (and, with the render thread,
+        // no longer waits for frames); the file-override scan only has to keep
+        // up with the game loading files, and was a busy core's 10%.
+        static auto s_lastFilesTick = std::chrono::steady_clock::time_point{};
+        const auto nowTp = std::chrono::steady_clock::now();
+        if (nowTp - s_lastFilesTick >= std::chrono::milliseconds(4))
+        {
+            s_lastFilesTick = nowTp;
+            kh2files::tick(h.runtime->memory().getRDRAM());
+        }
+    }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (frame != h.lastGpuFrame)
     {

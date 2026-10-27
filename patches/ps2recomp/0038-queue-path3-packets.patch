@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0038 queue path 3 packets behind the DMA worker
+
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -342,6 +342,10 @@
+     void flushMaskedPath3Packets(bool drainImmediately = true);
+ 
+     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
++    // A path 3 packet (copied) behind the DMA worker's queued work, without
++    // waiting for that work: in order, as submitGifPacket from another thread
++    // after waitDmaIdle would be. Synchronous when no worker runs.
++    void queueGifPacketPath3(const uint8_t *data, uint32_t sizeBytes);
+     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2334,6 +2334,26 @@
+         m_gifArbiter->drain();
+ }
+ 
++void PS2Memory::queueGifPacketPath3(const uint8_t *data, uint32_t sizeBytes)
++{
++    if (!data || sizeBytes < 16)
++        return;
++    if (!m_dmaWorker.joinable() || onDmaWorkerThread())
++    {
++        submitGifPacket(GifPathId::Path3, data, sizeBytes);
++        return;
++    }
++    AsyncDmaJob job;
++    job.channel = 2u;
++    job.data.assign(data, data + sizeBytes);
++    {
++        std::lock_guard<std::mutex> lock(m_dmaMutex);
++        m_dmaInFlight.fetch_add(1u, std::memory_order_acq_rel);
++        m_dmaQueue.push_back(std::move(job));
++    }
++    m_dmaCv.notify_one();
++}
++
+ void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
+ {
+     if (!m_rdram || qwCount == 0)

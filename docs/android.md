@@ -56,4 +56,7 @@ dropped automatically (the app closes; open it again).
   driver hook's counts (`kh2-kgsl`) every 3 s. With USB debugging,
   `simpleperf record --app com.kh2coop.recomp` profiles it (the APK is
   profileable).
+- Texture uploads (sceGsExecLoadImage) queue behind the DMA worker's VIF1/VU1
+  work (patch 0038) instead of the EE waiting for it (a quarter of the EE's
+  time in crowded scenes on the Thor).
 - Movies are skipped: the Android build has no MPEG decoder yet.

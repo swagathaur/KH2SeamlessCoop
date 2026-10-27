@@ -102,7 +102,10 @@ void execLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     packet.resize(kHeaderBytes + bytes);
     std::memcpy(packet.data(), lp, kHeaderBytes);
     std::memcpy(packet.data() + kHeaderBytes, rdram + src, bytes);
-    runtime->memory().submitGifPacket(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()));
+    // Queued behind the DMA worker's VIF1/VU1 work (patch 0038) instead of
+    // waiting for it: the order is the same, and the EE no longer stalls on a
+    // busy VU1 (a quarter of its time in crowded scenes on Android).
+    runtime->memory().queueGifPacketPath3(packet.data(), static_cast<uint32_t>(packet.size()));
 
     static int logged = 0;
     if (logged < 400)

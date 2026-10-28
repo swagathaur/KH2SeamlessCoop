@@ -9,6 +9,31 @@ if ($drive -and $drive.Free -lt $need) {
     Write-Host ("Not enough free space on {0}: ({1:N1} GB free, the build needs about {2:N0} GB). Free some space and run it again." -f $drive.Root, ($drive.Free / 1GB), ($need / 1GB)) -ForegroundColor Red
     exit 1
 }
+# The GPU renderer's changes for this project (patches\parallel-gs): applied
+# if missing; an older version of them (pulled without "Update and rebuild")
+# is undone first, so the build never compiles against stale renderer code.
+function Sync-RendererDiff([string]$dir, [string]$diff) {
+    if (-not (Test-Path $diff) -or -not (Test-Path (Join-Path $dir '.git'))) { return }
+    $diff = (Resolve-Path $diff).Path
+    & git -C $dir apply --check --reverse --whitespace=nowarn $diff 2>$null
+    if (-not $LASTEXITCODE) { return } # already applied
+    & git -C $dir apply --check --whitespace=nowarn $diff 2>$null
+    if ($LASTEXITCODE) {
+        Write-Host "Resetting $dir to its pinned version for the current changes ..."
+        & git -C $dir reset -q --hard
+        & git -C $dir clean -fdq
+    }
+    & git -C $dir apply --whitespace=nowarn $diff
+    if ($LASTEXITCODE) {
+        Write-Host "Could not apply $diff to $dir (see above)." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Applied $diff."
+}
+Push-Location $root
+Sync-RendererDiff 'third_party\parallel-gs' 'patches\parallel-gs\tree.diff'
+Sync-RendererDiff 'third_party\parallel-gs\Granite' 'patches\parallel-gs\granite.diff'
+Pop-Location
 . "$PSScriptRoot\vsenv.ps1"
 New-Item -ItemType Directory -Force logs | Out-Null
 cmake -S . -B build\win -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | Select-String -Pattern 'kh2:|Error|error|Generating done' | Out-Host

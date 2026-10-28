@@ -69,7 +69,23 @@ for name in sys.argv[1:]:
         prologue = w >> 16 == 0x27BD and (w & 0xFFFF) >= 0x8000
         after_return = t - 8 >= BASE and (word(t - 8) == 0x03E00008 or
                                           (t in from_code and ends_flow(word(t - 8))))
+        # (in a gap: after any jr, e.g. a switch's jr $t5 before its first case)
+        jr_before = t - 8 >= BASE and (word(t - 8) & 0xFC1FFFFF) == 0x00000008
         own = owner(t)
+        # A function that does a little before making its frame (stores a
+        # vtable: lui/sw/addiu) was mapped from its frame: it starts here
+        # (gumibattle 0x01F52B78, gumimenu 0x01F526B0).
+        if own is None:
+            i = bisect.bisect_right(starts, t)
+            nxt = starts[i] if i < len(starts) else None
+            if nxt is not None and nxt - t <= 16 and all(
+                    word(a) >> 26 not in (1, 2, 3, 4, 5, 6, 7, 20, 21, 22, 23) and
+                    not (word(a) >> 26 == 0 and (word(a) & 0x3F) in (8, 9))
+                    for a in range(t, nxt, 4)):
+                funcs[t] = [f"{name}_FUN_{t:08x}", funcs.pop(nxt)[1]]
+                starts = sorted(funcs)
+                ptr_added += 1
+                continue
         if own is not None:
             if not (prologue or after_return):
                 continue
@@ -79,7 +95,10 @@ for name in sys.argv[1:]:
             p = t - 4
             while p >= BASE and owner(p) is None and word(p) == 0:
                 p -= 4
-            if not (prologue or owner(p) is not None):
+            # (or after a return, past any zero padding: a run of tiny leaf
+            # functions in a gap, such as gumimenu's 0x01F6CF50 destructor)
+            ret_before = p - 4 >= BASE and (word(p - 4) & 0xFC1FFFFF) == 0x00000008
+            if not (prologue or after_return or jr_before or ret_before or owner(p) is not None):
                 continue
             i = bisect.bisect_right(starts, t)
             nxt = starts[i] if i < len(starts) else limit

@@ -225,6 +225,7 @@ uint16_t weaponOf(const uint8_t *rdram, uint16_t entry)
 // in the game when the session ends.
 constexpr uint8_t kNobody = 0x12;
 constexpr uint8_t kWorldMap = 0x0F;
+constexpr size_t kRecordLevel = 0x0F; // a character save record's level byte
 constexpr uint8_t kFillCharacters[2] = {1, 2};      // Donald, Goofy
 constexpr uint16_t kFillEntries[2] = {0x005C, 0x005D}; // their objentries (P_EX020, P_EX030)
 struct Fill
@@ -385,6 +386,7 @@ struct State
     int32_t writtenHp = -1, writtenMp = -1;
     // Equipment: the character record we fill, its own contents, what we wrote.
     int character = -1;
+    int level = -1; // that character's level byte as last seen (stats)
     std::vector<uint8_t> ownRecord, wroteRecord;
     std::vector<uint8_t> inventory; // as it was while the record was ours
 };
@@ -472,6 +474,12 @@ void syncRecord(uint8_t *rdram, State &s, const Remote &r, uint8_t world)
     std::memcpy(want.data(), s.ownRecord.data(), 2);
     want[4] = rec[4];
     want[6] = rec[6];
+    // The level is this game's: a party member's level follows the player's
+    // EXP (save +0x36E0, the only EXP there is) on its own curve. With theirs
+    // written here, every EXP we got levelled the stand-in up again (a LEVEL
+    // UP after nearly every kill), and the full heal of each level-up went to
+    // them as a heal.
+    want[kRecordLevel] = rec[kRecordLevel];
     if (std::memcmp(rec, want.data(), kLoadoutSize) != 0)
         std::memcpy(rec, want.data(), kLoadoutSize);
     s.wroteRecord = want;
@@ -1136,9 +1144,16 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             const int32_t mpNow = rd<int32_t>(rdram, base + kh2state::addr::SlotMp);
             Heal h;
             h.playerId = r.playerId;
-            if (s.writtenHp >= 0 && hpNow != s.writtenHp && hpNow >= 0)
+            // A level-up of the stand-in's character here fills its HP and MP:
+            // that is no heal for them.
+            const int level = s.character >= 0 ? rd<uint8_t>(rdram, kSaveChars + uint32_t(s.character) * kLoadoutSize +
+                                                                         uint32_t(kRecordLevel))
+                                               : -1;
+            const bool levelled = level >= 0 && s.level >= 0 && level != s.level;
+            s.level = level;
+            if (s.writtenHp >= 0 && hpNow != s.writtenHp && hpNow >= 0 && !(levelled && hpNow > s.writtenHp))
                 h.hp = hpNow - s.writtenHp;
-            if (s.writtenMp >= 0 && mpNow > s.writtenMp)
+            if (s.writtenMp >= 0 && mpNow > s.writtenMp && !levelled)
                 h.mp = mpNow - s.writtenMp;
             if (h.hp != 0 || h.mp > 0)
                 heals.push_back(h);

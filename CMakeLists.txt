@@ -285,6 +285,7 @@ target_sources(kh2recomp PRIVATE
     port/runtime/local_players.cpp
     port/runtime/english_text.cpp
     port/runtime/databuff.cpp
+    port/runtime/image_slots.cpp
     port/runtime/gpu_sync.cpp
     port/runtime/file_override.cpp
     port/runtime/trace.cpp

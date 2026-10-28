@@ -81,7 +81,10 @@ FORWARD = """    {{ // tools/recomp.py: a tail jump (J) calls this directly; hon
         kh2_callingOriginal = false;
         const PS2Runtime::RecompiledFunction replacement =
             g_ps2RecompiledFunctionTable[(0x{addr}u - g_ps2RecompiledFunctionTableBase) >> 2];
-        if (!viaOriginal && replacement && replacement != &{name})
+        // Only a call (pc at the start): a function the runtime resumes after
+        // a call or a yield comes back in with pc at that label, and must go on
+        // there (sending it to the replacement ran it again from the start).
+        if (!viaOriginal && ctx->pc == 0x{addr}u && replacement && replacement != &{name})
         {{
             ctx->pc = 0x{addr}u;
             replacement(rdram, ctx, runtime);

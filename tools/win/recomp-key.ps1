@@ -9,5 +9,11 @@ $key = ($patches | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256)
 # ... and the function maps it translated from (config\functions*.csv).
 $maps = Get-ChildItem (Join-Path $root 'config') -Filter 'functions*.csv' | Sort-Object Name
 if ($maps) { $key += ';' + (($maps | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }) -join ',') }
+# ... and the functions port code replaces (tail jumps to them go through the table).
+$hle = Join-Path $root 'config\hle_functions.txt'
+if (Test-Path $hle) { $key += ';' + (Get-FileHash $hle -Algorithm SHA256).Hash }
+# ... and the script that writes them (forwarders, includes).
+$py = Join-Path $root 'tools\recomp.py'
+if (Test-Path $py) { $key += ';' + (Get-FileHash $py -Algorithm SHA256).Hash }
 if ($Save) { Set-Content -Path (Join-Path $root 'generated\.recompiler-patches') -Value $key -Encoding ascii }
 else { $key }

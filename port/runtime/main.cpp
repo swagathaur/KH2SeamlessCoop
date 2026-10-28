@@ -62,6 +62,7 @@
 #include "cutscene_skip.h"
 #include "english_text.h"
 #include "databuff.h"
+#include "image_slots.h"
 #include "gpu_sync.h"
 #include "hd_textures.h"
 #include "file_override.h"
@@ -1764,6 +1765,7 @@ int main(int argc, char **argv)
     if (opt.english)
         kh2english::install(runtime);
     kh2databuff::install(runtime);
+    kh2imageslots::install(runtime);
     // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by
     // default also pokes Dragon Quest VIII's libmpeg globals (patch 0004).
     ps2_stubs::setMpegLegacyGuestGlobals(false);

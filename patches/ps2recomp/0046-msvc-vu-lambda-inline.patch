@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0046 force-inline VU lambdas on MSVC too
+
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h b/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
+@@ -13,6 +13,11 @@
+ 
+ #if defined(__GNUC__) || defined(__clang__)
+ #define PS2_VU_INLINE_LAMBDA __attribute__((always_inline))
++#elif defined(_MSC_VER) && _MSC_VER >= 1934
++// MSVC left some of these as calls (a store helper in every compiled VU
++// program), which let the Frame's address escape and kept its cycle counter
++// in memory, reloaded and stored around every pair (patch 0046).
++#define PS2_VU_INLINE_LAMBDA [[msvc::forceinline]]
+ #else
+ #define PS2_VU_INLINE_LAMBDA
+ #endif

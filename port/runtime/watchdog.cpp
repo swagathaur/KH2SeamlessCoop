@@ -302,6 +302,129 @@ void stop()
 }
 } // namespace kh2watch
 
+#elif defined(__ANDROID__) || defined(__linux__)
+
+// Android / Linux: dumpNow() signals every thread of the process; each one
+// unwinds its own stack in the handler and logs it (logcat tag kh2-stacks on
+// Android) as library+offset, symbolised later with llvm-addr2line against the
+// unstripped library. Diagnostics only: the handler is not strictly
+// async-signal-safe, which is acceptable for a game that is already stuck.
+#include <dirent.h>
+#include <dlfcn.h>
+#include <semaphore.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <unwind.h>
+#include <cstring>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
+namespace kh2watch
+{
+namespace
+{
+constexpr int kDumpSignal = SIGURG; // ignored by default, unused by the game
+sem_t g_dumped;
+
+void logLine(const char *line)
+{
+#if defined(__ANDROID__)
+    __android_log_write(ANDROID_LOG_INFO, "kh2-stacks", line);
+#else
+    std::fprintf(stderr, "[stacks] %s\n", line);
+#endif
+}
+
+struct Frames
+{
+    uintptr_t pc[40];
+    int n;
+};
+
+_Unwind_Reason_Code collect(struct _Unwind_Context *ctx, void *arg)
+{
+    auto *f = static_cast<Frames *>(arg);
+    const uintptr_t pc = _Unwind_GetIP(ctx);
+    if (pc && f->n < 40)
+        f->pc[f->n++] = pc;
+    return f->n < 40 ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+
+void onDumpSignal(int)
+{
+    Frames f{};
+    _Unwind_Backtrace(&collect, &f);
+    char name[20] = {};
+    prctl(PR_GET_NAME, name);
+    char line[320];
+    std::snprintf(line, sizeof(line), "thread %ld (%s):", long(syscall(SYS_gettid)), name);
+    logLine(line);
+    for (int i = 0; i < f.n; ++i)
+    {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void *>(f.pc[i]), &info) && info.dli_fname)
+        {
+            const char *lib = std::strrchr(info.dli_fname, '/');
+            std::snprintf(line, sizeof(line), "  #%02d %s+0x%lx %s", i, lib ? lib + 1 : info.dli_fname,
+                          (unsigned long)(f.pc[i] - reinterpret_cast<uintptr_t>(info.dli_fbase)),
+                          info.dli_sname ? info.dli_sname : "");
+        }
+        else
+            std::snprintf(line, sizeof(line), "  #%02d 0x%lx", i, (unsigned long)f.pc[i]);
+        logLine(line);
+    }
+    sem_post(&g_dumped);
+}
+} // namespace
+
+void start(unsigned) {}
+void beat() {}
+void stop() {}
+
+void dumpNow()
+{
+    static bool installed = false;
+    if (!installed)
+    {
+        installed = true;
+        sem_init(&g_dumped, 0, 0);
+        struct sigaction sa{};
+        sa.sa_handler = &onDumpSignal;
+        sa.sa_flags = SA_RESTART;
+        sigaction(kDumpSignal, &sa, nullptr);
+    }
+    const pid_t self = pid_t(syscall(SYS_gettid));
+    onDumpSignal(0); // this thread first
+    sem_wait(&g_dumped);
+    if (DIR *d = opendir("/proc/self/task"))
+    {
+        while (dirent *e = readdir(d))
+        {
+            const pid_t tid = pid_t(std::atoi(e->d_name));
+            if (tid <= 0 || tid == self)
+                continue;
+            if (syscall(SYS_tgkill, getpid(), tid, kDumpSignal) != 0)
+                continue;
+            // A thread blocked with the signal masked never answers.
+            struct timespec until{};
+            clock_gettime(CLOCK_REALTIME, &until);
+            until.tv_nsec += 200 * 1000 * 1000;
+            if (until.tv_nsec >= 1000000000)
+            {
+                until.tv_sec += 1;
+                until.tv_nsec -= 1000000000;
+            }
+            sem_timedwait(&g_dumped, &until);
+        }
+        closedir(d);
+    }
+}
+
+void installCrashHandler(const char *) {}
+} // namespace kh2watch
+
 #else
 
 namespace kh2watch

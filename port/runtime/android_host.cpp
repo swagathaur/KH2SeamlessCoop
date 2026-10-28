@@ -528,7 +528,8 @@ std::vector<int32_t> gameThreads()
         std::ifstream comm(e.path() / "comm");
         std::string name;
         std::getline(comm, name);
-        if (name == "GameThread" || name == "Thread-2" || name == "PGS-Waiter" || name == "PGS-Render")
+        if (name == "GameThread" || name == "Thread-2" || name == "PGS-Waiter" || name == "PGS-Render" ||
+            name == "PS2-DMA")
             tids.push_back(std::atoi(e.path().filename().c_str()));
     }
     return tids;

@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0043 VIF1 UNPACK statistics (PS2_VIF_STATS=1)
+
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -562,6 +562,30 @@
+             std::vector<uint8_t> vifBefore, vifFast;
+             if (useFast && verifyFast)
+                 vifBefore.assign(m_vu1Data, m_vu1Data + PS2_VU1_DATA_SIZE);
++            {
++                // PS2_VIF_STATS=1: which UNPACK forms take the general path (diagnostics).
++                static const bool vifStats = std::getenv("PS2_VIF_STATS") != nullptr;
++                if (vifStats)
++                {
++                    static uint64_t counts[2][16][2][4] = {}; // fast, fmt, mask, mode
++                    static uint64_t fills = 0, total = 0;
++                    ++counts[useFast ? 1 : 0][fmt & 15u][maskEnable ? 1 : 0][vif1_regs.mode & 3u];
++                    if (cl < wl)
++                        ++fills;
++                    if ((++total & 0x3FFFFu) == 0)
++                    {
++                        std::fprintf(stderr, "[vif-stats] %llu UNPACKs, %llu with CL<WL; general path:", (unsigned long long)total,
++                                     (unsigned long long)fills);
++                        for (int f = 0; f < 16; ++f)
++                            for (int m = 0; m < 2; ++m)
++                                for (int md = 0; md < 4; ++md)
++                                    if (counts[0][f][m][md])
++                                        std::fprintf(stderr, " fmt%x%s mode%d=%llu", f, m ? "+mask" : "", md,
++                                                     (unsigned long long)counts[0][f][m][md]);
++                        std::fprintf(stderr, "\n");
++                    }
++                }
++            }
+             if (useFast)
+             {
+                 const uint8_t *src = data + pos;

@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0041 EE timers applied at their next event; isSpecialAddress always inlined
+
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -485,7 +485,13 @@
+                                  uint32_t tadr,
+                                  uint32_t chcr);
+ 
+-    static inline bool isSpecialAddress(uint32_t addr)
++#if defined(_MSC_VER) && !defined(__clang__)
++    // MSVC left this as a call in the largest translated functions (inlining
++    // budget), one per guest load or store.
++    static __forceinline bool isSpecialAddress(uint32_t addr)
++#else
++    static inline __attribute__((always_inline)) bool isSpecialAddress(uint32_t addr)
++#endif
+     {
+         return Ps2IsSpecialAddress(addr);
+     }
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -312,7 +312,19 @@
+ 
+     // EE timers advance from the scheduler's emulated EE-cycle clock. The
+     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+-    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
++    // Runs on every guest safe point, so (patch 0041) cycles only accumulate
++    // until the nearest interrupt is due, or a timer register is accessed:
++    // the timer arithmetic is exact, so applying them at once gives the same
++    // counts, flags and interrupt points.
++    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept
++    {
++        if (!m_anyEeTimerCued)
++            return 0u;
++        m_eeTimerPendingCycles += eeCycles;
++        if (m_eeTimerPendingCycles < m_eeTimerFlushAt)
++            return 0u;
++        return flushEeTimers();
++    }
+     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+     void resetEeTimers() noexcept;
+ 
+@@ -492,6 +504,13 @@
+     // the game never armed one.
+     bool m_anyEeTimerCued = false;
+     void refreshEeTimersCued() noexcept;
++    uint64_t m_eeTimerPendingCycles = 0u; // not yet applied to the timers
++    uint64_t m_eeTimerFlushAt = 0u;       // apply once this many are pending
++    uint32_t m_eeTimerLateInterrupts = 0u; // raised by an early sync, reported by the next advance
++    uint32_t applyEeTimerCycles(uint64_t eeCycles) noexcept;
++    uint32_t flushEeTimers() noexcept;
++    void syncEeTimers() noexcept; // before a timer register is read or written
++    uint64_t cyclesUntilNextEeTimerInterruptApplied() const noexcept;
+     void queueCompletedDmacCause(uint32_t cause);
+ 
+     // Async DMA (patch 0033).
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -409,6 +409,31 @@
+ {
+     m_eeTimers = {};
+     m_anyEeTimerCued = false;
++    m_eeTimerPendingCycles = 0u;
++    m_eeTimerFlushAt = 0u;
++    m_eeTimerLateInterrupts = 0u;
++}
++
++uint32_t PS2Memory::flushEeTimers() noexcept
++{
++    const uint32_t mask = applyEeTimerCycles(m_eeTimerPendingCycles) | m_eeTimerLateInterrupts;
++    m_eeTimerPendingCycles = 0u;
++    m_eeTimerLateInterrupts = 0u;
++    const uint64_t next = cyclesUntilNextEeTimerInterruptApplied();
++    // Counts are exact however far apart they are applied; still, apply at
++    // least every ~0.1 s of EE time so a count read is never far behind.
++    m_eeTimerFlushAt = std::min<uint64_t>(next, 30000000u);
++    return mask;
++}
++
++void PS2Memory::syncEeTimers() noexcept
++{
++    if (m_eeTimerPendingCycles != 0u)
++    {
++        m_eeTimerLateInterrupts |= applyEeTimerCycles(m_eeTimerPendingCycles);
++        m_eeTimerPendingCycles = 0u;
++    }
++    m_eeTimerFlushAt = 0u; // recomputed (and any late interrupt reported) at the next advance
+ }
+ 
+ void PS2Memory::refreshEeTimersCued() noexcept
+@@ -437,7 +462,7 @@
+     return m_pendingVifInterrupts.exchange(0u, std::memory_order_acq_rel);
+ }
+ 
+-uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
++uint32_t PS2Memory::applyEeTimerCycles(uint64_t eeCycles) noexcept
+ {
+     if (eeCycles == 0u || !m_anyEeTimerCued)
+     {
+@@ -528,6 +553,15 @@
+ 
+ uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+ {
++    // From the applied state, less what is pending.
++    const uint64_t nearest = cyclesUntilNextEeTimerInterruptApplied();
++    if (nearest == std::numeric_limits<uint64_t>::max())
++        return nearest;
++    return nearest > m_eeTimerPendingCycles ? nearest - m_eeTimerPendingCycles : 1u;
++}
++
++uint64_t PS2Memory::cyclesUntilNextEeTimerInterruptApplied() const noexcept
++{
+     if (!m_anyEeTimerCued)
+     {
+         return std::numeric_limits<uint64_t>::max();
+@@ -1176,6 +1210,7 @@
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        syncEeTimers();
+         EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {
+@@ -2691,6 +2726,7 @@
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        syncEeTimers();
+         const EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {

@@ -1,5 +1,6 @@
 #include "coop.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,9 @@ struct Remote
 std::mutex g_mutex; // tick() runs on the host loop, the UI reads from the render path
 Options g_opt;
 std::unique_ptr<kh2net::Session> g_session;
+// Whether g_session exists, readable without g_mutex: active() runs on every
+// pass of the host loop (~1000 a second) and almost always finds no session.
+std::atomic<bool> g_sessionExists{false};
 std::map<uint8_t, Remote> g_remotes;
 std::deque<std::string> g_log;
 uint64_t g_lastSentFrame = UINT64_MAX;
@@ -378,6 +382,7 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
 void makeSession()
 {
     g_session = std::make_unique<kh2net::Session>();
+    g_sessionExists.store(true, std::memory_order_release);
     g_remotes.clear();
     g_session->onLog = [](const std::string &s) { addLog(s); };
     g_session->onPeer = [](uint8_t id, const std::string &name, bool joined) {
@@ -526,6 +531,7 @@ void leave()
     if (g_session && g_session->active())
         addLog("left the session");
     g_session.reset();
+    g_sessionExists.store(false, std::memory_order_release);
     g_remotes.clear();
     kh2enemies::reset();
     g_sentLoadout.clear();
@@ -569,6 +575,13 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
         me.yaw = st.player.facing;
         me.model = uint16_t(st.player.entryId);
         me.weapon = kh2partner::localWeaponEntry(ram);
+        // Testing: another weapon than ours (KH2_TEST_PARTNER_WEAPON=077D, hex).
+        static const uint16_t testWeapon = [] {
+            const char *e = std::getenv("KH2_TEST_PARTNER_WEAPON");
+            return e ? uint16_t(std::strtoul(e, nullptr, 16)) : uint16_t(0);
+        }();
+        if (testWeapon && me.weapon)
+            me.weapon = testWeapon;
         me.motion = uint16_t(st.player.motion);
         me.hp = st.party[0].hp;
         me.maxHp = st.party[0].maxHp;
@@ -938,6 +951,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
 
 bool active()
 {
+    if (!g_sessionExists.load(std::memory_order_acquire))
+        return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_session && g_session->active();
 }

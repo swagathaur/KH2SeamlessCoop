@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0044 masked VIF1 UNPACKs on the fast path
+
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -555,7 +555,7 @@
+             // decoded lanes change, as in the general loop below.
+             const uint32_t fmt = (static_cast<uint32_t>(vl) << 2) | vn;
+             const bool fastFormat = vl != 3u || vn == 3u;
+-            const bool useFast = m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes && !maskEnable &&
++            const bool useFast = m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes &&
+                                  (vif1_regs.mode & 3u) == 0u && cl >= wl && fastFormat;
+             // PS2_VIF_VERIFY=1: also run the general decode and compare (diagnostics).
+             static const bool verifyFast = std::getenv("PS2_VIF_VERIFY") != nullptr;
+@@ -586,7 +586,70 @@
+                     }
+                 }
+             }
+-            if (useFast)
++            if (useFast && maskEnable)
++            {
++                // Masked (patch 0044): per field, the decoded value, ROW, COL
++                // or no write, from the mask row of the vector's place in the
++                // write cycle (rows past the fourth use the fourth).
++                uint8_t spec[4][4];
++                for (uint32_t m = 0; m < 4u; ++m)
++                    for (uint32_t f = 0; f < 4u; ++f)
++                        spec[m][f] = static_cast<uint8_t>((vif1_regs.mask >> ((m * 4u + f) * 2u)) & 3u);
++                const uint8_t *src = data + pos;
++                const uint32_t n = vn + 1u;
++                for (uint32_t w = 0; w < writeVectorCount; ++w, src += bytesPerVector)
++                {
++                    const uint32_t cyclePos = w % wl;
++                    const uint32_t destVec = cl == wl ? ((vuAddr + w) & 0x3FFu)
++                                                      : ((vuAddr + (w / wl) * cl + cyclePos) & 0x3FFu);
++                    uint8_t *dst = m_vu1Data + destVec * 16u;
++                    uint32_t cur[4], dec[4];
++                    std::memcpy(cur, dst, 16);
++                    std::memcpy(dec, cur, 16);
++                    if (vl == 0u)
++                        std::memcpy(dec, src, 4u * n);
++                    else if (vl == 1u)
++                        for (uint32_t c = 0; c < n; ++c)
++                        {
++                            uint16_t raw;
++                            std::memcpy(&raw, src + c * 2u, 2);
++                            dec[c] = zeroExtend ? uint32_t(raw) : uint32_t(int32_t(int16_t(raw)));
++                        }
++                    else if (vl == 2u)
++                        for (uint32_t c = 0; c < n; ++c)
++                            dec[c] = zeroExtend ? uint32_t(src[c]) : uint32_t(int32_t(int8_t(src[c])));
++                    else // V4-5
++                    {
++                        uint16_t packed;
++                        std::memcpy(&packed, src, 2);
++                        dec[0] = packed & 0x1Fu;
++                        dec[1] = (packed >> 5) & 0x1Fu;
++                        dec[2] = (packed >> 10) & 0x1Fu;
++                        dec[3] = (packed >> 15) & 0x01u;
++                    }
++                    if (n == 1u && vl != 3u)
++                        dec[1] = dec[2] = dec[3] = dec[0];
++                    const uint32_t m = cyclePos > 3u ? 3u : cyclePos;
++                    uint32_t out[4];
++                    for (uint32_t f = 0; f < 4u; ++f)
++                    {
++                        switch (spec[m][f])
++                        {
++                        case 0: out[f] = dec[f]; break;
++                        case 1: out[f] = vif1_regs.row[f]; break;
++                        case 2: out[f] = vif1_regs.col[m]; break;
++                        default: out[f] = cur[f]; break;
++                        }
++                    }
++                    std::memcpy(dst, out, 16);
++                }
++                if (verifyFast)
++                {
++                    vifFast.assign(m_vu1Data, m_vu1Data + PS2_VU1_DATA_SIZE);
++                    std::memcpy(m_vu1Data, vifBefore.data(), PS2_VU1_DATA_SIZE);
++                }
++            }
++            else if (useFast)
+             {
+                 const uint8_t *src = data + pos;
+                 const bool contiguous = cl == wl;

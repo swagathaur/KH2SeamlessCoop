@@ -256,11 +256,15 @@ void unfillAll(uint8_t *rdram)
 }
 
 // `wanted`: how many companions the other players need (0..2).
+std::atomic<bool> g_fillHeld{false}; // --fill-hold
+
 void fillParty(uint8_t *rdram, uint8_t world, size_t wanted)
 {
     static const bool off = [] { const char *e = std::getenv("KH2_NO_FILL"); return e && *e == '1'; }();
     if (off)
         wanted = 0; // diagnostics: the game's own party only
+    if (g_fillHeld.load(std::memory_order_relaxed))
+        return;
     if (world == 0 || world >= 0x20)
         return;
     bool changed = false;
@@ -1174,6 +1178,8 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     }
     return heals;
 }
+
+void holdFill(bool on) { g_fillHeld = on; }
 
 void reset(uint8_t *rdram)
 {

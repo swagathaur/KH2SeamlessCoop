@@ -1,6 +1,7 @@
 #include "file_override.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -149,18 +150,115 @@ size_t install(const std::vector<std::filesystem::path> &folders)
 
 size_t count() { return g_files.size(); }
 
+namespace
+{
+// What the last full pass over each index table found: its address and count,
+// and the entry each override was written to. While those entries still hold
+// the override (and the table has not moved), nothing needs searching: the
+// search was ~10% of a core at 250 passes a second with the English files.
+struct TablePass
+{
+    uint32_t table = 0, n = 0;
+    uint64_t sample = 0; // fingerprint of 256 spread-out entries (a table being loaded changes it)
+    uint32_t stablePasses = 0; // passes since the table last changed
+    size_t cursor = 0;         // next written entry to check
+    std::vector<std::pair<uint32_t, const Override *>> written; // entry address, override
+};
+TablePass g_pass[sizeof(kIndexTables) / sizeof(kIndexTables[0])];
+
+uint64_t sampleEntries(const uint8_t *rdram, uint32_t table, uint32_t n)
+{
+    // Entries at most n/256 apart (fewer than a disc sector's 128 entries
+    // for any table this size), so a sector of the table being read changes it.
+    uint64_t h = n;
+    const uint32_t step = std::max<uint32_t>(1, n / 256);
+    for (uint32_t i = 0; i < n; i += step)
+    {
+        const uint32_t e = table + 4 + i * 16;
+        h = (h ^ rd32(rdram, e) ^ (uint64_t(rd32(rdram, e + 8)) << 32)) * 0x100000001B3ull;
+    }
+    return h;
+}
+
+bool passStillValid(const uint8_t *rdram, TablePass &p, uint32_t table, uint32_t n)
+{
+    if (p.table != table || p.n != n)
+        return false;
+    // The fingerprint is ~800 scattered reads: every pass for 2 s after a
+    // change (a table being loaded), then every 16th (64 ms). The written
+    // entries are checked 64 a pass, in turn: reloading the table would undo
+    // all of them at once.
+    if ((p.stablePasses < 500 || (p.stablePasses & 15) == 0) && p.sample != sampleEntries(rdram, table, n))
+        return false;
+    const size_t count = p.written.size();
+    for (size_t k = 0; k < std::min<size_t>(64, count); ++k)
+    {
+        if (p.cursor >= count)
+            p.cursor = 0;
+        const auto &[entry, o] = p.written[p.cursor++];
+        if (rd32(rdram, entry) != o->h32 || rd32(rdram, entry + 8) != o->lbn || rd32(rdram, entry + 12) != o->size)
+            return false;
+    }
+    ++p.stablePasses;
+    return true;
+}
+} // namespace
+
 void tick(uint8_t *rdram)
 {
     if (g_files.empty())
         return;
-    for (uint32_t ptrAddr : kIndexTables)
+    static const bool stats = std::getenv("KH2_FILES_STATS") != nullptr;
+    struct Timed
     {
+        bool on;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timed()
+        {
+            if (!on)
+                return;
+            static uint64_t ns = 0, calls = 0;
+            static auto last = t0;
+            const auto t1 = std::chrono::steady_clock::now();
+            ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+            ++calls;
+            if (t1 - last > std::chrono::seconds(10))
+            {
+                std::printf("[files] %llu passes in 10 s, %.3f ms total\n", (unsigned long long)calls, double(ns) / 1e6);
+                ns = calls = 0;
+                last = t1;
+            }
+        }
+    } timed{stats};
+    for (size_t t = 0; t < sizeof(kIndexTables) / sizeof(kIndexTables[0]); ++t)
+    {
+        const uint32_t ptrAddr = kIndexTables[t];
         const uint32_t table = rd32(rdram, ptrAddr);
         if (table < 0x00100000u || table >= 0x02000000u)
             continue;
         const uint32_t n = rd32(rdram, table);
         if (n == 0 || n > kMaxEntries || table + 4 + n * 16 > 0x02000000u)
             continue;
+        TablePass &pass = g_pass[t];
+        if (passStillValid(rdram, pass, table, n))
+            continue;
+        {
+            // Diagnostics: KH2_FILES_STATS=1 logs each full pass's reason.
+            static const bool stats = std::getenv("KH2_FILES_STATS") != nullptr;
+            if (stats)
+                std::printf("[files] full pass, table %zu at %08x n %u (was %08x n %u, %zu written, %u stable)\n", t, table,
+                            n, pass.table, pass.n, pass.written.size(), pass.stablePasses);
+        }
+        pass.table = table;
+        pass.n = n;
+        pass.written.clear();
+        pass.stablePasses = 0;
+        struct SampleAfter // fingerprint the table as this pass leaves it
+        {
+            const uint8_t *ram;
+            TablePass &p;
+            ~SampleAfter() { p.sample = sampleEntries(ram, p.table, p.n); }
+        } sampleAfter{rdram, pass};
         const uint32_t first = table + 4;
         for (Override &o : g_files)
         {
@@ -188,6 +286,7 @@ void tick(uint8_t *rdram)
             }
             if (!hit || matches > 1)
                 continue;
+            pass.written.emplace_back(hit, &o);
             if (rd32(rdram, hit + 8) == o.lbn && rd32(rdram, hit + 12) == o.size)
                 continue; // done already
             const uint16_t block = uint16_t((rd16(rdram, hit + 6) & 0x8000) | ((o.sectors - 1) & 0x3FFF));

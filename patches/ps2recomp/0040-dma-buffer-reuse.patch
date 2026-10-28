@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0040 reuse DMA buffers; hand chain data over without a copy
+
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -502,7 +502,13 @@
+     };
+     void runGifTransfer(const PendingTransfer &p);
+     void runVif1Transfer(const PendingTransfer &p);
+-    std::vector<uint8_t> snapshotTransfer(const PendingTransfer &p);
++    std::vector<uint8_t> snapshotTransfer(PendingTransfer &p);
++    // Reused DMA buffers (patch 0040): a chain or snapshot takes one, the
++    // worker gives it back when its job is done. Fresh large buffers each
++    // time cost page faults and a reallocation copy per chain.
++    std::vector<uint8_t> takeDmaBuffer();
++    void recycleDmaBuffer(std::vector<uint8_t> &&buffer); // with m_dmaMutex held
++    std::vector<std::vector<uint8_t>> m_dmaBufferPool;
+     void applyAsyncCompletions();
+     void dmaWorkerMain();
+     void asyncDmaGuard(uint32_t address)
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1510,7 +1510,7 @@
+                     std::array<uint32_t, 4> cycleCheckpoint{tagAddr, asr0, asr1, asp};
+                     uint64_t cyclePower = 1u;
+                     uint64_t cycleDistance = 0u;
+-                    std::vector<uint8_t> chainBuf;
++                    std::vector<uint8_t> chainBuf = takeDmaBuffer();
+ 
+                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
+                     {
+@@ -1864,11 +1864,31 @@
+ 
+ // The bytes a transfer will send, copied now: the worker never reads guest
+ // memory the EE may already be refilling.
+-std::vector<uint8_t> PS2Memory::snapshotTransfer(const PendingTransfer &p)
++std::vector<uint8_t> PS2Memory::takeDmaBuffer()
+ {
++    std::lock_guard<std::mutex> lock(m_dmaMutex);
++    if (m_dmaBufferPool.empty())
++        return {};
++    std::vector<uint8_t> buffer = std::move(m_dmaBufferPool.back());
++    m_dmaBufferPool.pop_back();
++    buffer.clear();
++    return buffer;
++}
++
++void PS2Memory::recycleDmaBuffer(std::vector<uint8_t> &&buffer)
++{
++    // A few dozen, none huge: what a frame's chains use.
++    if (buffer.capacity() == 0 || buffer.capacity() > (8u << 20) || m_dmaBufferPool.size() >= 64)
++        return;
++    m_dmaBufferPool.push_back(std::move(buffer));
++}
++
++std::vector<uint8_t> PS2Memory::snapshotTransfer(PendingTransfer &p)
++{
++    // A chain was already copied at the kick; it is handed over, not copied again.
+     if (!p.chainData.empty())
+-        return p.chainData;
+-    std::vector<uint8_t> out;
++        return std::move(p.chainData);
++    std::vector<uint8_t> out = takeDmaBuffer();
+     if (p.qwc == 0)
+         return out;
+     uint32_t srcPhys = 0;
+@@ -1885,15 +1905,13 @@
+     uint64_t left = static_cast<uint64_t>(p.qwc) * 16ull;
+     if (left > limit)
+         left = limit;
+-    out.resize(static_cast<size_t>(left));
+-    size_t at = 0;
++    out.reserve(static_cast<size_t>(left));
+     while (left > 0)
+     {
+         if (srcPhys >= limit)
+             srcPhys = 0;
+         const uint32_t chunk = static_cast<uint32_t>(std::min<uint64_t>(left, limit - srcPhys));
+-        std::memcpy(out.data() + at, base + srcPhys, chunk);
+-        at += chunk;
++        out.insert(out.end(), base + srcPhys, base + srcPhys + chunk);
+         left -= chunk;
+         srcPhys += chunk;
+     }
+@@ -1967,6 +1985,7 @@
+         }
+         {
+             std::lock_guard<std::mutex> lock(m_dmaMutex);
++            recycleDmaBuffer(std::move(pt.chainData));
+             if (m_dmaInFlight.fetch_sub(1u, std::memory_order_acq_rel) == 1u)
+                 m_dmaIdleCv.notify_all();
+         }
+@@ -2130,9 +2149,9 @@
+         std::vector<AsyncDmaJob> jobs;
+         jobs.reserve(m_pendingGifTransfers.size() + m_pendingVif1Transfers.size());
+         // Same order as the synchronous path: GIF, then VIF1.
+-        for (const auto &p : m_pendingGifTransfers)
++        for (auto &p : m_pendingGifTransfers)
+             jobs.push_back({2u, snapshotTransfer(p)});
+-        for (const auto &p : m_pendingVif1Transfers)
++        for (auto &p : m_pendingVif1Transfers)
+             jobs.push_back({1u, snapshotTransfer(p)});
+         // Mode 3: the channel reports done at once; the worker still runs
+         // everything in order, and reads of what it owns wait for it.
+@@ -2345,6 +2364,7 @@
+     }
+     AsyncDmaJob job;
+     job.channel = 2u;
++    job.data = takeDmaBuffer();
+     job.data.assign(data, data + sizeBytes);
+     {
+         std::lock_guard<std::mutex> lock(m_dmaMutex);

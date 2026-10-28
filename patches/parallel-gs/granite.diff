@@ -1,5 +1,5 @@
 diff --git a/vulkan/context.cpp b/vulkan/context.cpp
-index ded8cab..0dc2653 100644
+index ded8cab..19f88c5 100644
 --- a/vulkan/context.cpp
 +++ b/vulkan/context.cpp
 @@ -1162,6 +1162,17 @@ bool Context::create_device(VkPhysicalDevice gpu_, VkSurfaceKHR surface,
@@ -35,3 +35,204 @@ index ded8cab..0dc2653 100644
  	if (!find_vacant_queue(queue_info.family_indices[QUEUE_INDEX_TRANSFER], queue_indices[QUEUE_INDEX_TRANSFER],
  	                       VK_QUEUE_TRANSFER_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0.5f) &&
  	    !find_vacant_queue(queue_info.family_indices[QUEUE_INDEX_TRANSFER], queue_indices[QUEUE_INDEX_TRANSFER],
+@@ -1759,6 +1778,17 @@ bool Context::create_device(VkPhysicalDevice gpu_, VkSurfaceKHR surface,
+ 			ADD_CHAIN(ext.present_id_features, PRESENT_ID_FEATURES_KHR);
+ 		}
+ 
++#ifdef ANDROID
++		// kh2: compiler statistics per pipeline (logged with KH2_SHADER_STATS=1,
++		// see pipeline_cache.cpp).
++		if (has_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME))
++		{
++			static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR kh2_pexec;
++			enabled_extensions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
++			ADD_CHAIN(kh2_pexec, PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR);
++		}
++#endif
++
+ 		if (has_extension(VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME))
+ 		{
+ 			enabled_extensions.push_back(VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME);
+diff --git a/vulkan/pipeline_cache.cpp b/vulkan/pipeline_cache.cpp
+index 473f29b..36aa531 100644
+--- a/vulkan/pipeline_cache.cpp
++++ b/vulkan/pipeline_cache.cpp
+@@ -22,6 +22,11 @@
+ 
+ #include "pipeline_cache.hpp"
+ #include "device.hpp"
++#include <algorithm>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
+ 
+ namespace Vulkan
+ {
+@@ -623,7 +628,88 @@ PipelineCache::create_pipeline_from_binaries(
+ 	return pipe;
+ }
+ 
++#ifdef ANDROID
++// kh2: with KH2_SHADER_STATS=1, log the driver's compiler statistics for each
++// compute pipeline (registers, instruction counts, spills, waves...), with its
++// SPIR-V size and specialization constants to tell variants apart.
++static bool kh2_shader_stats()
++{
++	static const bool on = [] { const char *e = getenv("KH2_SHADER_STATS"); return e && e[0] == '1'; }();
++	return on;
++}
++
++static void kh2_log_pipeline_stats(Device &device, VkPipeline pipe, const VkComputePipelineCreateInfo *info)
++{
++	auto &table = device.get_device_table();
++	if (!table.vkGetPipelineExecutablePropertiesKHR || !table.vkGetPipelineExecutableStatisticsKHR)
++		return;
++	VkPipelineInfoKHR pinfo = { VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR };
++	pinfo.pipeline = pipe;
++	uint32_t count = 0;
++	if (table.vkGetPipelineExecutablePropertiesKHR(device.get_device(), &pinfo, &count, nullptr) != VK_SUCCESS || !count)
++		return;
++	std::string spec;
++	if (info->stage.pSpecializationInfo)
++	{
++		auto *si = info->stage.pSpecializationInfo;
++		for (uint32_t i = 0; i < si->mapEntryCount; i++)
++		{
++			uint32_t v = 0;
++			memcpy(&v, static_cast<const uint8_t *>(si->pData) + si->pMapEntries[i].offset,
++			       std::min<size_t>(4, si->pMapEntries[i].size));
++			spec += " c" + std::to_string(si->pMapEntries[i].constantID) + "=" + std::to_string(v);
++		}
++	}
++	for (uint32_t e = 0; e < count; e++)
++	{
++		VkPipelineExecutableInfoKHR einfo = { VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR };
++		einfo.pipeline = pipe;
++		einfo.executableIndex = e;
++		uint32_t n = 0;
++		table.vkGetPipelineExecutableStatisticsKHR(device.get_device(), &einfo, &n, nullptr);
++		std::vector<VkPipelineExecutableStatisticKHR> stats(n);
++		for (auto &st : stats)
++			st.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
++		if (table.vkGetPipelineExecutableStatisticsKHR(device.get_device(), &einfo, &n, stats.data()) != VK_SUCCESS)
++			continue;
++		std::string line;
++		for (auto &st : stats)
++		{
++			line += " | ";
++			line += st.name;
++			line += "=";
++			switch (st.format)
++			{
++			case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: line += st.value.b32 ? "1" : "0"; break;
++			case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: line += std::to_string(st.value.i64); break;
++			case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: line += std::to_string(st.value.u64); break;
++			case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: line += std::to_string(st.value.f64); break;
++			default: break;
++			}
++		}
++		LOGI("[shader-stats] compute pipeline %p%s%s\n", (void *)pipe, spec.c_str(), line.c_str());
++	}
++}
++#endif
++
+ VkResult PipelineCache::create_pipeline(void *plain_info, VkPipelineCache cache, VkPipeline *pipe)
++{
++#ifdef ANDROID
++	auto *kh2_compute = static_cast<VkComputePipelineCreateInfo *>(plain_info);
++	if (kh2_shader_stats() && kh2_compute->sType == VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO &&
++	    device.get_device_table().vkGetPipelineExecutableStatisticsKHR)
++	{
++		kh2_compute->flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
++		VkResult vr = create_pipeline_kh2(plain_info, cache, pipe);
++		if (vr == VK_SUCCESS && *pipe)
++			kh2_log_pipeline_stats(device, *pipe, kh2_compute);
++		return vr;
++	}
++#endif
++	return create_pipeline_kh2(plain_info, cache, pipe);
++}
++
++VkResult PipelineCache::create_pipeline_kh2(void *plain_info, VkPipelineCache cache, VkPipeline *pipe)
+ {
+ 	*pipe = VK_NULL_HANDLE;
+ 	auto *graphics_info = static_cast<VkGraphicsPipelineCreateInfo *>(plain_info);
+diff --git a/vulkan/pipeline_cache.hpp b/vulkan/pipeline_cache.hpp
+index 7820d79..1f51519 100644
+--- a/vulkan/pipeline_cache.hpp
++++ b/vulkan/pipeline_cache.hpp
+@@ -44,6 +44,7 @@ public:
+ 	bool serialize(void *data, size_t size) const;
+ 
+ 	VkResult create_pipeline(void *info, VkPipelineCache cache, VkPipeline *pipe);
++	VkResult create_pipeline_kh2(void *info, VkPipelineCache cache, VkPipeline *pipe); // kh2: the original body
+ 
+ private:
+ 	Device &device;
+diff --git a/vulkan/query_pool.cpp b/vulkan/query_pool.cpp
+index 083c6e8..2f227cd 100644
+--- a/vulkan/query_pool.cpp
++++ b/vulkan/query_pool.cpp
+@@ -532,6 +532,8 @@ void TimestampIntervalManager::log_simple(const TimestampIntervalReportCallback
+ 			report.time_per_frame_context = timestamp.get_time_per_iteration();
+ 			report.accumulations_per_frame_context =
+ 					double(timestamp.get_total_accumulations()) / double(timestamp.get_total_frame_iterations());
++			report.total_time = timestamp.get_total_time();
++			report.total_accumulations = timestamp.get_total_accumulations();
+ 
+ 			if (func)
+ 			{
+diff --git a/vulkan/query_pool.hpp b/vulkan/query_pool.hpp
+index 3c2e79c..f5be102 100644
+--- a/vulkan/query_pool.hpp
++++ b/vulkan/query_pool.hpp
+@@ -190,6 +190,8 @@ struct TimestampIntervalReport
+ 	double time_per_accumulation;
+ 	double time_per_frame_context;
+ 	double accumulations_per_frame_context;
++	double total_time; // kh2: seconds since the last reset
++	uint64_t total_accumulations; // kh2
+ };
+ 
+ using TimestampIntervalReportCallback = std::function<void (const std::string &, const TimestampIntervalReport &)>;
+diff --git a/vulkan/wsi.cpp b/vulkan/wsi.cpp
+index 83a866f..6e6459c 100644
+--- a/vulkan/wsi.cpp
++++ b/vulkan/wsi.cpp
+@@ -26,6 +26,9 @@
+ #include <algorithm>
+ #include "timeline_trace_file.hpp"
+ 
++// kh2: time spent in end_frame_context and vkQueuePresentKHR (ns), read by the port's stats.
++uint64_t kh2_wsi_ns[2];
++
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+@@ -1697,7 +1700,9 @@ void WSI::set_next_present_is_duplicated()
+ 
+ bool WSI::end_frame()
+ {
++	auto kh2_t0 = Util::get_current_time_nsecs();
+ 	device->end_frame_context();
++	kh2_wsi_ns[0] += Util::get_current_time_nsecs() - kh2_t0;
+ 
+ 	// Take ownership of the release semaphore so that the external user can use it.
+ 	if (frame_is_external)
+@@ -1803,6 +1808,7 @@ bool WSI::end_frame()
+ 
+ 		auto present_ts = device->write_calibrated_timestamp();
+ 
++		auto kh2_p0 = Util::get_current_time_nsecs();
+ 		device->external_queue_lock();
+ 		emit_marker_pre_present();
+ #if defined(ANDROID) && defined(HAVE_SWAPPY)
+@@ -1812,6 +1818,7 @@ bool WSI::end_frame()
+ #endif
+ 		emit_marker_post_present();
+ 		device->external_queue_unlock();
++		kh2_wsi_ns[1] += Util::get_current_time_nsecs() - kh2_p0;
+ 
+ 		device->register_time_interval("WSI", std::move(present_ts), device->write_calibrated_timestamp(),
+ 			"present", next_present_id);

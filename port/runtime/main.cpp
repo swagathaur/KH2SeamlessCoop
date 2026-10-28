@@ -198,6 +198,8 @@ struct Options
     struct Poke { uint64_t frame; uint32_t addr; std::vector<uint8_t> bytes; };
     std::vector<Poke> pokes; // --poke=FRAME:ADDR:HEXBYTES
     uint64_t partnerTestAt = 0; // --partner-test=FRAME
+    uint64_t fillHoldFrom = 0, fillHoldTo = 0; // --fill-hold=FROM-TO: co-op party filling held off
+    uint64_t partnerTestOff = 0; // --partner-test-off=FRAME: the stand-in partner leaves (a player leaving)
 };
 
 void usage()
@@ -532,6 +534,15 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             }
         }
         else if (a.rfind("--partner-test=", 0) == 0) o.partnerTestAt = std::stoull(value(a));
+        else if (a.rfind("--fill-hold=", 0) == 0)
+        {
+            const std::string v = value(a);
+            const size_t dash = v.find('-');
+            if (dash == std::string::npos) return false;
+            o.fillHoldFrom = std::stoull(v.substr(0, dash));
+            o.fillHoldTo = std::stoull(v.substr(dash + 1));
+        }
+        else if (a.rfind("--partner-test-off=", 0) == 0) o.partnerTestOff = std::stoull(value(a));
         else if (a.rfind("--poke=", 0) == 0)
         {
             const std::string v = value(a);
@@ -1166,6 +1177,21 @@ bool harnessTick(Harness &h, uint64_t frame)
         kh2coop::setTestPartner(true);
         std::printf("[harness] stand-in partner on\n");
     }
+    if (o.fillHoldFrom && due(o.fillHoldFrom))
+    {
+        kh2partner::holdFill(true);
+        std::printf("[harness] party filling held\n");
+    }
+    if (o.fillHoldTo && due(o.fillHoldTo))
+    {
+        kh2partner::holdFill(false);
+        std::printf("[harness] party filling on again\n");
+    }
+    if (o.partnerTestOff && due(o.partnerTestOff))
+    {
+        kh2coop::setTestPartner(false);
+        std::printf("[harness] stand-in partner off\n");
+    }
     for (const auto &pk : o.pokes)
         if (due(pk.frame))
         {
@@ -1351,9 +1377,27 @@ bool headlessPump(void *userData)
     }
     kh2ui::tick();
     kh2movie::poll(*h.runtime);
-    kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
+    {
+        // Once per guest frame: it reads the game's state, and the host loop
+        // passes ~1000 times a second.
+        static uint64_t s_skipFrame = ~0ull;
+        if (frame != s_skipFrame)
+        {
+            s_skipFrame = frame;
+            kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
+        }
+    }
     kh2patches::tick(h.runtime->memory().getRDRAM());
-    kh2files::tick(h.runtime->memory().getRDRAM());
+    {
+        // As in playPump: the scan only has to keep up with the game loading files.
+        static auto s_lastFilesTick = std::chrono::steady_clock::time_point{};
+        const auto nowTp = std::chrono::steady_clock::now();
+        if (nowTp - s_lastFilesTick >= std::chrono::milliseconds(4))
+        {
+            s_lastFilesTick = nowTp;
+            kh2files::tick(h.runtime->memory().getRDRAM());
+        }
+    }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     if (kh2pgs::active() && frame != h.lastGpuFrame)
     {
@@ -1375,7 +1419,16 @@ bool playPump(void *userData)
         saveUserShot(h.screenshotDir);
     kh2input::poll(kh2pgs::windowFocused());
     kh2movie::poll(*h.runtime);
-    kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
+    {
+        // Once per guest frame: it reads the game's state, and the host loop
+        // passes ~1000 times a second.
+        static uint64_t s_skipFrame = ~0ull;
+        if (frame != s_skipFrame)
+        {
+            s_skipFrame = frame;
+            kh2skip::tick(h.runtime->memory().getRDRAM(), kh2input::skipHeldSeconds());
+        }
+    }
     kh2patches::tick(h.runtime->memory().getRDRAM());
     {
         // The pump runs ~1000 times a second (and, with the render thread,
@@ -1796,11 +1849,25 @@ int main(int argc, char **argv)
             kh2files::install(dirs);
     }
     runtime.run();
+    // A shutdown that hangs leaves every thread's stack (the host-loop
+    // watchdog is stopped by then).
+    std::atomic<bool> shutdownDone{false};
+    std::thread shutdownWatch([&shutdownDone] {
+        for (int i = 0; i < 600 && !shutdownDone.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!shutdownDone.load())
+        {
+            std::fprintf(stderr, "[kh2] shutdown has taken over a minute; thread stacks:\n");
+            kh2watch::dumpNow();
+        }
+    });
     kh2coop::shutdown();
     kh2watch::stop();
     kh2prof::stopAndReport();
     kh2vuhot::stop();
     kh2pgs::shutdown();
+    shutdownDone = true;
+    shutdownWatch.join();
 
     if (!opt.headless && !(opt.frames || opt.timeoutSeconds > 0))
         return 0;

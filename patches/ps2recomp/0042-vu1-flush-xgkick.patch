@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0042 VU1 flush: finish a lone XGKICK without per-cycle pipeline checks
+
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -225,7 +225,28 @@
+ void VU1Interpreter::flushPipelines()
+ {
+     while (pipelinesPending())
++    {
++        // Only PATH1 still busy (patch 0042): no store can reach VU memory
++        // any more, so its qwords move as advanceOneCycle would move them,
++        // one every second cycle and with the clock where a GIF callback
++        // looks, without the per-cycle checks of the other pipelines.
++        bool others = m_fdiv.valid ||
++                      (m_activeFlags | m_activeStores | m_activeVfWrites | m_activeViWrites | m_activeAccWrites) != 0u;
++        for (const ScalarPipelineEntry &entry : m_efu)
++            others = others || entry.valid;
++        if (m_xgkick.active && !others && m_activeVuData && m_activeVuDataSize != 0u)
++        {
++            while (m_xgkick.active)
++            {
++                m_cycle += 2u - std::min<uint32_t>(m_xgkick.cycleCredit, 1u);
++                m_xgkick.cycleCredit = 1u; // progressXgkick adds the cycle's credit: one qword moves
++                m_state.cycles = m_cycle;
++                progressXgkick();
++            }
++            continue;
++        }
+         advanceOneCycle();
++    }
+ }
+ 
+ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const

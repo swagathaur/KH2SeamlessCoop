@@ -39,6 +39,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/stat.h>
+#if defined(__ANDROID__)
+#include "fsr_fp16_spirv.h"
+#endif
 #include <memory>
 #include <chrono>
 #include <condition_variable>
@@ -73,8 +77,17 @@ using namespace ParallelGS;
 #define KH2_WSI 0
 #endif
 
+// Defined in Granite's wsi.cpp (patches/parallel-gs/granite.diff).
+extern uint64_t kh2_wsi_ns[2];
+namespace ParallelGS
+{
+extern uint32_t kh2_flush_reason_counts[8]; // gs_interface.cpp
+extern uint32_t kh2_hazard_counts[4];        // texture, CLUT, feedback
+}
+
 namespace kh2pgs
 {
+void applyTuningFile(); // below; Android tuning file
 void stopRenderThread();
 void renderLoop();
 namespace
@@ -172,7 +185,7 @@ std::thread g_renderThread;
 std::atomic<bool> g_renderStop{false};
 std::atomic<bool> g_rbWake{false};
 bool g_renderThreadOn = false;
-constexpr size_t kMaxJobsAhead = 2;
+size_t kMaxJobsAhead = 2; // KH2_JOBS_AHEAD overrides (Android tuning)
 // Where the time goes (logged with the GPU times): guest waits for readbacks
 // and for a full queue, and the render thread feeding paraLLEl-GS.
 // Main-thread frame steps (ns per 3 s): drain, flush, vsync, present parts.
@@ -195,6 +208,11 @@ uint64_t statNow()
 StepTimer::StepTimer(int idx) : i(idx), t0(statNow()) {}
 StepTimer::~StepTimer() { g_stepNs[i] += statNow() - t0; }
 std::vector<uint8_t> g_queue;    // [u32 size][size bytes]...
+// Render thread: a frame's packets go to the render thread with its job, and
+// the emptied buffers come back here (under g_queueMutex), so the next frame
+// does not grow a new multi-megabyte buffer from nothing (page faults and a
+// reallocation copy at every doubling).
+std::vector<std::vector<uint8_t>> g_spareQueues;
 std::vector<uint8_t> g_draining; // the render thread's side of the swap
 uint64_t g_enqueued = 0;         // packets queued so far (under g_queueMutex)
 uint64_t g_processed = 0;        // packets fed to paraLLEl-GS (render thread)
@@ -443,9 +461,9 @@ void tapPacket(const uint8_t *data, uint32_t size, void *)
     }
     const size_t at = g_queue.size();
     g_lastPacketAt = at;
-    g_queue.resize(at + 4 + size);
-    std::memcpy(g_queue.data() + at, &size, 4);
-    std::memcpy(g_queue.data() + at + 4, data, size);
+    const uint8_t *sizeBytes = reinterpret_cast<const uint8_t *>(&size);
+    g_queue.insert(g_queue.end(), sizeBytes, sizeBytes + 4);
+    g_queue.insert(g_queue.end(), data, data + size); // no zero fill first, unlike resize
     ++g_enqueued;
 }
 
@@ -1338,10 +1356,19 @@ struct RateCounter
 };
 RateCounter g_guestRate, g_presentRate;
 
+// GPU and paraLLEl-GS statistics every 3 seconds: on Android always, on the PC
+// with KH2_GPU_STATS=1 (benchmarks). "[gpu] ... shading 9.81 ms (x14.2)" =
+// 9.81 ms of GPU time per frame, in 14.2 dispatches per frame on average.
+bool gpuStatsEnabled()
+{
 #if defined(__ANDROID__)
-// GPU time per paraLLEl-GS stage (and its CPU-side waits), every 3 seconds:
-// "[gpu] shading 9.81 ms/frame (x14.2)" = 9.81 ms of GPU time per presented
-// frame, in 14.2 dispatches per frame on average.
+    return true;
+#else
+    static const bool on = std::getenv("KH2_GPU_STATS") && std::getenv("KH2_GPU_STATS")[0] == '1';
+    return on;
+#endif
+}
+
 void logGpuTimes(Device &dev)
 {
     static double s_last = 0.0;
@@ -1351,15 +1378,25 @@ void logGpuTimes(Device &dev)
     if (now - s_last < 3.0)
         return;
     s_last = now;
-    std::string line = "[gpu]";
+    applyTuningFile();
+    // GPU time per stage over the last 3 s, as ms per displayed frame (and how
+    // many intervals per frame). Granite reports per "frame context", and
+    // paraLLEl-GS ends one at every flush, several per displayed frame.
+    const double secs = 3.0;
+    const double frames = std::max(1.0, std::max(g_presentRate.rate, g_guestRate.rate) * secs);
+    std::string line = "[gpu] per frame:";
+    double gpuSum = 0.0;
     dev.timestamp_log([&](const std::string &tag, const TimestampIntervalReport &r) {
         char buf[160];
-        std::snprintf(buf, sizeof(buf), " | %s %.2f ms (x%.1f)", tag.c_str(), 1000.0 * r.time_per_frame_context,
-                      r.accumulations_per_frame_context);
+        std::snprintf(buf, sizeof(buf), " | %s %.2f ms (x%.1f)", tag.c_str(), 1000.0 * r.total_time / frames,
+                      double(r.total_accumulations) / frames);
         line += buf;
+        if (tag.rfind("cmd-", 0) != 0 && tag != "flush-submit" && tag != "wait-timeline" &&
+            tag != "create-cached-texture" && tag != "flush-rendering" && tag != "present")
+            gpuSum += 1000.0 * r.total_time / frames;
     });
-    const double secs = 3.0;
-    std::printf("%s | game %.1f fps, present %.1f fps\n", line.c_str(), g_guestRate.rate, g_presentRate.rate);
+    std::printf("%s | stages total %.2f ms | game %.1f fps, present %.1f fps\n", line.c_str(), gpuSum, g_guestRate.rate,
+                g_presentRate.rate);
     std::string steps = "[frame] ms per second:";
     for (int i = 0; i < 8; ++i)
     {
@@ -1367,7 +1404,45 @@ void logGpuTimes(Device &dev)
         std::snprintf(b, sizeof(b), " %s %.0f |", kStepNames[i], double(g_stepNs[i].exchange(0)) / 1e6 / secs);
         steps += b;
     }
+    {
+        char b[96];
+        std::snprintf(b, sizeof(b), " [end_frame_context %.0f, vkQueuePresent %.0f]", double(kh2_wsi_ns[0]) / 1e6 / secs,
+                      double(kh2_wsi_ns[1]) / 1e6 / secs);
+        kh2_wsi_ns[0] = kh2_wsi_ns[1] = 0;
+        steps += b;
+    }
     std::printf("%s\n", steps.c_str());
+    if (g_gs)
+    {
+        // What paraLLEl-GS did per displayed frame: render passes (and why each
+        // one ended), primitives, copies, palette updates.
+        const FlushStats fs = g_gs->consume_flush_stats();
+        static const char *const kReasons[8] = {"fb-pointer", "overflow", "texture-hazard", "copy-hazard",
+                                                "submission", "pressure", "host-access", "?"};
+        std::string r;
+        for (int i = 0; i < 8; i++)
+        {
+            const uint32_t n = ParallelGS::kh2_flush_reason_counts[i];
+            ParallelGS::kh2_flush_reason_counts[i] = 0;
+            if (n)
+            {
+                char b[64];
+                std::snprintf(b, sizeof(b), " %s %.1f", kReasons[i], double(n) / frames);
+                r += b;
+            }
+        }
+        const double hz[3] = {double(ParallelGS::kh2_hazard_counts[0]) / frames, double(ParallelGS::kh2_hazard_counts[1]) / frames,
+                              double(ParallelGS::kh2_hazard_counts[2]) / frames};
+        ParallelGS::kh2_hazard_counts[0] = ParallelGS::kh2_hazard_counts[1] = ParallelGS::kh2_hazard_counts[2] = 0;
+        char hzb[96];
+        std::snprintf(hzb, sizeof(hzb), " [hazards: texture %.1f, CLUT %.1f, feedback %.1f]", hz[0], hz[1], hz[2]);
+        r += hzb;
+        std::printf("[gs] per frame: render passes %.1f (ended by:%s) | primitives %.0f | copies %.1f (%.1f barriers) | "
+                    "palette updates %.1f\n",
+                    double(fs.num_render_passes) / frames, r.c_str(), double(fs.num_primitives) / frames,
+                    double(fs.num_copies) / frames, double(fs.num_copy_barriers) / frames,
+                    double(fs.num_palette_updates) / frames);
+    }
     std::printf("[cpu] readbacks %.1f/s (+%.1f/s from the previous frame, %.1f/s of them without a GPU read), guest waits %.1f ms/s for them (GPU side %.1f ms/s) | guest waits for a full "
                 "queue %.1f ms/s | render thread feeding paraLLEl-GS %.1f ms/s\n",
                 double(g_statReadbacks.exchange(0)) / secs, double(g_statReadbacksAsync.exchange(0) + g_statReadbacksSkipped.load()) / secs,
@@ -1377,7 +1452,6 @@ void logGpuTimes(Device &dev)
                 double(g_statDrainNs.exchange(0)) / 1e6 / secs);
     dev.timestamp_log_reset();
 }
-#endif
 
 
 // ImGui 1.92 texture requests (the font atlas), as Granite images.
@@ -1572,6 +1646,11 @@ void present()
         }
     }
     auto cmd = dev.request_command_buffer();
+    // GPU time of this command buffer (blit/FSR/UI), unless timestamps are off.
+    const bool timeBlit = !(std::getenv("KH2_PGS_TIMESTAMPS") && std::getenv("KH2_PGS_TIMESTAMPS")[0] == '0');
+    QueryPoolHandle blitStartTs;
+    if (timeBlit)
+        blitStartTs = cmd->write_timestamp(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     const bool ui = uiBuild();
     if (ui)
         uiUpdateTextures(*cmd);
@@ -1591,6 +1670,9 @@ void present()
     if (ui)
         uiDraw(*cmd, dev.get_swapchain_view().get_view_width(), dev.get_swapchain_view().get_view_height());
     cmd->end_render_pass();
+    if (timeBlit)
+        dev.register_time_interval("GPU", std::move(blitStartTs), cmd->write_timestamp(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
+                                   "cmd-frame-blit");
     {
         StepTimer st(5);
         dev.submit(cmd);
@@ -1600,9 +1682,8 @@ void present()
         g_wsi->end_frame();
     }
     g_presentRate.tick(nowSeconds());
-#if defined(__ANDROID__)
-    logGpuTimes(dev);
-#endif
+    if (gpuStatsEnabled())
+        logGpuTimes(dev);
     // Begin the next frame right away, for pacing (as the PCSX2 integration does).
     {
         StepTimer st(7);
@@ -1681,11 +1762,60 @@ void savePipelineCache(bool force)
     }
 }
 
+#if defined(__ANDROID__)
+// Tuning without a rebuild: NAME=VALUE lines in /sdcard/kh2-env.txt (pushed
+// with adb) become environment variables. Read before Vulkan starts, then
+// again whenever the file changes (checked every 3 s on the render thread), so
+// settings read live (KH2_PGS_COARSE, KH2_PGS_HIER, KH2_PGS_TIMESTAMPS,
+// KH2_PRESENT_DELAY, KH2_JOBS_AHEAD) can be switched while the game runs.
+// "NAME=" (empty) unsets a variable.
+void applyTuningFile()
+{
+    static time_t s_mtime = 0;
+    struct stat st;
+    if (stat("/sdcard/kh2-env.txt", &st) != 0 || st.st_mtime == s_mtime)
+        return;
+    s_mtime = st.st_mtime;
+    if (FILE *f = std::fopen("/sdcard/kh2-env.txt", "r"))
+    {
+        char line[256];
+        while (std::fgets(line, sizeof(line), f))
+        {
+            line[std::strcspn(line, "\r\n")] = 0;
+            if (char *eq = std::strchr(line, '='); eq && line[0] != '#')
+            {
+                *eq = 0;
+                if (eq[1])
+                    setenv(line, eq + 1, 1);
+                else
+                    unsetenv(line);
+                std::fprintf(stderr, "[tune] %s=%s\n", line, eq + 1);
+            }
+        }
+        std::fclose(f);
+    }
+    if (const char *v = std::getenv("KH2_PRESENT_DELAY"))
+        g_presentDelay = unsigned(std::atoi(v));
+    if (const char *v = std::getenv("KH2_JOBS_AHEAD"))
+        kMaxJobsAhead = std::max(1, std::atoi(v));
+    if (g_gs)
+    {
+        DebugMode dbg = {};
+        dbg.disable_sampler_feedback = true;
+        dbg.timestamps = !(std::getenv("KH2_PGS_TIMESTAMPS") && std::getenv("KH2_PGS_TIMESTAMPS")[0] == '0');
+        g_gs->set_debug_mode(dbg);
+    }
+}
+#else
+void applyTuningFile() {}
+#endif
+
 bool init(const Options &options)
 {
     g_opt = options;
     registerThread();
 #if defined(__ANDROID__)
+    applyTuningFile();
     if (!Context::init_loader(reinterpret_cast<PFN_vkGetInstanceProcAddr>(kh2android::vulkanLoader())))
 #else
     if (!Context::init_loader(nullptr))
@@ -1755,6 +1885,21 @@ bool init(const Options &options)
     g_blitProgram = g_device->request_program(suite.quad, suite.blit);
     g_upscaleProgram = g_device->request_program(suite.upscale_vert, suite.upscale_frag);
     g_sharpenProgram = g_device->request_program(suite.sharpen_vert, suite.sharpen_frag);
+#if defined(__ANDROID__)
+    // Half-precision FSR (double-rate FP16 on Adreno); KH2_FSR_FP16=0 keeps FP32.
+    if (g_device->get_device_features().vk12_features.shaderFloat16 &&
+        !(std::getenv("KH2_FSR_FP16") && std::getenv("KH2_FSR_FP16")[0] == '0'))
+    {
+        Shader *easu = g_device->request_shader(kFsrEasuF16Spirv, sizeof(kFsrEasuF16Spirv), &suite.upscale_frag->get_layout());
+        Shader *rcas = g_device->request_shader(kFsrRcasF16Spirv, sizeof(kFsrRcasF16Spirv), &suite.sharpen_frag->get_layout());
+        if (easu && rcas)
+        {
+            g_upscaleProgram = g_device->request_program(suite.upscale_vert, easu);
+            g_sharpenProgram = g_device->request_program(suite.sharpen_vert, rcas);
+            std::fprintf(stderr, "[pgs] FSR in half precision\n");
+        }
+    }
+#endif
     // ui_frag[textured][sRGB backbuffer]; ours is UNORM.
     g_uiProgram[0] = g_device->request_program(suite.ui_vert, suite.ui_frag[0][0]);
     g_uiProgram[1] = g_device->request_program(suite.ui_vert, suite.ui_frag[1][0]);
@@ -1788,6 +1933,15 @@ bool init(const Options &options)
         DebugMode dbg = {};
         dbg.disable_sampler_feedback = true;
         // GPU time per stage, logged every few seconds (logGpuTimes).
+        // Each timestamp makes Turnip wait for the GPU to go idle, so
+        // KH2_PGS_TIMESTAMPS=0 turns them off to measure their cost.
+        dbg.timestamps = !(std::getenv("KH2_PGS_TIMESTAMPS") && std::getenv("KH2_PGS_TIMESTAMPS")[0] == '0');
+        g_gs->set_debug_mode(dbg);
+    }
+#else
+    if (gpuStatsEnabled())
+    {
+        DebugMode dbg = {};
         dbg.timestamps = true;
         g_gs->set_debug_mode(dbg);
     }
@@ -1853,6 +2007,11 @@ void shutdown()
     stopRenderThread();
     std::lock_guard<std::mutex> lock(g_mutex);
     registerThread();
+    // Submit what paraLLEl-GS still has open: wait_idle also waits for every
+    // command buffer handed out to be submitted, and a render thread stopped
+    // mid-frame leaves some (the exit hung with --render-thread=1).
+    if (g_gs)
+        g_gs->flush();
     g_device->wait_idle();
     savePipelineCache(true);
     if (g_gs)
@@ -2040,7 +2199,11 @@ void processFrame(const PrivSnapshot &priv, uint64_t vsyncTick, FrameJob *job)
         }
         else
 #endif
+        {
             g_device->next_frame_context();
+            if (gpuStatsEnabled())
+                logGpuTimes(*g_device);
+        }
     }
 }
 
@@ -2054,6 +2217,12 @@ void postJob(const PrivSnapshot &priv, uint64_t tick, bool redraw)
         return;
     FrameJob job;
     job.packets.swap(g_queue);
+    if (!g_spareQueues.empty())
+    {
+        g_queue.swap(g_spareQueues.back());
+        g_spareQueues.pop_back();
+        g_queue.clear();
+    }
     job.end = g_enqueued;
     job.priv = priv;
     job.tick = tick;
@@ -2109,6 +2278,13 @@ void renderLoop()
         }
         else
             processFrame(job.priv, job.tick, &job);
+        if (haveJob)
+        {
+            std::lock_guard<std::mutex> spare(g_queueMutex);
+            job.packets.clear();
+            if (g_spareQueues.size() < 3)
+                g_spareQueues.push_back(std::move(job.packets));
+        }
     }
 }
 

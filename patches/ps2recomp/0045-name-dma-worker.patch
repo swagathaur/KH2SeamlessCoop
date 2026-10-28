@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0045 name the DMA worker thread
+
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,3 +1,6 @@
++#if defined(__ANDROID__) || defined(__linux__)
++#include <pthread.h>
++#endif
+ #include <chrono>
+ #include <cstdio>
+ #include "runtime/ps2_memory.h"
+@@ -1986,6 +1989,11 @@
+ 
+ void PS2Memory::dmaWorkerMain()
+ {
++#if defined(__ANDROID__) || defined(__linux__)
++    // Named so Android's performance-hint session can include it (patch 0045):
++    // it runs VIF1 and the VU1 programs, often the busiest thread.
++    pthread_setname_np(pthread_self(), "PS2-DMA");
++#endif
+ #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+     // Like the EE fibers (patch 0026): denormals are zero, as on the VUs.
+     _mm_setcsr(_mm_getcsr() | 0x8040u);

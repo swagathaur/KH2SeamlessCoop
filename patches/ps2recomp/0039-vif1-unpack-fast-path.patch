@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0039 fast path for common VIF1 UNPACKs
+
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,6 +1,9 @@
+ // Based on Blackline Interactive implementation
+ #include "runtime/ps2_memory.h"
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
++#include <vector>
+ 
+ enum VIFCmd : uint8_t
+ {
+@@ -546,7 +549,94 @@
+ 
+             const bool zeroExtend = (imm & 0x4000u) != 0u;
+ 
+-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
++            // Fast path for the common UNPACKs: no mask, no row add (MODE 0),
++            // a write cycle that does not fill (CL >= WL) and a format with a
++            // defined decode. Every vector then has source data and only its
++            // decoded lanes change, as in the general loop below.
++            const uint32_t fmt = (static_cast<uint32_t>(vl) << 2) | vn;
++            const bool fastFormat = vl != 3u || vn == 3u;
++            const bool useFast = m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes && !maskEnable &&
++                                 (vif1_regs.mode & 3u) == 0u && cl >= wl && fastFormat;
++            // PS2_VIF_VERIFY=1: also run the general decode and compare (diagnostics).
++            static const bool verifyFast = std::getenv("PS2_VIF_VERIFY") != nullptr;
++            std::vector<uint8_t> vifBefore, vifFast;
++            if (useFast && verifyFast)
++                vifBefore.assign(m_vu1Data, m_vu1Data + PS2_VU1_DATA_SIZE);
++            if (useFast)
++            {
++                const uint8_t *src = data + pos;
++                const bool contiguous = cl == wl;
++                for (uint32_t w = 0; w < writeVectorCount; ++w, src += bytesPerVector)
++                {
++                    const uint32_t destVec = contiguous ? ((vuAddr + w) & 0x3FFu)
++                                                        : ((vuAddr + (w / wl) * cl + (w % wl)) & 0x3FFu);
++                    uint8_t *dst = m_vu1Data + destVec * 16u;
++                    uint32_t lanes[4];
++                    switch (fmt)
++                    {
++                    case 0x3: // V4-32
++                        std::memcpy(dst, src, 16);
++                        continue;
++                    case 0x2: // V3-32 (W kept)
++                        std::memcpy(dst, src, 12);
++                        continue;
++                    case 0x1: // V2-32 (Z, W kept)
++                        std::memcpy(dst, src, 8);
++                        continue;
++                    case 0x0: // S-32
++                        std::memcpy(&lanes[0], src, 4);
++                        lanes[1] = lanes[2] = lanes[3] = lanes[0];
++                        break;
++                    case 0x4: // S-16
++                    case 0x5: // V2-16
++                    case 0x6: // V3-16
++                    case 0x7: // V4-16
++                    {
++                        std::memcpy(lanes, dst, 16);
++                        const uint32_t n = vn + 1u;
++                        for (uint32_t c = 0; c < n; ++c)
++                        {
++                            uint16_t raw;
++                            std::memcpy(&raw, src + c * 2u, 2);
++                            lanes[c] = zeroExtend ? uint32_t(raw) : uint32_t(int32_t(int16_t(raw)));
++                        }
++                        if (n == 1u)
++                            lanes[1] = lanes[2] = lanes[3] = lanes[0];
++                        break;
++                    }
++                    case 0x8: // S-8
++                    case 0x9: // V2-8
++                    case 0xA: // V3-8
++                    case 0xB: // V4-8
++                    {
++                        std::memcpy(lanes, dst, 16);
++                        const uint32_t n = vn + 1u;
++                        for (uint32_t c = 0; c < n; ++c)
++                            lanes[c] = zeroExtend ? uint32_t(src[c]) : uint32_t(int32_t(int8_t(src[c])));
++                        if (n == 1u)
++                            lanes[1] = lanes[2] = lanes[3] = lanes[0];
++                        break;
++                    }
++                    default: // 0xF: V4-5
++                    {
++                        uint16_t packed;
++                        std::memcpy(&packed, src, 2);
++                        lanes[0] = packed & 0x1Fu;
++                        lanes[1] = (packed >> 5) & 0x1Fu;
++                        lanes[2] = (packed >> 10) & 0x1Fu;
++                        lanes[3] = (packed >> 15) & 0x01u;
++                        break;
++                    }
++                    }
++                    std::memcpy(dst, lanes, 16);
++                }
++                if (verifyFast)
++                {
++                    vifFast.assign(m_vu1Data, m_vu1Data + PS2_VU1_DATA_SIZE);
++                    std::memcpy(m_vu1Data, vifBefore.data(), PS2_VU1_DATA_SIZE);
++                }
++            }
++            if ((!useFast || verifyFast) && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+             {
+                 const uint8_t *srcBase = data + pos;
+                 uint32_t srcIndex = 0u;
+@@ -742,6 +832,18 @@
+ 
+                     std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
+                 }
++                if (useFast && verifyFast)
++                {
++                    static uint64_t checked = 0, bad = 0;
++                    ++checked;
++                    if (std::memcmp(m_vu1Data, vifFast.data(), PS2_VU1_DATA_SIZE) != 0 && bad++ < 20)
++                        std::fprintf(stderr, "[vif-verify] UNPACK fmt %x num %u cl %u wl %u addr %u: fast path differs (%llu of %llu)\n",
++                                     fmt, writeVectorCount, cl, wl, vuAddr, (unsigned long long)bad,
++                                     (unsigned long long)checked);
++                    if ((checked & 0xFFFF) == 0)
++                        std::fprintf(stderr, "[vif-verify] %llu fast UNPACKs checked, %llu differ\n",
++                                     (unsigned long long)checked, (unsigned long long)bad);
++                }
+             }
+             pos += totalBytes;
+ 

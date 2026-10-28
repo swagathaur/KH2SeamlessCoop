@@ -82,6 +82,9 @@ bool install(PS2Runtime &runtime);
 std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes);
 // Undo everything (session over): AI back on, looks and records restored.
 void reset(uint8_t *rdram);
+// Testing (--fill-hold=FROM-TO): while on, empty party slots are not filled
+// (a room loads with its party as the game left it).
+void holdFill(bool on);
 
 // This player's own data, for the others.
 uint16_t localWeaponEntry(const uint8_t *rdram);

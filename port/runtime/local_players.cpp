@@ -83,7 +83,7 @@ bool notForOthers(const std::string &a)
                                         "--script=", "--input=", "--teleport=", "--poke=", "--warp-test=",
                                         // testing aids that act on one window only
                                         "--menu-at=", "--arrange-at=", "--story-save-test=", "--ram-dump=", "--gs-dump=",
-                                        "--ee-dump=", "--stack-dump=", "--hurt-enemies=", "--partner-test=", "--spawn-test=",
+                                        "--ee-dump=", "--stack-dump=", "--hurt-enemies=", "--partner-test=", "--partner-test-off=", "--fill-hold=", "--spawn-test=",
                                         "--preload-test=", "--nat-test"};
     for (const char *d : kDrop)
         if (a.rfind(d, 0) == 0)

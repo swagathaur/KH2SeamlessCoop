@@ -54,6 +54,7 @@
 #include "partners.h"
 #include "hits.h"
 #include "story.h"
+#include "scaling.h"
 #include "names.h"
 #include "local_players.h"
 #include "net/nat.h"
@@ -302,6 +303,8 @@ void usage()
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
         "  --follow-host           co-op client: go to the host's room whenever it changes\n"
         "  --no-shared-enemies     co-op client: keep your own enemies instead of the host's\n"
+        "  --enemy-hp-scale=F      co-op host: enemy HP + F per extra player (default 0.5 = +50%)\n"
+        "  --enemy-damage-scale=F  co-op host: enemy damage + F per extra player (default 0.25 = +25%)\n"
         "  --no-shared-story       co-op client: keep your own story instead of playing in the host's\n"
         "  --no-upnp               co-op host: do not ask the router to open the port (UPnP / NAT-PMP)\n"
         "  --nat-test              print what the router and a STUN server say (no port is opened), then exit\n"
@@ -494,6 +497,10 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a == "--follow-host") o.coop.followHost = true;
         else if (a == "--no-shared-enemies") o.coop.sharedEnemies = false;
         else if (a == "--no-shared-story") o.coop.sharedStory = false;
+        else if (a.rfind("--enemy-hp-scale=", 0) == 0)
+            kh2scale::setLocal(std::stof(value(a)), kh2scale::localDamage());
+        else if (a.rfind("--enemy-damage-scale=", 0) == 0)
+            kh2scale::setLocal(kh2scale::localHp(), std::stof(value(a)));
         else if (a == "--no-upnp") o.coop.openPort = false;
         else if (a == "--nat-test") o.natTest = true;
         else if (a == "--mark-actors") o.markActors = true;
@@ -1804,6 +1811,7 @@ int main(int argc, char **argv)
     kh2puppets::install(runtime);
     kh2partner::install(runtime);
     kh2hits::install(runtime);
+    kh2scale::install(runtime);
     kh2story::install(runtime);
     kh2names::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);

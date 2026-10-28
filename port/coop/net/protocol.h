@@ -66,6 +66,7 @@ enum class GameEventType : uint16_t
     StoryChunk = 5,  // host -> clients: the host's story (story.h), all of it or what changed
     Scene = 6,       // host -> clients: world u8, room u8, door u16, map u16, battle u16, event u16, cutscene u8
     SkipVote = 7,    // client -> host: this player asks to skip the cutscene playing
+    EnemyScaling = 8, // host -> clients: enemy HP and damage per extra player (f32, f32), players (i32)
 };
 
 // Where a player is and what they are doing, sent ~30 times a second.

@@ -22,6 +22,7 @@
 #include "hd_textures.h"
 #include "game_state.h"
 #include "coop.h"
+#include "scaling.h"
 #include "local_players.h"
 #include "puppets.h"
 #include "partners.h"
@@ -287,6 +288,8 @@ bool save()
         out << "skip-cutscenes = 1\n";
     if (!g_opt.nameTags)
         out << "no-name-tags = 1\n";
+    out << "enemy-hp-scale = " << kh2scale::localHp() << "\n";
+    out << "enemy-damage-scale = " << kh2scale::localDamage() << "\n";
     if (g_coopName[0])
         out << "name = " << g_coopName << "\n";
     if (g_coopAddress[0])
@@ -294,6 +297,21 @@ bool save()
     for (const std::string &line : kh2input::keyBindings().iniLines())
         out << line << "\n";
     return true;
+}
+
+// Co-op enemy scaling (scaling.h): the host's settings.
+void scalingSliders()
+{
+    float hp = kh2scale::localHp() * 100.0f, dmg = kh2scale::localDamage() * 100.0f;
+    bool changed = ImGui::SliderFloat("Enemy HP per extra player", &hp, 0.0f, 200.0f, "+%.0f%%");
+    ImGui::SetItemTooltip("Enemies get this much more HP for each player after the first (set by the host)");
+    changed |= ImGui::SliderFloat("Enemy damage per extra player", &dmg, 0.0f, 100.0f, "+%.0f%%");
+    ImGui::SetItemTooltip("Enemies hit this much harder for each player after the first (set by the host)");
+    if (changed)
+    {
+        kh2scale::setLocal(hp / 100.0f, dmg / 100.0f);
+        save();
+    }
 }
 
 void draw()
@@ -509,6 +527,12 @@ void draw()
                 ImGui::SetItemTooltip("Play in the host's story: go where they go and watch their cutscenes (only the host skips). "
                                       "Your own story, and your place in it, come back when you leave; saving keeps yours.");
             }
+            if (kh2coop::isHost())
+                scalingSliders();
+            else
+                ImGui::TextDisabled("The host's enemies: HP +%.0f%%, damage +%.0f%% per extra player (%d players)",
+                                    kh2scale::hpPerPlayer() * 100.0f, kh2scale::damagePerPlayer() * 100.0f,
+                                    kh2scale::players());
             bool puppets = kh2puppets::enabled();
             if (ImGui::Checkbox("Show other players", &puppets))
                 kh2puppets::setEnabled(puppets);

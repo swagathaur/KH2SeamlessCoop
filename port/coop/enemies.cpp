@@ -452,10 +452,17 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
                 removeBody(e.object);
             }
         }
-        else if (h->hp < hp)
+        else
         {
-            std::memcpy(rdram + (e.sheet & 0x01FFFFFFu), &h->hp, 4);
-            hp = h->hp;
+            // The host's HP, also when it is higher: its enemies can have
+            // more (scaling.h), and a copy with fewer would die here first.
+            if (h->maxHp > 0 && h->maxHp != e.maxHp)
+                std::memcpy(rdram + ((e.sheet + 4) & 0x01FFFFFFu), &h->maxHp, 4);
+            if (h->hp != hp)
+            {
+                std::memcpy(rdram + (e.sheet & 0x01FFFFFFu), &h->hp, 4);
+                hp = h->hp;
+            }
         }
         f.expectedHp = hp;
         // Position: ease toward the host's (20 updates a second; smooth the steps).

@@ -12,6 +12,7 @@
 
 #include "enemies.h"
 #include "partners.h"
+#include "scaling.h"
 #include "game_state.h"
 #include "hits.h"
 #include "puppets.h"
@@ -437,6 +438,11 @@ void makeSession()
             }
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling) && !g_session->isHost())
+        {
+            kh2scale::onHostSettings(data);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::SkipVote) && g_session->isHost())
         {
             auto it = g_remotes.find(origin);
@@ -759,6 +765,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2downed::reset(ram);
         endStory(ram);
         kh2puppets::update(rdram, {});
+        kh2scale::tick(ram, false, false, 1);
         return;
     }
     const auto before = g_session->status();
@@ -790,8 +797,14 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         endStory(ram);
         kh2hits::setCapture(false);
         kh2puppets::update(rdram, {});
+        kh2scale::tick(ram, false, false, 1);
         return;
     }
+    // Enemy HP and damage scaling (scaling.h): the host's settings, sent
+    // every two seconds (also to whoever just joined).
+    kh2scale::tick(ram, true, g_session->isHost(), int(g_remotes.size()) + 1);
+    if (g_session->isHost() && guestFrame % 120 == 0)
+        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling), kh2scale::encode());
     updatePartners(ram, guestFrame);
     storyTick(ram, guestFrame);
     // Downed players (downed.h): who else is here, and who is down.

@@ -60,6 +60,7 @@
 #include "watchdog.h"
 #include "cutscene_skip.h"
 #include "english_text.h"
+#include "databuff.h"
 #include "gpu_sync.h"
 #include "hd_textures.h"
 #include "file_override.h"
@@ -88,11 +89,13 @@ namespace
 // KH2 memory map, from crt0 (0x0010001C) and FUN_00168548:
 //   0x00100000-0x01E4C868  code, data, bss
 //   0x01E4C868-0x01F18000  unreferenced by the game  <- runtime arena + callback stacks
+//                          (0x01EC0000-0x01EF0000 of it: data files that do not
+//                          fit the game's data pool, see databuff.h)
 //   0x01F18000-0x01FC0000  EE overlay arena
 //   0x01FC0000-0x01FE0000  C heap (SetupHeap)
 //   0x01FE0000-0x02000000  main thread stack (SetupThread)
 constexpr uint32_t kRuntimeHeapBase = 0x01E50000u;
-constexpr uint32_t kRuntimeHeapEnd = 0x01EF0000u;
+constexpr uint32_t kRuntimeHeapEnd = 0x01EC0000u; // above it: databuff.h (the heap used ~100 bytes)
 constexpr uint32_t kCallbackStackFloor = 0x01EF0000u;
 constexpr uint32_t kCallbackStackTop = 0x01F18000u;
 constexpr uint32_t kGuestHeapCeiling = 0x01FE0000u; // what EndOfHeap reports
@@ -1753,6 +1756,7 @@ int main(int argc, char **argv)
     kh2gpusync::install(runtime);
     if (opt.english)
         kh2english::install(runtime);
+    kh2databuff::install(runtime);
     // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by
     // default also pokes Dragon Quest VIII's libmpeg globals (patch 0004).
     ps2_stubs::setMpegLegacyGuestGlobals(false);

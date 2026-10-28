@@ -284,6 +284,7 @@ target_sources(kh2recomp PRIVATE
     port/runtime/cutscene_skip.cpp
     port/runtime/local_players.cpp
     port/runtime/english_text.cpp
+    port/runtime/databuff.cpp
     port/runtime/gpu_sync.cpp
     port/runtime/file_override.cpp
     port/runtime/trace.cpp

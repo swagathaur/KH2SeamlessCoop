@@ -224,6 +224,7 @@ uint16_t weaponOf(const uint8_t *rdram, uint16_t entry)
 // back to "nobody" in the memory card image (kh2story::setSaveOverrides) and
 // in the game when the session ends.
 constexpr uint8_t kNobody = 0x12;
+constexpr uint8_t kWorldMap = 0x0F;
 constexpr uint8_t kFillCharacters[2] = {1, 2};      // Donald, Goofy
 constexpr uint16_t kFillEntries[2] = {0x005C, 0x005D}; // their objentries (P_EX020, P_EX030)
 struct Fill
@@ -911,6 +912,11 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     std::sort(order.begin(), order.end(), [](const Remote *a, const Remote *b) { return a->playerId < b->playerId; });
     if (order.size() > 2)
         order.resize(2);
+    // The World Map (world 0F) has no party and nobody walks there: no
+    // stand-ins, fills or looks. With Donald put in its party slot, the host
+    // stopped at the map's new-world event (Hollow Bastion now open) for good.
+    if (st.now.world == kWorldMap)
+        order.clear();
     g_partyWanted = int(order.size());
     if (st.player.valid)
         fillParty(rdram, st.now.world, order.size());

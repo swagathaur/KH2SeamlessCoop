@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0047 log bad guest accesses; catch TLB misses without a C++ throw
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2185,14 +2185,77 @@
+     return m_asyncCallbackStackTop;
+ }
+ 
++namespace
++{
++// Bad guest memory accesses (an address the PS2 would fault on). The guest
++// gets an address error and 0 as before; these say where they come from:
++// the first ones in full, then counts every 5 s (PS2_BAD_ACCESS_LOG=0: off).
++std::mutex g_badAccessMutex;
++uint64_t g_badAccessCount = 0, g_badAccessSinceReport = 0;
++std::chrono::steady_clock::time_point g_badAccessReported{};
++
++bool badAccessLogOn()
++{
++    static const bool on = [] {
++        const char *e = std::getenv("PS2_BAD_ACCESS_LOG");
++        return !(e && *e == '0');
++    }();
++    return on;
++}
++
++void noteBadAccess(const R5900Context *ctx, uint32_t vaddr, unsigned size, bool store, const char *why)
++{
++    if (!badAccessLogOn())
++        return;
++    std::lock_guard<std::mutex> lock(g_badAccessMutex);
++    ++g_badAccessCount;
++    ++g_badAccessSinceReport;
++    const auto now = std::chrono::steady_clock::now();
++    if (g_badAccessCount <= 40)
++    {
++        std::fprintf(stderr,
++                     "[bad-access] %s%u at 0x%08X (%s): pc=0x%08X ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X v0=0x%08X "
++                     "s0=0x%08X s1=0x%08X\n",
++                     store ? "store" : "load", size * 8u, vaddr, why, ctx->pc, getRegU32(ctx, 31), getRegU32(ctx, 29),
++                     getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 2), getRegU32(ctx, 16), getRegU32(ctx, 17));
++        std::fflush(stderr);
++        g_badAccessReported = now;
++        g_badAccessSinceReport = 0;
++    }
++    else if (now - g_badAccessReported >= std::chrono::seconds(5))
++    {
++        std::fprintf(stderr, "[bad-access] %llu more in %.1f s (%llu in all); last: 0x%08X at pc=0x%08X ra=0x%08X\n",
++                     static_cast<unsigned long long>(g_badAccessSinceReport),
++                     std::chrono::duration<double>(now - g_badAccessReported).count(),
++                     static_cast<unsigned long long>(g_badAccessCount), vaddr, ctx->pc, getRegU32(ctx, 31));
++        std::fflush(stderr);
++        g_badAccessReported = now;
++        g_badAccessSinceReport = 0;
++    }
++}
++} // namespace
++
++// A TLB-mapped address with no TLB entry would make the memory throw, and a
++// C++ throw costs about a millisecond in this executable (the guest code that
++// keeps reading one stalls the game): such an address is caught first.
++#define PS2_BAD_ACCESS_FAST(SIZE, STORE, RET)                                                                         \
++    if (Ps2IsKseg23Address(vaddr) && m_memory.tlbProbe(vaddr) < 0)                                                   \
++    {                                                                                                                  \
++        noteBadAccess(ctx, vaddr, SIZE, STORE, "TLB miss");                                                            \
++        SignalException(ctx, STORE ? EXCEPTION_ADDRESS_ERROR_STORE : EXCEPTION_ADDRESS_ERROR_LOAD);                   \
++        return RET;                                                                                                    \
++    }
++
+ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
++    PS2_BAD_ACCESS_FAST(1, false, 0)
+     try
+     {
+         return m_memory.read8(vaddr);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 1, false, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+@@ -2200,12 +2263,14 @@
+ 
+ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
++    PS2_BAD_ACCESS_FAST(2, false, 0)
+     try
+     {
+         return m_memory.read16(vaddr);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 2, false, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+@@ -2213,12 +2278,14 @@
+ 
+ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
++    PS2_BAD_ACCESS_FAST(4, false, 0)
+     try
+     {
+         return m_memory.read32(vaddr);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 4, false, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+@@ -2226,12 +2293,14 @@
+ 
+ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
++    PS2_BAD_ACCESS_FAST(8, false, 0)
+     try
+     {
+         return m_memory.read64(vaddr);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 8, false, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+@@ -2239,12 +2308,14 @@
+ 
+ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
++    PS2_BAD_ACCESS_FAST(16, false, _mm_setzero_si128())
+     try
+     {
+         return m_memory.read128(vaddr);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 16, false, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return _mm_setzero_si128();
+     }
+@@ -2253,12 +2324,14 @@
+ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
++    PS2_BAD_ACCESS_FAST(1, true, )
+     try
+     {
+         m_memory.write8(vaddr, value);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 1, true, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+@@ -2266,12 +2339,14 @@
+ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
++    PS2_BAD_ACCESS_FAST(2, true, )
+     try
+     {
+         m_memory.write16(vaddr, value);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 2, true, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+@@ -2279,13 +2354,15 @@
+ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
++    PS2_BAD_ACCESS_FAST(4, true, )
+     try
+     {
+         m_memory.write32(vaddr, value);
+         drainCompletedDmacHandlers(rdram);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 4, true, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+@@ -2293,12 +2370,14 @@
+ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
++    PS2_BAD_ACCESS_FAST(8, true, )
+     try
+     {
+         m_memory.write64(vaddr, value);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 8, true, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+@@ -2308,12 +2387,14 @@
+     alignas(16) uint64_t _parts[2];
+     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
+     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
++    PS2_BAD_ACCESS_FAST(16, true, )
+     try
+     {
+         m_memory.write128(vaddr, value);
+     }
+-    catch (const std::exception &)
++    catch (const std::exception &e)
+     {
++        noteBadAccess(ctx, vaddr, 16, true, e.what());
+         SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }

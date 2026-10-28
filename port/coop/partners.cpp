@@ -346,6 +346,12 @@ constexpr uint32_t kFriendPlaceholder[2] = {0x0237, 0x0238};
 uint32_t g_spawnRoom = 0xFFFFFFFFu; // world/room/event the attempts below are for
 double g_roomSince = 0;
 bool g_spawnTried[2] = {false, false};
+// A stand-in made here by spawnMissing (the room had no place for the party
+// member): this room set no memory aside for the member's files, so anything
+// it loads later (its weapon's model, when it fights) goes to memory the
+// pause menu reuses; on leaving the menu the weapon drew from what was there
+// and the game crashed. Such a stand-in holds our weapon, which is loaded.
+bool g_lateRoom[2] = {false, false};
 bool g_roomOverridden = false;
 
 double nowSec()
@@ -636,6 +642,7 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         g_spawnRoom = key;
         g_roomSince = nowSec();
         g_spawnTried[0] = g_spawnTried[1] = false;
+        g_lateRoom[0] = g_lateRoom[1] = false;
         g_roomOverridden = g_ruleOverridden.exchange(false);
     }
     // On by default; KH2_NO_SPAWN_FRIEND=1 turns it off (diagnostics).
@@ -708,6 +715,19 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
                 continue; // their look first (they may still be loading)
         }
         g_spawnTried[k - 1] = true;
+        g_lateRoom[k - 1] = true;
+        {
+            State &s = g_states[r.playerId];
+            const uint16_t ours = localWeaponEntry(rdram);
+            if (s.companionWeapon && ours)
+            {
+                dress(rdram, s.companionWeapon, ours);
+                std::printf("[partner] party member %zu is made late here: it holds our weapon (theirs would load into "
+                            "memory the pause menu reuses)\n",
+                            k);
+                std::fflush(stdout);
+            }
+        }
         // Behind the player, to the left (slot 1) or right (slot 2).
         const float side = k == 1 ? -1.0f : 1.0f;
         const float back = 150.0f, aside = 110.0f;
@@ -978,7 +998,11 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // The weapon only with the body: a companion made in its own look
         // holding another character's weapon (bones that are not there)
         // crashed the game.
-        if (s.companionWeapon && r.weapon && r.model && dressedAs(s.companionEntry) == r.model)
+        const uint16_t ourWeapon =
+            s.slot >= 1 && s.slot <= 2 && g_lateRoom[s.slot - 1] ? localWeaponEntry(rdram) : uint16_t(0);
+        if (s.companionWeapon && ourWeapon)
+            dress(rdram, s.companionWeapon, ourWeapon);
+        else if (s.companionWeapon && r.weapon && r.model && dressedAs(s.companionEntry) == r.model)
             dress(rdram, s.companionWeapon, r.weapon);
         else if (s.companionWeapon && dressedAs(s.companionEntry) == 0)
             dress(rdram, s.companionWeapon, 0);

@@ -32,7 +32,9 @@ constexpr uint32_t kParamSize = 0x80; // the attack parameters the DAMAGE points
 
 struct Hit
 {
-    uint32_t object = 0; // the enemy hit (this machine's)
+    uint32_t object = 0;   // the enemy hit (this machine's)
+    uint32_t attacker = 0; // who hit it (this machine's object; kills only)
+    bool lethal = false;   // (client) it left the enemy at 0 HP; not sent
     uint8_t damage[kDamageSize] = {};
     uint8_t param[kParamSize] = {};
 };
@@ -46,8 +48,15 @@ std::vector<Hit> takeHits();
 
 // Host: play `damage` (from a client) on `enemy`, by `attacker`, without its
 // HP (a guest job; nothing happens if the enemy is gone or dead by then).
+// lethal (client, the host's killing blow): with its HP, all that is left of
+// it, so the copy reacts and dies the game's own way, as in a game of one.
 void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSize],
-            const uint8_t (&param)[kParamSize]);
+            const uint8_t (&param)[kParamSize], bool lethal = false);
+
+// Host: copy the hits that leave one of our enemies at 0 HP (its killing
+// blow, by anyone), for the clients' copies.
+void setKillCapture(bool on);
+std::vector<Hit> takeKills();
 
 // The EnemyHit game event: world, room, the enemy's spawn serial and objentry
 // id (the host checks both: the same serial can be another enemy there), the

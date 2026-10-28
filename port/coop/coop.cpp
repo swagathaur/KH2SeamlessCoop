@@ -181,6 +181,22 @@ uint32_t attackerFor(const uint8_t *rdram, uint8_t id)
     return player;
 }
 
+// Which player an object here is (0xFF: none of them; an enemy, a party member).
+uint8_t playerIdOf(const uint8_t *rdram, uint32_t obj)
+{
+    uint32_t player = 0;
+    std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+    if (obj && obj == player)
+        return g_session ? g_session->localId() : 0xFF;
+    for (const kh2partner::Link &l : kh2partner::links())
+        if (l.object == obj && obj)
+            return l.playerId;
+    for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+        if (a.object == obj && obj)
+            return a.playerId;
+    return 0xFF;
+}
+
 void encodeScene(const kh2state::State &st, uint8_t (&out)[kSceneSize])
 {
     out[0] = st.now.world;
@@ -449,6 +465,22 @@ void makeSession()
             const std::string who = it != g_remotes.end() && !it->second.name.empty() ? it->second.name : "A player";
             addLog(who + " asks to skip the cutscene");
             kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyKill) && !g_session->isHost() && g_rdram &&
+            g_opt.sharedEnemies && !data.empty())
+        {
+            // The blow that killed one of the host's enemies: our copy dies of it.
+            uint8_t world, room;
+            int16_t serial;
+            uint16_t entry;
+            kh2hits::Hit hit;
+            const uint8_t by = data.back();
+            const std::vector<uint8_t> body(data.begin(), data.end() - 1);
+            if (!kh2hits::decode(body, world, room, serial, entry, hit))
+                return;
+            kh2enemies::onHostKill(const_cast<uint8_t *>(g_rdram), world, room, serial, entry, hit,
+                                   attackerFor(g_rdram, by == 0xFF ? g_session->localId() : by), now());
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyHit) && g_session->isHost() && g_rdram &&
@@ -905,6 +937,16 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         const kh2state::State me = kh2state::read(rdram);
         if (g_session->isHost())
         {
+            // Killing blows first, so they arrive with (or before) the 0 HP.
+            for (const kh2hits::Hit &h : kh2hits::takeKills())
+                for (const kh2enemies::Local &e : kh2enemies::scan(rdram))
+                    if (e.object == h.object)
+                    {
+                        std::vector<uint8_t> data = kh2hits::encode(me.now.world, me.now.room, e.serial, e.entry, h);
+                        data.push_back(playerIdOf(rdram, h.attacker));
+                        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyKill), data);
+                        break;
+                    }
             if (guestFrame / 3 != g_lastEnemyFrame / 3 && me.now.world != 0)
             {
                 g_lastEnemyFrame = guestFrame;
@@ -921,6 +963,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             {
                 int16_t serial;
                 uint16_t entry;
+                if (h.lethal)
+                    kh2enemies::onOwnKill(h.object);
                 if (kh2enemies::followed(h.object, serial, entry))
                     g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyHit),
                                          kh2hits::encode(me.now.world, me.now.room, serial, entry, h));
@@ -932,6 +976,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         }
     }
     kh2hits::setCapture(g_opt.sharedEnemies && !g_session->isHost());
+    kh2hits::setKillCapture(g_opt.sharedEnemies && g_session->isHost());
     // 30 updates a second: every other guest frame.
     if (guestFrame / 2 == g_lastSentFrame / 2)
         return;

@@ -10,6 +10,8 @@
 // the object's own add_hp (vtable +0x78), so everyone's hits count once.
 #pragma once
 
+#include "hits.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -50,6 +52,15 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
 // Client: is our `object` a copy of one of the host's enemies we follow now
 // (alive)? Its serial and objentry id if so.
 bool followed(uint32_t object, int16_t &serial, uint16_t &entry);
+
+// Client: our player's blow left our copy `object` at 0 HP (hits.cpp).
+void onOwnKill(uint32_t object);
+
+// Client: the host's enemy `serial` died of `hit` (by `attacker`, our object
+// for whoever struck it): our copy takes that blow with all its HP and dies
+// the game's way. false: no live copy to kill.
+bool onHostKill(uint8_t *rdram, uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const kh2hits::Hit &hit,
+                uint32_t attacker, double now);
 // Forget everything (session ended). The enemies whose AI we turned off get
 // it back on the next thawAfterSession() (host loop, with the guest's memory).
 void reset();

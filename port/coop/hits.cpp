@@ -20,7 +20,7 @@ constexpr uint32_t kTakeHit = 0x001B3D00;    // (obj, DAMAGE*): HP, attacker, re
 
 // DAMAGE fields.
 constexpr uint32_t kDmgAttacker = 0x10, kDmgTarget = 0x14, kDmgFlags = 0x18, kDmgAttack = 0x1C, kDmgParam = 0x20,
-                   kDmgAttack2 = 0x58, kDmgAttack3 = 0x5C;
+                   kDmgAttack2 = 0x58, kDmgAttack3 = 0x5C, kDmgAmount = 0x28;
 constexpr uint32_t kFlagHandled = 1, kFlagHpTaken = 2;
 // The stand-in ATTACK: +0x08 attacker, +0x0C target (YS::trap_attack_new
 // allocates 0x140 bytes for one).
@@ -37,6 +37,8 @@ PS2Runtime::RecompiledFunction g_execDamage = nullptr;
 bool g_log = false;
 int g_logged = 0;
 std::atomic<bool> g_capture{false};
+std::atomic<bool> g_captureKills{false};
+std::vector<Hit> g_kills; // captured, not taken yet (under g_mutex)
 std::mutex g_mutex;
 std::vector<Hit> g_hits; // captured, not taken yet
 uint32_t g_replaySlot = 0; // EE thread only
@@ -48,6 +50,7 @@ template <typename T> T rd(const uint8_t *ram, uint32_t a)
     return v;
 }
 bool inRam(uint32_t a) { return a >= 0x00100000u && a < 0x02000000u; }
+void put32(uint8_t *rdram, uint32_t a, uint32_t v) { std::memcpy(rdram + (a & 0x01FFFFFFu), &v, 4); }
 
 // Enemy or boss (objentry type 3 or 4)?
 bool isEnemy(const uint8_t *rdram, uint32_t obj)
@@ -77,6 +80,28 @@ void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             std::printf("\n");
             std::fflush(stdout);
         }
+        // (Host) the blow that killed one of our enemies: copy it for the
+        // clients, whose copies then die of it too. exec_damage comes after
+        // the HP was taken.
+        if (g_captureKills.load(std::memory_order_relaxed) && isEnemy(rdram, obj))
+        {
+            const uint32_t sheet = rd<uint32_t>(rdram, obj + 0x48C);
+            const uint32_t param = rd<uint32_t>(rdram, dmg + kDmgParam);
+            if (inRam(sheet) && rd<int32_t>(rdram, sheet) <= 0 && inRam(param))
+            {
+                Hit h;
+                h.object = obj;
+                h.attacker = rd<uint32_t>(rdram, dmg + kDmgAttacker);
+                std::memcpy(h.damage, rdram + (dmg & 0x01FFFFFFu), kDamageSize);
+                std::memcpy(h.param, rdram + (param & 0x01FFFFFFu), kParamSize);
+                std::lock_guard<std::mutex> lock(g_mutex);
+                bool again = false; // (more hits on a body already at 0)
+                for (const Hit &k : g_kills)
+                    again = again || k.object == obj;
+                if (!again && g_kills.size() < 64)
+                    g_kills.push_back(h);
+            }
+        }
         // Our player hit an enemy: copy it for the host.
         if (g_capture.load(std::memory_order_relaxed))
         {
@@ -88,6 +113,16 @@ void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 h.object = obj;
                 std::memcpy(h.damage, rdram + (dmg & 0x01FFFFFFu), kDamageSize);
                 std::memcpy(h.param, rdram + (param & 0x01FFFFFFu), kParamSize);
+                // Our blow killed our copy: its AI back now, this frame, so it
+                // dies the game's way as in a game of one (frozen, the body
+                // stood there; enemies.cpp leaves it alone from now on).
+                const uint32_t sheet = rd<uint32_t>(rdram, obj + 0x48C);
+                if (inRam(sheet) && rd<int32_t>(rdram, sheet) <= 0)
+                {
+                    h.lethal = true;
+                    const uint32_t flags = rd<uint32_t>(rdram, obj + 0x10C);
+                    put32(rdram, obj + 0x10C, flags & ~0x200000u);
+                }
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_hits.size() < 64)
                     g_hits.push_back(h);
@@ -97,7 +132,6 @@ void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_execDamage, rdram, ctx, runtime);
 }
 
-void put32(uint8_t *rdram, uint32_t a, uint32_t v) { std::memcpy(rdram + (a & 0x01FFFFFFu), &v, 4); }
 } // namespace
 
 bool install(PS2Runtime &runtime)
@@ -121,6 +155,23 @@ void setCapture(bool on)
     }
 }
 
+void setKillCapture(bool on)
+{
+    if (g_captureKills.exchange(on) && !on)
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_kills.clear();
+    }
+}
+
+std::vector<Hit> takeKills()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::vector<Hit> out;
+    out.swap(g_kills);
+    return out;
+}
+
 std::vector<Hit> takeHits()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -130,7 +181,7 @@ std::vector<Hit> takeHits()
 }
 
 void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSize],
-            const uint8_t (&param)[kParamSize])
+            const uint8_t (&param)[kParamSize], bool lethal)
 {
     struct Copy
     {
@@ -140,7 +191,7 @@ void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSi
     auto c = std::make_shared<Copy>();
     std::memcpy(c->damage, damage, kDamageSize);
     std::memcpy(c->param, param, kParamSize);
-    kh2guest::post([enemy, attacker, c](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([enemy, attacker, c, lethal](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         uint8_t *ram = env.rdram;
         if (!first)
         {
@@ -166,7 +217,16 @@ void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSi
         put32(ram, atk + kAttackTarget, enemy);
         std::memcpy(env.host(prm), c->param, kParamSize);
         std::memcpy(env.host(dmg), c->damage, kDamageSize);
-        const uint32_t flags = (rd<uint32_t>(ram, dmg + kDmgFlags) & ~kFlagHandled) | kFlagHpTaken;
+        uint32_t flags = (rd<uint32_t>(ram, dmg + kDmgFlags) & ~kFlagHandled) | kFlagHpTaken;
+        if (lethal)
+        {
+            // The game takes the HP: all there is (the host's blow may have
+            // been smaller than what our copy has left).
+            flags &= ~kFlagHpTaken;
+            const int32_t hp = rd<int32_t>(ram, sheet);
+            if (rd<int32_t>(ram, dmg + kDmgAmount) < hp)
+                put32(ram, dmg + kDmgAmount, static_cast<uint32_t>(hp));
+        }
         put32(ram, dmg + kDmgFlags, flags);
         put32(ram, dmg + kDmgAttacker, attacker);
         put32(ram, dmg + kDmgTarget, enemy);
@@ -176,8 +236,9 @@ void replay(uint32_t enemy, uint32_t attacker, const uint8_t (&damage)[kDamageSi
         put32(ram, dmg + kDmgParam, prm);
         if (g_log)
         {
-            std::printf("[hits] replaying a client's hit on %08X (reaction %02X/%02X, by %08X)\n", enemy,
-                        c->damage[0x26], c->damage[0x27], attacker);
+            std::printf("[hits] replaying %s on %08X (reaction %02X/%02X, by %08X)\n",
+                        lethal ? "the host's killing blow" : "a client's hit", enemy, c->damage[0x26],
+                        c->damage[0x27], attacker);
             std::fflush(stdout);
         }
         return kh2guest::Call{kTakeHit, {enemy, dmg}, {}};

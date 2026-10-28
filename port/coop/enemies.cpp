@@ -1,4 +1,5 @@
 #include "enemies.h"
+#include "hits.h"
 
 #include <cmath>
 #include <cstdio>
@@ -63,6 +64,8 @@ struct Follow
     double killedAt = -1;    // when we finished it off (its body should go soon after)
     bool removed = false;    // we had to take the body away ourselves
     double firstSeen = -1;   // when our game made it (one the host never has goes)
+    double hostDeadAt = -1;  // when the host's first said 0 HP (its killing blow should follow)
+    bool ownKill = false;    // our player's blow killed it (hits.cpp gave it its AI back)
 };
 std::map<int16_t, Follow> g_follow;   // by serial, this room
 std::map<uint32_t, double> g_killed;  // objects we finished off this room (when), whatever their serial
@@ -435,10 +438,38 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             f.holdUntil = now + 0.6;
             f.holding = true;
         }
+        if (f.ownKill && !f.killed)
+        {
+            // Our blow killed it (its damage went to the host above): it dies
+            // here of it, its own way; the host's goes when that damage lands.
+            f.frozen = false;
+            f.killed = true;
+            f.killedAt = now;
+            g_killed[e.object] = now;
+            std::printf("[enemies] %04X #%d: our blow killed it\n", e.entry, e.serial);
+            std::fflush(stdout);
+        }
+        if (f.killed)
+        {
+            // Dying its own way: the host's HP, place and motion no longer apply.
+            if (!f.removed && now - f.killedAt > 5.0)
+            {
+                f.removed = true;
+                std::printf("[enemies] %04X #%d: its body is still here; removing it\n", e.entry, e.serial);
+                std::fflush(stdout);
+                removeBody(e.object);
+            }
+            continue;
+        }
         int32_t hp = e.hp;
         if (h->hp <= 0)
         {
-            if (!f.killed)
+            // Dead on the host: the blow that killed it comes as its own event
+            // (onHostKill) and our copy dies of it. Without one by now (a death
+            // that was no hit), it just dies.
+            if (!f.killed && f.hostDeadAt < 0)
+                f.hostDeadAt = now;
+            if (!f.killed && now - f.hostDeadAt > 0.4)
             {
                 std::printf("[enemies] %04X #%d died on the host\n", e.entry, e.serial);
                 std::fflush(stdout);
@@ -535,6 +566,52 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     }
     kh2puppets::setOverrides(overrides);
     return damage;
+}
+
+bool onHostKill(uint8_t *rdram, uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const kh2hits::Hit &hit,
+                uint32_t attacker, double now)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (uint16_t(world << 8 | room) != g_followRoom)
+        return false;
+    auto it = g_follow.find(serial);
+    if (it == g_follow.end() || it->second.killed || it->second.entry != entry || !it->second.object)
+        return false;
+    Follow &f = it->second;
+    bool live = false;
+    int32_t hp = 0;
+    for (const Local &e : scan(rdram))
+        if (e.object == f.object)
+        {
+            live = true;
+            hp = e.hp;
+        }
+    if (!live || hp <= 0)
+        return false;
+    // Its AI back (its own code plays the death and takes the body away),
+    // then the host's blow, with all its HP.
+    if (f.frozen)
+    {
+        const uint32_t flags = rd<uint32_t>(rdram, f.object + kObjFlags);
+        const uint32_t back = (flags & ~kNoAct) | (f.flagsBefore & kNoAct);
+        std::memcpy(rdram + ((f.object + kObjFlags) & 0x01FFFFFFu), &back, 4);
+        f.frozen = false;
+    }
+    f.killed = true;
+    f.killedAt = now;
+    g_killed[f.object] = now;
+    std::printf("[enemies] %04X #%d was killed on the host: our copy takes the blow (%d HP)\n", entry, serial, hp);
+    std::fflush(stdout);
+    kh2hits::replay(f.object, attacker, hit.damage, hit.param, true);
+    return true;
+}
+
+void onOwnKill(uint32_t object)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (auto &[serial, f] : g_follow)
+        if (f.object == object && !f.killed)
+            f.ownKill = true;
 }
 
 bool followed(uint32_t object, int16_t &serial, uint16_t &entry)

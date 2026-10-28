@@ -135,6 +135,48 @@ void dress(uint8_t *rdram, uint16_t entry, uint16_t as)
     std::fflush(stdout);
 }
 
+// A drive form's look ("P_EX100_BTLF") -> the character's own ("P_EX100"),
+// by the look's own name (also while the entry is dressed); 0: not a form.
+std::map<uint8_t, uint16_t> g_baseWeapon; // player -> their weapon out of a form (under g_mutex)
+uint16_t baseLook(const uint8_t *rdram, uint16_t model)
+{
+    if (!model)
+        return 0;
+    const uint32_t rec = entryRecord(rdram, model);
+    if (!rec)
+        return 0;
+    char name[33] = {};
+    auto dressed = g_dress.find(model);
+    if (dressed != g_dress.end())
+        std::memcpy(name, dressed->second.original, 32);
+    else
+        std::memcpy(name, rdram + ((rec + kEntryLook) & 0x01FFFFFFu), 32);
+    static const char *const kForms[] = {"_BTLF", "_MAGF", "_TRIF", "_ULTF", "_HTLF", "_KH1F"};
+    if (std::strncmp(name, "P_EX", 4) != 0 || std::strlen(name) < 12)
+        return 0;
+    bool form = false;
+    for (const char *f : kForms)
+        form = form || std::strcmp(name + 7, f) == 0;
+    if (!form)
+        return 0;
+    name[7] = 0;
+    // The entry whose own look that is (not one of ours dressed in it).
+    const uint32_t table = rd<uint32_t>(rdram, kh2state::addr::Obj0Ptr);
+    if (!table || table >= 0x02000000u)
+        return 0;
+    const uint32_t count = rd<uint32_t>(rdram, table + 4);
+    for (uint32_t i = 0; i < count && i < 4096; ++i)
+    {
+        const uint32_t r = table + 8 + i * kEntrySize;
+        const uint16_t id = uint16_t(rd<uint32_t>(rdram, r) & 0xFFFF);
+        if (g_dress.count(id))
+            continue;
+        if (std::strncmp(reinterpret_cast<const char *>(rdram + ((r + kEntryLook) & 0x01FFFFFFu)), name, 32) == 0)
+            return id;
+    }
+    return 0;
+}
+
 uint16_t dressedAs(uint16_t entry)
 {
     auto it = g_dress.find(entry);
@@ -940,9 +982,26 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     const kh2state::State st = kh2state::read(rdram);
     const std::vector<Companion> comps = companions(rdram);
 
+    // A player in a drive form shows in their own look here: a stand-in
+    // made in a form's look (P_EX100_BTLF, Valor: two keyblades) called
+    // through a null object a moment later and the game crashed. Their
+    // weapon is the one they had before the form.
+    std::vector<Remote> shown(remotes.begin(), remotes.end());
+    for (Remote &r : shown)
+    {
+        const uint16_t base = baseLook(rdram, r.model);
+        if (base && base != r.model)
+        {
+            r.model = base;
+            auto w = g_baseWeapon.find(r.playerId);
+            r.weapon = w == g_baseWeapon.end() ? 0 : w->second;
+        }
+        else if (r.weapon && r.model)
+            g_baseWeapon[r.playerId] = r.weapon;
+    }
     // Remotes in id order take companion slots 1 and 2.
     std::vector<const Remote *> order;
-    for (const Remote &r : remotes)
+    for (const Remote &r : shown)
         order.push_back(&r);
     std::sort(order.begin(), order.end(), [](const Remote *a, const Remote *b) { return a->playerId < b->playerId; });
     if (order.size() > 2)

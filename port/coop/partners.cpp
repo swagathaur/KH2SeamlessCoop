@@ -177,6 +177,41 @@ uint16_t baseLook(const uint8_t *rdram, uint16_t model)
     return 0;
 }
 
+bool lookInUse(const uint8_t *rdram, uint16_t entry)
+{
+    // The look's own name (also while the entry is dressed)...
+    const uint32_t rec = entryRecord(rdram, entry);
+    if (!rec)
+        return true; // nothing to load
+    char name[33] = {};
+    auto dressed = g_dress.find(entry);
+    if (dressed != g_dress.end())
+        std::memcpy(name, dressed->second.original, 32);
+    else
+        std::memcpy(name, rdram + ((rec + kEntryLook) & 0x01FFFFFFu), 32);
+    // ... worn by an object here.
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+    {
+        const uint32_t r = rd<uint32_t>(rdram, a.address + kh2state::addr::ObjEntry);
+        if (r && r < 0x02000000u &&
+            std::strncmp(reinterpret_cast<const char *>(rdram + ((r + kEntryLook) & 0x01FFFFFFu)), name, 32) == 0)
+            return true;
+    }
+    return false;
+}
+
+// A stand-in goes with what it holds: its weapons (objects whose owner,
+// +0x570, it is) are not taken by its own leave, and one left behind asked
+// its gone owner for its hand bone and the game crashed. Weapons first.
+void removeWithWeapons(const uint8_t *rdram, uint32_t obj)
+{
+    constexpr uint32_t kWeaponOwner = 0x570;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        if (a.type == 5 && rd<uint32_t>(rdram, a.address + kWeaponOwner) == obj)
+            kh2puppets::remove(a.address);
+    kh2puppets::remove(obj);
+}
+
 uint16_t dressedAs(uint16_t entry)
 {
     auto it = g_dress.find(entry);
@@ -396,6 +431,40 @@ bool g_spawnTried[2] = {false, false};
 // pause menu reuses; on leaving the menu the weapon drew from what was there
 // and the game crashed. Such a stand-in holds our weapon, which is loaded.
 bool g_lateRoom[2] = {false, false};
+// Looks (objentry ids) whose files we asked for this room, and when. A
+// stand-in made in a look whose model was not loaded yet (a drive form's,
+// P_EX100_BTLF) got its weapon at once, before its model: the weapon asked
+// the stand-in's model (+0x670, still null) for its hand bone and the game
+// crashed. The files are asked for first (into the room's cache, as a spawn
+// list does) and the stand-in is made a moment later.
+double nowSec();
+std::map<uint16_t, double> g_lookAsked;
+// A look some object here already wears (its model is loaded): asking for
+// its files again made the game load them anew under that object (the
+// host's own Sora, P_EX100), which then had no model and crashed.
+bool lookInUse(const uint8_t *rdram, uint16_t entry);
+bool lookReady(const uint8_t *rdram, uint16_t entry)
+{
+    if (!entry || lookInUse(rdram, entry))
+        return true;
+    auto it = g_lookAsked.find(entry);
+    if (it == g_lookAsked.end())
+    {
+        g_lookAsked[entry] = nowSec();
+        // Only a drive form's body look ("P_EX100_BTLF"): nothing here has
+        // its files, and a stand-in made in it never gets a model otherwise.
+        // Not weapons: asking again for one the game keeps (Sora's own
+        // keyblade while he is in a form) took its model away and crashed.
+        static const bool preload = [] {
+            const char *e = std::getenv("KH2_LOOK_PRELOAD");
+            return !(e && *e == '0');
+        }();
+        if (preload && baseLook(rdram, entry))
+            kh2puppets::requestFormLoad(entry);
+        return false;
+    }
+    return nowSec() - it->second >= 1.5;
+}
 bool g_roomOverridden = false;
 
 double nowSec()
@@ -733,6 +802,7 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         g_roomSince = nowSec();
         g_spawnTried[0] = g_spawnTried[1] = false;
         g_lateRoom[0] = g_lateRoom[1] = false;
+        g_lookAsked.clear();
         g_roomOverridden = g_ruleOverridden.exchange(false);
     }
     // On by default; KH2_NO_SPAWN_FRIEND=1 turns it off (diagnostics).
@@ -804,6 +874,8 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
             if (!r.model || dressedAs(entry) != r.model)
                 continue; // their look first (they may still be loading)
         }
+        if (!(lookReady(rdram, r.model) & lookReady(rdram, r.weapon)))
+            continue; // their look's files first
         g_spawnTried[k - 1] = true;
         g_lateRoom[k - 1] = true;
         {
@@ -982,14 +1054,17 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
     const kh2state::State st = kh2state::read(rdram);
     const std::vector<Companion> comps = companions(rdram);
 
-    // A player in a drive form shows in their own look here: a stand-in
-    // made in a form's look (P_EX100_BTLF, Valor: two keyblades) called
-    // through a null object a moment later and the game crashed. Their
-    // weapon is the one they had before the form.
+    // KH2_FORM_LOOKS=0: a player in a drive form shows in their own look
+    // here (their weapon: the one they had before the form). By default the
+    // stand-in takes the form's look, once its files are loaded (lookReady).
     std::vector<Remote> shown(remotes.begin(), remotes.end());
     for (Remote &r : shown)
     {
-        const uint16_t base = baseLook(rdram, r.model);
+        static const bool formLooks = [] {
+            const char *e = std::getenv("KH2_FORM_LOOKS");
+            return !(e && *e == '0');
+        }();
+        const uint16_t base = formLooks ? 0 : baseLook(rdram, r.model);
         if (base && base != r.model)
         {
             r.model = base;
@@ -1040,7 +1115,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             std::printf("[partner] the room made party member %d after all: taking ours (%08X) away\n", k, made);
             std::fflush(stdout);
             g_made[k - 1] = 0;
-            kh2puppets::remove(made);
+            removeWithWeapons(rdram, made);
         }
     }
 
@@ -1264,14 +1339,15 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
         // look, or they changed form): it goes, and spawnMissing makes the
         // party member again, in their look now. Reloading the room for it
         // put everyone back at the door for a moment.
-        if (here && !s.dressedAtCreation && r.model && dressedAs(s.companionEntry) == r.model && !s.refreshAsked)
+        if (here && !s.dressedAtCreation && r.model && dressedAs(s.companionEntry) == r.model && !s.refreshAsked &&
+            lookReady(rdram, r.model) & lookReady(rdram, r.weapon))
         {
             s.refreshAsked = true;
             if (s.slot >= 1 && s.slot <= 2)
                 g_spawnTried[s.slot - 1] = false;
             std::printf("[partner] player %u's stand-in %08X is in an old look: making it again\n", r.playerId + 1, obj);
             std::fflush(stdout);
-            kh2puppets::remove(obj);
+            removeWithWeapons(rdram, obj);
         }
 
         Link l;

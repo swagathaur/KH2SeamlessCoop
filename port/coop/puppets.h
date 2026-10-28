@@ -56,6 +56,8 @@ void requestSpawn(uint32_t entryId, float distance = 150.0f);
 // Ask the game to load an objentry's model and motions (the objentry read
 // request a room's spawn list makes, then CACHE_BUFF::Flush).
 void requestPreload(uint32_t entryId);
+// A drive form's look, read into a cache group of its own (as the drive does).
+void requestFormLoad(uint32_t entryId);
 // Give a puppet entry (0x084C or 0x084D) another entry's model and motion set
 // (lookEntry 0 puts its own back). Takes effect for later loads and spawns.
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry);

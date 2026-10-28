@@ -540,10 +540,48 @@ bool usable(const kh2state::ActorInfo &a)
     // Townsfolk and named NPCs; not the player, weapons, prizes or enemies.
     return a.type == 2 || a.type == 15 || a.type == 8;
 }
+// FUN_0011D6C0(model, bone, out): a model's bone matrix. A weapon asks its
+// holder's model for the hand bone every frame; a stand-in made in a drive
+// form's look has no model until the look has loaded (+0x670 is null for a
+// few frames), and the game then calls through a null table. Give it a
+// plain matrix until the model is there: the weapon sits at the holder.
+constexpr uint32_t kBoneMatrix = 0x0011D6C0;
+PS2Runtime::RecompiledFunction g_boneMatrix = nullptr;
+std::atomic<uint32_t> g_boneMisses{0};
+
+void boneMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t model = getRegU32(ctx, 4);
+    uint32_t inner = 0;
+    if (model && model < 0x02000000u)
+        std::memcpy(&inner, rdram + model + 0x14, 4);
+    if (inner)
+    {
+        kh2::callOriginal(g_boneMatrix, rdram, ctx, runtime);
+        return;
+    }
+    const uint32_t out = getRegU32(ctx, 6);
+    if (out && out < 0x02000000u - 64)
+    {
+        const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        std::memcpy(rdram + out, id, sizeof(id));
+    }
+    ctx->f[0] = 0.0f;
+    setReturnU32(ctx, out);
+    if (g_boneMisses.fetch_add(1) < 4)
+    {
+        std::printf("[puppets] bone %u asked of a model that is not loaded yet (0x%08X): a plain matrix given\n",
+                    getRegU32(ctx, 5), model);
+        std::fflush(stdout);
+    }
+}
 } // namespace
 
 bool install(PS2Runtime &runtime)
 {
+    g_boneMatrix = runtime.lookupFunction(kBoneMatrix);
+    if (!g_boneMatrix || !runtime.replaceFunction(kBoneMatrix, &boneMatrixHook))
+        g_boneMatrix = nullptr;
     g_buildMatrix = runtime.lookupFunction(kh2state::addr::ObjBuildMatrix);
     if (!g_buildMatrix || !runtime.replaceFunction(kh2state::addr::ObjBuildMatrix, &buildMatrixHook))
     {
@@ -853,6 +891,34 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
 }
 
 void requestPreload(uint32_t entryId) { preload(entryId, {}); }
+
+void requestFormLoad(uint32_t entryId)
+{
+    // As the drive itself does for Sora (FUN_001B65E0): the form's entry is
+    // read into a cache group of its own (0x1388 for Sora; 0x1389 here),
+    // FUN_0016EB48(entry, group, 4, 7), then CACHE_BUFF::Flush. Read into the
+    // room's general group (-1, as requestPreload does) a form's files took
+    // the place of things the room's objects still used, and they crashed.
+    constexpr uint32_t kReadRequest = 0x0016EB48;
+    constexpr uint32_t kCacheFlush = 0x00170888;
+    constexpr uint32_t kGroup = 0x1389;
+    auto step = std::make_shared<int>(0);
+    kh2guest::post([entryId, step](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
+        if (*step == 0)
+            ensurePrivateTable(env.rdram);
+        switch ((*step)++)
+        {
+        case 0:
+            return kh2guest::Call{kReadRequest, {entryId, kGroup, 4u, 7u}, {}};
+        case 1:
+            return kh2guest::Call{kCacheFlush, {0u}, {}};
+        default:
+            std::printf("[puppets] requested loading form look %04X (cache group %04X)\n", entryId, kGroup);
+            std::fflush(stdout);
+            return std::nullopt;
+        }
+    });
+}
 
 namespace
 {

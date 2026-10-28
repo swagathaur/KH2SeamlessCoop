@@ -480,11 +480,14 @@ void syncRecord(uint8_t *rdram, State &s, const Remote &r, uint8_t world)
 // FUN_001A8D40(MEMBER*, rule) override. A room's area script picks its
 // party with a rule (opcode 15 of its map/battle/event programs): 0 is the
 // player alone (Sora- or Roxas-only bosses, the Station of Awakening), 1 the
-// player and the world's two companions, others mixes (table at
-// [0x01C6CC0C], 4 bytes a rule: 00 player, 01-03 the world's companions,
-// 0x12 nobody). While other players are in the session, a rule with fewer
-// companions than players becomes rule 1, so they have party members to
-// stand in for there too (empty world slots are filled, see fillParty).
+// player and the world's two companions, 6 the player and the first, others
+// mixes (table at [0x01C6CC0C], 4 bytes a rule: 00 player, 01-03 the world's
+// companions, 0x12 nobody). While other players are in the session, a rule
+// with fewer companions than players becomes the one with the player and
+// just the first one or two companions, so the room makes party members for
+// them to stand in for as it loads (empty world slots are filled, see
+// fillParty). Making one later instead (spawnMissing) put its files in memory
+// the pause menu takes back: leaving the menu crashed in its weapon.
 std::atomic<int> g_partyWanted{0};
 std::atomic<bool> g_ruleOverridden{false}; // this room load's rule was raised (spawnMissing)
 PS2Runtime::RecompiledFunction g_partyRule = nullptr;
@@ -502,10 +505,19 @@ void partyRuleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             companions += rd<uint8_t>(rdram, table + rule * 4 + i) != kNobody ? 1 : 0;
         if (companions < wanted)
         {
-            std::printf("[partner] the room's party rule %u (%d companion(s)) becomes 1 for %d player(s)\n", rule,
-                        companions, wanted);
+            // The rule with the player and exactly the first `wanted` companion slots.
+            const uint8_t want[4] = {0x00, 0x01, uint8_t(wanted >= 2 ? 0x02 : kNobody), kNobody};
+            uint32_t pick = 1;
+            for (uint32_t i = 0; i < 16; ++i)
+                if (std::memcmp(rdram + ((table + i * 4) & 0x01FFFFFFu), want, 4) == 0)
+                {
+                    pick = i;
+                    break;
+                }
+            std::printf("[partner] the room's party rule %u (%d companion(s)) becomes %u for %d player(s)\n", rule,
+                        companions, pick, wanted);
             std::fflush(stdout);
-            SET_GPR_U32(ctx, 5, 1u);
+            SET_GPR_U32(ctx, 5, pick);
             g_ruleOverridden = true;
         }
     }
@@ -621,10 +633,10 @@ bool install(PS2Runtime &runtime)
         g_sacrifice = nullptr;
         return false;
     }
-    // Experimental, KH2_PARTY_RULE=1: raising the room's party rule is not
-    // needed (spawnMissing makes the members) and is off by default.
+    // On by default; KH2_PARTY_RULE=0 leaves rooms' party rules alone (then
+    // spawnMissing makes the members late; see partyRuleHook).
     const char *ruleEnv = std::getenv("KH2_PARTY_RULE");
-    g_partyRule = ruleEnv && *ruleEnv == '1' ? runtime.lookupFunction(kPartyRule) : nullptr;
+    g_partyRule = !(ruleEnv && *ruleEnv == '0') ? runtime.lookupFunction(kPartyRule) : nullptr;
     if (g_partyRule && !runtime.replaceFunction(kPartyRule, &partyRuleHook))
     {
         std::fprintf(stderr, "[partner] could not hook 0x%08X\n", kPartyRule);

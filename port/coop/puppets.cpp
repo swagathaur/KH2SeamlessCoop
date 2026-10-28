@@ -16,6 +16,7 @@
 #include "hle_call.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_pad_host.h"
 
 namespace kh2puppets
 {
@@ -332,6 +333,7 @@ struct Guard
 };
 Guard g_guards[kMaxPuppets + 2]; // our puppets, then the party members players stand in for
 float g_lastMotionTime[kMaxPuppets + 2] = {};
+uint64_t g_lastStepFrame[kMaxPuppets + 2] = {}; // guest frame of the last look at it
 PS2Runtime::RecompiledFunction g_motionUpdate = nullptr;
 constexpr uint32_t kMotionUpdate = 0x0017F620; // YS::MOTION's per-frame step (MOTION*, float dt)
 constexpr uint32_t kFrameDelta = 0x00349E10;   // the dt YS::OBJ's update passes it
@@ -340,7 +342,10 @@ constexpr uint32_t kFrameDelta = 0x00349E10;   // the dt YS::OBJ's update passes
 // classes we use that also stops its motion's per-frame step: the player's
 // run was started on it but stood still (they glided along). If its
 // motion's time did not move since the last frame, step it here, as the
-// object's own update would.
+// object's own update would. Once a frame: the matrix is built more than
+// once a frame for some (party members), and the second look saw no change
+// since the first and stepped it again after the game's own step, so
+// stand-ins played every motion at twice the speed.
 void stepFrozenMotion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t obj)
 {
     if (!g_motionUpdate)
@@ -350,6 +355,10 @@ void stepFrozenMotion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, ui
     {
         if (g_guards[i].motion.load(std::memory_order_relaxed) != m)
             continue;
+        const uint64_t frame = ps2PadCurrentGuestFrame();
+        if (frame == g_lastStepFrame[i])
+            return;
+        g_lastStepFrame[i] = frame;
         uint32_t flags = 0;
         std::memcpy(&flags, rdram + ((obj + 0x10C) & 0x01FFFFFFu), 4);
         float t = 0;

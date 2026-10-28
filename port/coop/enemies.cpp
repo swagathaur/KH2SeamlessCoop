@@ -486,6 +486,15 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             std::memcpy(o.pos, f.shown, sizeof(o.pos));
             o.yaw = f.yaw;
             overrides.push_back(o);
+            // A new copy first plays its own way in (a Shadow rising out of the
+            // floor is its own routine: frozen at once, it stayed flat).
+            static const double spawnGrace = [] {
+                const char *e = std::getenv("KH2_ENEMY_SPAWN_GRACE");
+                const double v = e ? std::atof(e) : 2.0;
+                return v >= 0.0 && v < 30.0 ? v : 2.0;
+            }();
+            if (puppetEnemies() && f.firstSeen >= 0 && now - f.firstSeen < spawnGrace)
+                continue; // (the override above is already in the list)
             if (puppetEnemies())
             {
                 // Its AI off; it does what the host's does.

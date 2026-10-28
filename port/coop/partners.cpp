@@ -396,6 +396,33 @@ bool g_wantRefresh = false;         // under g_mutex
 
 void stopRiding(uint8_t *rdram, State &s, uint32_t obj);
 
+// Two players put on one spot (both games place their own player at a
+// battle's start point) stood in each other: each game's player was pushed
+// off the other's stand-in, which followed them, and both slid away for good.
+// A stand-in closer than this to our player is shown that far away instead,
+// straight away from us (on one spot: to a side picked by player number, the
+// mirror of what the other game does). Apart, it is where they are.
+void keepApart(const kh2state::State &st, uint8_t playerId, float (&pos)[3])
+{
+    constexpr float kApart = 90.0f; // a little more than two bodies
+    if (!st.player.valid)
+        return;
+    const float dx = pos[0] - st.player.pos[0], dz = pos[2] - st.player.pos[2];
+    const float d = std::sqrt(dx * dx + dz * dz);
+    if (d >= kApart || std::fabs(pos[1] - st.player.pos[1]) > 150.0f)
+        return;
+    float ux = 0, uz = 0;
+    if (d > 1.0f)
+    {
+        ux = dx / d;
+        uz = dz / d;
+    }
+    else
+        ux = (playerId & 1) ? 1.0f : -1.0f;
+    pos[0] = st.player.pos[0] + ux * kApart;
+    pos[2] = st.player.pos[2] + uz * kApart;
+}
+
 void releaseObject(uint8_t *rdram, State &s)
 {
     if (!s.object)
@@ -1097,6 +1124,7 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
             o.object = obj;
             std::memcpy(o.pos, r.pos, sizeof(o.pos));
             o.yaw = r.yaw;
+            keepApart(st, r.playerId, o.pos);
             overrides.push_back(o);
             // Their motions only make sense on their own motion set. Also put
             // theirs back when this game started another (a hit reaction).

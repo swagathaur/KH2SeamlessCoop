@@ -53,6 +53,7 @@ struct State
     double quietUntil = 0;   // no heals read until then (an avatar made or gone: the slot is set anew)
     double madeAt = 0;       // when it was made (prepared)
     bool plainLook = false;  // their form's look did not load here: their own look instead (this room)
+    bool hiddenForCut = false; // hidden while a cutscene plays
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -113,6 +114,45 @@ bool justLeft(uint32_t obj)
             return true;
     return false;
 }
+// Out of the game's lists of players (0x01D48DA0, and the one it moves
+// leaving players to, 0x01D48DA8: head, tail; next at +0x8B4). An avatar
+// is no player of this game: in the list, a drive check saw a player in a
+// form (an avatar in theirs) and Drive was greyed out; and the player
+// teardown we skip would have taken it out (an event start walked the list
+// into a freed avatar).
+bool unlinkPlayer(uint8_t *rdram, uint32_t obj)
+{
+    bool found = false;
+    for (uint32_t list : {0x01D48DA0u, 0x01D48DA8u})
+    {
+        uint32_t prev = 0, cur = 0;
+        std::memcpy(&cur, rdram + list, 4);
+        for (int guard = 0; cur && guard < 64; ++guard)
+        {
+            uint32_t next = 0;
+            std::memcpy(&next, rdram + ((cur + 0x8B4) & 0x01FFFFFFu), 4);
+            if (cur == obj)
+            {
+                if (prev)
+                    std::memcpy(rdram + ((prev + 0x8B4) & 0x01FFFFFFu), &next, 4);
+                else
+                    std::memcpy(rdram + list, &next, 4);
+                uint32_t tail = 0;
+                std::memcpy(&tail, rdram + list + 4, 4);
+                if (tail == obj)
+                    std::memcpy(rdram + list + 4, &prev, 4);
+                const uint32_t zero = 0;
+                std::memcpy(rdram + ((obj + 0x8B4) & 0x01FFFFFFu), &zero, 4);
+                found = true;
+                break;
+            }
+            prev = cur;
+            cur = next;
+        }
+    }
+    return found;
+}
+
 void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t obj = getRegU32(ctx, 4);
@@ -130,6 +170,21 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         std::printf("[avatars] %08X is torn down as an object (not as the player)\n", obj);
         std::fflush(stdout);
+        unlinkPlayer(rdram, obj);
+        // Its motion (+0x140) lets go of nothing: its animation instances
+        // (motion +0x108, 8 of them, 8 apart), the motion set's refcount
+        // (+0x148) and its callback (+0x194) are the ones our player's
+        // motion uses when the avatar wears our look; the motion teardown
+        // (FUN_00180CE0) released them and our player's animation was gone
+        // (a crash at 0x0017FE84). A few bytes are left behind instead.
+        {
+            const uint32_t motion = (obj + 0x140) & 0x01FFFFFFu;
+            const uint32_t zero = 0;
+            for (uint32_t i = 0; i < 8; ++i)
+                std::memcpy(rdram + motion + 0x108 + i * 8, &zero, 4);
+            std::memcpy(rdram + motion + 0x148, &zero, 4);
+            std::memcpy(rdram + motion + 0x194, &zero, 4);
+        }
         ctx->pc = kObjTeardown; // (a0 and ra as they are: a tail call)
         return;
     }
@@ -228,7 +283,7 @@ bool lookHere(const uint8_t *rdram, uint16_t entry)
 // trap_obj_hide calls; YS::OBJ::is_hide then sees 0x80 or 0x100 at +0x10C).
 // (A party member's +0x670 is not a ModelObj as a player's is: writing a
 // parts mask there wrote into its mesh, and Ping showed as a head.)
-double g_lastHideAsk = 0;
+std::map<uint32_t, double> g_lastHideAsk; // per object
 void show(uint8_t *rdram, uint32_t obj)
 {
     const uint32_t vt = inRam(obj) ? rd<uint32_t>(rdram, obj) : 0;
@@ -240,9 +295,10 @@ void hide(uint8_t *rdram, uint32_t obj, double t)
 {
     if (rd<uint32_t>(rdram, obj + kObjFlags) & 0x180u)
         return; // hidden
-    if (t - g_lastHideAsk < 0.5)
+    double &last = g_lastHideAsk[obj];
+    if (t - last < 0.5)
         return;
-    g_lastHideAsk = t;
+    last = t;
     const uint32_t vt = rd<uint32_t>(rdram, obj);
     const uint32_t fn = inRam(vt) ? rd<uint32_t>(rdram, vt + 0x44) : 0;
     if (!inRam(fn))
@@ -288,6 +344,15 @@ bool enabled()
 }
 
 uint32_t ourPlayer() { return g_ourPlayerShared.load(); }
+
+std::atomic<uint32_t> g_usedSheets[kMaxAvatars] = {};
+bool isAvatarSheet(uint32_t sheet)
+{
+    for (const auto &x : g_usedSheets)
+        if (sheet && x.load() == sheet)
+            return true;
+    return false;
+}
 
 std::vector<uint32_t> objects()
 {
@@ -345,6 +410,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.proxy = 0;
             s.writtenHp = s.writtenMp = -1;
             s.plainLook = false;
+            s.hiddenForCut = false;
         }
     }
     // Ours: the object the game made as the player for this room (a new
@@ -389,7 +455,27 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         if (s.plainLook)
             if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
                 want = base;
-        // Not here, or a cutscene (its actors are the story's): away.
+        // A cutscene (its actors are the story's): hidden the game's way
+        // until it is over, not torn down (an avatar in our own look shares
+        // its motion data with our player: tearing it down at a cutscene's
+        // start left our player's motion without its animation, a crash).
+        if (cutscene && here && s.object && s.entry == want)
+        {
+            if (!s.hiddenForCut)
+            {
+                std::printf("[avatars] player %u's avatar %08X hidden (cutscene)\n", r.playerId + 1, s.object);
+                std::fflush(stdout);
+                s.hiddenForCut = true;
+            }
+            hide(rdram, s.object, t);
+            continue;
+        }
+        if (s.hiddenForCut && s.object && !cutscene)
+        {
+            s.hiddenForCut = false;
+            show(rdram, s.object);
+        }
+        // Not here, or not made yet in a cutscene: away.
         if (!here || cutscene || (s.object && s.entry != want))
         {
             if (s.object)
@@ -480,12 +566,13 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         {
             const uint8_t raw = rd<uint8_t>(rdram, kh2state::addr::Save + 0x3534 + uint32_t(st.now.world) * 4u + sheetIndex);
             const uint8_t character = raw & 0x7F;
-            if (character > 0 && character < 13 && !(raw & 0x80))
+            if (character > 0 && character < 16 && !(raw & 0x80))
                 names[character] = r.name;
             // A world's own companion there (bit 7: Ping is 0x83, not her
-            // character number): the world companions' names (characters
-            // 3-15, Ping is 14) are theirs; only one of them is in a party.
-            if (raw & 0x80)
+            // character number; or Mulan, 3, who is Ping in her disguise):
+            // the world companions' names (characters 3-15, Ping is 14) are
+            // theirs; only one of them is in a party.
+            if ((raw & 0x80) || (character >= 3 && character < 16))
                 for (int c = 3; c <= 15; ++c)
                     names[c] = r.name;
         }
@@ -648,6 +735,14 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             }
             wr<uint32_t>(rdram, hud + 0x34, g_ourPlayer);
         }
+    }
+    {
+        uint32_t j = 0;
+        for (auto &[id, st2] : g_states)
+            if (j < kMaxAvatars)
+                g_usedSheets[j++].store(st2.object || st2.proxy ? st2.sheet : 0u);
+        for (; j < kMaxAvatars; ++j)
+            g_usedSheets[j].store(0);
     }
     {
         uint32_t i = 0;

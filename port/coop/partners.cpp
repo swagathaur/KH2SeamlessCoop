@@ -642,20 +642,35 @@ void syncRecord(uint8_t *rdram, State &s, const Remote &r, uint8_t world)
 // the pause menu takes back: leaving the menu crashed in its weapon.
 std::atomic<int> g_partyWanted{0};
 std::atomic<bool> g_ruleOverridden{false}; // this room load's rule was raised (spawnMissing)
+// Avatars (avatars.h): the other players are the party; a room's rule with
+// more companions than players becomes the one with just as many (each is
+// a hidden place holder for one of them).
+std::atomic<bool> g_reduceParty{false};
+std::atomic<int> g_reduceTo{0};
 PS2Runtime::RecompiledFunction g_partyRule = nullptr;
 constexpr uint32_t kPartyRule = 0x001A8D40;
 constexpr uint32_t kPartyRules = 0x01C6CC0C;
 void partyRuleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const int wanted = g_partyWanted.load(std::memory_order_relaxed);
+    const int wanted = g_reduceParty.load(std::memory_order_relaxed) ? g_reduceTo.load(std::memory_order_relaxed)
+                                                                    : g_partyWanted.load(std::memory_order_relaxed);
     const uint32_t rule = getRegU32(ctx, 5);
     const uint32_t table = rd<uint32_t>(rdram, kPartyRules);
-    if (wanted > 0 && rule != 1 && rule < 16 && table && table < 0x02000000u)
+    const bool reduce = g_reduceParty.load(std::memory_order_relaxed);
+    {
+        static int logged = 0;
+        if (logged++ < 30)
+        {
+            std::printf("[partner] party rule %u asked (wanted %d, reduce %d)\n", rule, wanted, reduce ? 1 : 0);
+            std::fflush(stdout);
+        }
+    }
+    if (wanted > 0 && (rule != 1 || reduce) && rule < 16 && table && table < 0x02000000u)
     {
         int companions = 0;
         for (int i = 1; i < 4; ++i)
             companions += rd<uint8_t>(rdram, table + rule * 4 + i) != kNobody ? 1 : 0;
-        if (companions < wanted)
+        if (companions < wanted || (reduce && companions > wanted))
         {
             // The rule with the player and exactly the first `wanted` companion slots.
             const uint8_t want[4] = {0x00, 0x01, uint8_t(wanted >= 2 ? 0x02 : kNobody), kNobody};
@@ -1496,6 +1511,12 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
         character = 0;
     const uint8_t *rec = rdram + kSaveChars + uint32_t(character) * kLoadoutSize;
     return std::vector<uint8_t>(rec, rec + kLoadoutSize);
+}
+
+void setReduceParty(bool on, int players)
+{
+    g_reduceTo = std::min(players, 2);
+    g_reduceParty = on && players > 0;
 }
 
 uint16_t formBaseLook(const uint8_t *rdram, uint16_t model)

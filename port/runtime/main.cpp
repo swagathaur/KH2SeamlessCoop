@@ -979,6 +979,8 @@ void dumpGs(Harness &h, uint64_t frame)
 //   dump                                       all 32 MB of RAM to SHOTS/ram_N.bin
 //   echo TEXT                                  "[control] echo TEXT" (a marker to wait for)
 //   partner on|off                             the Echo test partner (as --partner-test)
+//   freeze ADDR HEXBYTES | unfreeze ADDR       write those bytes every frame (e.g. full HP)
+//   mash BTN[+BTN] EVERY | mash off            press for 4 frames of every EVERY
 //   quit                                       stop
 // Each command run is logged as "[control] ...".
 struct Control
@@ -990,6 +992,8 @@ struct Control
     uint64_t waitUntil = 0;
     std::vector<Options::ScriptStep> steps; // by guest frame (scriptFrame)
     bool quit = false;
+    std::map<uint32_t, std::vector<uint8_t>> frozen; // freeze: written every frame
+    uint32_t mashButtons = 0, mashEvery = 0;       // mash: pressed for 4 frames of every N
 };
 Control g_control;
 uint32_t ctlRd32(const uint8_t *ram, uint32_t a)
@@ -1045,6 +1049,8 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             std::printf("[control] f%llu %s\n", (unsigned long long)frame, what.c_str());
             std::fflush(stdout);
         };
+        try
+        {
         if (cmd == "input" || cmd == "press")
         {
             Options::ScriptStep st{scriptFrame + 1, 6, 0, 0x80, 0x80, 0x80, 0x80};
@@ -1156,6 +1162,31 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             }
             say("dump " + path.string());
         }
+        else if (cmd == "freeze" || cmd == "unfreeze")
+        {
+            std::string a, hex;
+            ls >> a >> hex;
+            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & 0x01FFFFFFu;
+            if (cmd == "unfreeze")
+                g_control.frozen.erase(addr);
+            else
+            {
+                std::vector<uint8_t> bytes;
+                for (size_t n = 0; 2 * n + 2 <= hex.size(); ++n)
+                    bytes.push_back(uint8_t(std::stoul(hex.substr(2 * n, 2), nullptr, 16)));
+                g_control.frozen[addr] = bytes;
+            }
+            say(line);
+        }
+        else if (cmd == "mash")
+        {
+            std::string b;
+            unsigned every = 20;
+            ls >> b >> every;
+            g_control.mashButtons = b == "off" ? 0u : buttonMask(b);
+            g_control.mashEvery = every ? every : 20;
+            say(line);
+        }
         else if (cmd == "echo")
             say(line);
         else if (cmd == "partner")
@@ -1172,7 +1203,15 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
         }
         else
             say("unknown command: " + line);
+        }
+        catch (const std::exception &e)
+        {
+            say(std::string("bad command (") + e.what() + "): " + line);
+        }
     }
+    for (const auto &[addr, bytes] : g_control.frozen)
+        if (addr + bytes.size() <= 0x02000000u)
+            std::memcpy(ram + addr, bytes.data(), bytes.size());
     // Finished steps go.
     auto &v = g_control.steps;
     v.erase(std::remove_if(v.begin(), v.end(), [&](const Options::ScriptStep &st) { return scriptFrame >= st.start + st.frames + 60; }),
@@ -1650,6 +1689,13 @@ bool headlessPump(void *userData)
         uint32_t heldAll = held;
         uint32_t sticks = 0x80808080u;
         controlTick(h, frame, scriptFrame);
+        if (g_control.mashButtons && g_control.mashEvery)
+        {
+            if (scriptFrame % g_control.mashEvery < 4)
+                heldAll |= g_control.mashButtons;
+            if (scriptFrame % g_control.mashEvery == 0)
+                pressed |= g_control.mashButtons;
+        }
         const std::vector<Options::ScriptStep> *lists[] = {&o.script, &g_control.steps};
         for (const std::vector<Options::ScriptStep> *list : lists)
             for (const Options::ScriptStep &st : *list)

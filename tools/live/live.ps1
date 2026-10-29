@@ -22,5 +22,5 @@ if ($mode -eq 'solo') { Start-Live 'solo' 'game\mc0' @('--name=Solo') }
 else {
   Start-Live 'host' 'game\mc0' @("--host=$port", '--name=Host')
   Start-Sleep 3
-  Start-Live 'client' $clientSave @("--join=127.0.0.1:$port", '--join-at=0', '--name=Client')
+  Start-Live 'client' $clientSave @("--join=127.0.0.1:$port", '--join-at=2700', '--name=Client')
 }

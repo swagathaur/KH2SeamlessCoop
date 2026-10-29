@@ -41,6 +41,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
 // Our own player object as the avatars know it (0: not yet): the game's
 // player pointer is another object for a moment while an avatar is made.
 uint32_t ourPlayer();
+// Is `sheet` one an avatar's HP and MP live in (a party slot or our own)?
+bool isAvatarSheet(uint32_t sheet);
 std::vector<uint32_t> objects();
 uint32_t objectFor(uint8_t playerId);
 // The avatar is casting (spells.h castAsPlayer): its own motions (the cast's,

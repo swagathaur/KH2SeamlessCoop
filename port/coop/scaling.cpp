@@ -1,4 +1,5 @@
 #include "scaling.h"
+#include "avatars.h"
 
 #include <algorithm>
 #include <atomic>
@@ -160,11 +161,9 @@ void tick(uint8_t *rdram, bool inSession, bool host, int count)
         const uint32_t sheet = rd<uint32_t>(rdram, a.address + kObjSheet);
         if (!inRam(sheet))
             continue;
-        // Never the party's sheets (an avatar's HP lives in a party slot) or
-        // the avatars' own (avatars.h).
-        if ((sheet >= kh2state::addr::Slot1 - 3 * kh2state::addr::SlotStride &&
-             sheet < kh2state::addr::Slot1 + kh2state::addr::SlotStride) ||
-            (sheet >= 0x01E4E000u && sheet < 0x01E4F000u))
+        // Never our sheet or an avatar's (avatars.h: a party slot). Enemies'
+        // sheets come from the same pool as the party slots, so only those.
+        if (sheet == kh2state::addr::Slot1 || kh2avatars::isAvatarSheet(sheet))
         {
             static int skipped = 0;
             if (skipped++ < 5)

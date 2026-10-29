@@ -78,6 +78,40 @@ bool ensurePrivateTable(uint8_t *rdram);
 // one room can run in the next (jobs wait while the player is away, as in a
 // cutscene or a load), and a spawn nobody wants any more stops there (done
 // gets 0) instead of making an object nobody follows.
+// Spawn records and groups (0x40 each) for spawned objects: 32 pairs in the
+// gap below the runtime's heap (0x01E4F000-0x01E50000; see kPrivateTable).
+constexpr uint32_t kSpawnPool = 0x01E4F000u, kSpawnPoolSlots = 32, kSpawnSlotSize = 0x80;
+uint32_t g_spawnPoolNext = 0;
+// A slot no live object refers to (+0x818 group, +0x81C record), or 0.
+uint32_t freeSpawnSlot(const uint8_t *rdram)
+{
+    const std::vector<kh2state::ActorInfo> actors = kh2state::actors(rdram);
+    for (uint32_t n = 0; n < kSpawnPoolSlots; ++n)
+    {
+        const uint32_t slot = kSpawnPool + ((g_spawnPoolNext + n) % kSpawnPoolSlots) * kSpawnSlotSize;
+        bool used = false;
+        for (const kh2state::ActorInfo &a : actors)
+        {
+            uint32_t g = 0, r = 0;
+            std::memcpy(&g, rdram + ((a.address + 0x818) & 0x01FFFFFFu), 4);
+            std::memcpy(&r, rdram + ((a.address + 0x81C) & 0x01FFFFFFu), 4);
+            used = used || (g >= slot && g < slot + kSpawnSlotSize) || (r >= slot && r < slot + kSpawnSlotSize);
+        }
+        if (!used)
+        {
+            g_spawnPoolNext = (g_spawnPoolNext + n + 1) % kSpawnPoolSlots;
+            return slot;
+        }
+    }
+    return 0;
+}
+
+// Our own player's data a spawned object can write (kept and put back): the
+// party slot's form part (Slot1 +0x188-0x268: form, its level, abilities;
+// not HP or MP) and the player's motion set names (0x01C60880-0x01C608C0).
+const std::pair<uint32_t, uint32_t> kKeptOnSpawn[2] = {{kh2state::addr::Slot1 + 0x188, 0x268 - 0x188},
+                                                       {0x01C60880u, 0x40}};
+
 void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void(uint32_t obj)> done,
                std::function<bool(const uint8_t *)> wanted = {}, int32_t serial = -1)
 {
@@ -87,6 +121,7 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
     {
         int step = 0;
         uint32_t unit = 0, group = 0, obj = 0, player = 0;
+        std::vector<uint8_t> kept[2]; // kKeptOnSpawn as it was before the object was made
         float pos[3];
         float yaw;
     };
@@ -103,6 +138,18 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
             if (done)
                 done(0);
             return std::nullopt;
+        }
+        if (st->step == 0)
+        {
+            // A spawn record and group of our own (kSpawnPool) when one is
+            // free: the room heap's are never given back, and a long fight's
+            // copies (every wave's, on a client) ran it down.
+            if (const uint32_t slot = freeSpawnSlot(env.rdram))
+            {
+                st->step = 2;
+                result = slot + 0x40;
+                st->unit = slot;
+            }
         }
         switch (st->step++)
         {
@@ -131,6 +178,8 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
             const float p[4] = {st->pos[0], st->pos[1], st->pos[2], 1.0f};
             std::memcpy(env.host(env.scratch), p, 16);
             std::memcpy(&st->player, env.host(kh2state::addr::PlayerPtr), 4);
+            for (int i = 0; i < 2; ++i)
+                st->kept[i].assign(env.host(kKeptOnSpawn[i].first), env.host(kKeptOnSpawn[i].first) + kKeptOnSpawn[i].second);
             return kh2guest::Call{kObjFactory, {entry, env.scratch}, {st->yaw}};
         }
         case 3:
@@ -162,6 +211,18 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
         default:
             break;
         }
+        // What making it changed of our own player's (a drive form's
+        // player-class object writes its form into "Sora's" sheet and his
+        // motion set's name): back as it was.
+        for (int i = 0; i < 2; ++i)
+            if (st->kept[i].size() == kKeptOnSpawn[i].second &&
+                std::memcmp(env.host(kKeptOnSpawn[i].first), st->kept[i].data(), st->kept[i].size()) != 0)
+            {
+                std::printf("[puppets] making %04X changed our player's data at %08X: put back\n", entry,
+                            kKeptOnSpawn[i].first);
+                std::fflush(stdout);
+                std::memcpy(env.host(kKeptOnSpawn[i].first), st->kept[i].data(), st->kept[i].size());
+            }
         if (done)
             done(st->obj);
         return std::nullopt;
@@ -1138,7 +1199,7 @@ void removeKeeping(uint32_t obj, std::vector<uint32_t> keep, std::function<bool(
             {
                 uint32_t now = 0;
                 std::memcpy(&now, env.host(keep[i]), 4);
-                if (now != (*before)[i] && (*before)[i] != obj)
+                if (now != (*before)[i] && (*before)[i] != obj && (now == 0 || now == obj))
                 {
                     std::printf("[puppets] %08X's leave changed %08X (%08X -> %08X): put back\n", obj, keep[i],
                                 (*before)[i], now);

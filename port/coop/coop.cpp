@@ -74,7 +74,7 @@ std::deque<kh2partner::Remote> g_echo;
 bool g_partnersReset = false; // undo the partners on the next tick (session over)
 // Shared story (story.h): the host sends its story and where it is (the
 // scene); clients play in it and watch its cutscenes.
-constexpr size_t kSceneSize = 11; // world, room, door, map, battle, event, cutscene
+constexpr size_t kSceneSize = 12; // world, room, door, map, battle, event, cutscene, battle mode
 bool g_storyFull = false;             // host: send all of it next time (someone joined)
 uint8_t g_sceneSent[kSceneSize] = {}; // host: the scene as last sent
 bool g_sceneSentValid = false;
@@ -218,6 +218,7 @@ void encodeScene(const kh2state::State &st, uint8_t (&out)[kSceneSize])
     std::memcpy(out + 6, &st.now.battle, 2);
     std::memcpy(out + 8, &st.now.event, 2);
     out[10] = st.control == 3 ? 1 : 0;
+    out[11] = uint8_t(st.battle); // BtlTyp: 0 none, 1 battle, 2 forced
 }
 
 // Client: the session is over (or shared story turned off); our own story
@@ -312,6 +313,29 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     uint16_t hmap;
     std::memcpy(&hmap, g_hostScene + 4, 2);
     const bool hostCut = g_hostScene[10] != 0 && hevent != 0 && hevent != 0xFFFF;
+    // The host's battle mode, in the host's room: our enemies are copies of
+    // the host's, made by us, and never put this game in battle (no Drive,
+    // no battle music). Raised to the host's while they fight, back once
+    // they are done (only what we raised).
+    {
+        static bool raised = false;
+        const uint32_t ours = me.battle;
+        const uint8_t theirs = g_hostScene[11];
+        if (hw == me.now.world && hr == me.now.room && theirs > ours && theirs <= 2 && me.control == 0)
+        {
+            const uint32_t v = theirs;
+            std::memcpy(ram + kh2state::addr::BtlTyp, &v, 4);
+            if (!raised)
+                addLog("in the host's fight");
+            raised = true;
+        }
+        else if (raised && (theirs == 0 || hw != me.now.world || hr != me.now.room))
+        {
+            const uint32_t v = 0;
+            std::memcpy(ram + kh2state::addr::BtlTyp, &v, 4);
+            raised = false;
+        }
+    }
     if (g_storyWarp && hw != 0 && me.control == 0 && !jumping)
     {
         g_storyWarp = false;
@@ -349,7 +373,12 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
             g_strayCutSince = now();
         if (formTask || infos || now() - formSeen < 6.0)
             g_strayCutSince = now();
-        if (now() - g_strayCutSince > 2.0 && now() - g_lastClientSkip > 3.0)
+        // The host's own scene (same room and event), just behind them: it
+        // plays on (a mission's opening starts the mission at its end; a
+        // skip left the client without one). Only when it runs on long
+        // after the host's (they skipped it) does it go.
+        const double limit = myKey == hostKey ? 10.0 : 2.0;
+        if (now() - g_strayCutSince > limit && now() - g_lastClientSkip > 3.0)
         {
             g_lastClientSkip = now();
             if (kh2skip::skipCutscene(ram))
@@ -754,6 +783,7 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
     std::vector<kh2partner::Heal> heals;
     if (kh2avatars::enabled())
     {
+        kh2partner::setReduceParty(g_session && g_session->active(), int(list.size()));
         heals = kh2avatars::update(ram, list);
         list.clear();
     }
@@ -1071,7 +1101,10 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             const bool elsewhere = host.world != me.now.world || host.room != me.now.room;
             if (!elsewhere)
                 g_followPending = false;
-            else if (g_followPending && me.control == 0 && me.battle == 0 && !jumping && now() - g_hostRoomSince > 1.0 &&
+            // (In a fight of our own a moment longer: a mission's fight
+            // never ends here once the host has left it.)
+            else if (g_followPending && me.control == 0 && (me.battle == 0 || now() - g_hostRoomSince > 3.0) && !jumping &&
+                     now() - g_hostRoomSince > 1.0 &&
                      now() - g_lastWarp > 5.0)
             {
                 g_lastWarp = now();

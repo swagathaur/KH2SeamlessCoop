@@ -597,7 +597,8 @@ void motionSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t count = 0;
         std::memcpy(&count, rdram + file + 4, 4);
-        bool anim = false;
+        bool anim = false, ready = false;
+        auto inRam = [](uint32_t x) { return x >= 0x00100000u && x < 0x02000000u - 0x10; };
         for (uint32_t i = 0; i < count && i < 256 && !anim; ++i)
         {
             uint16_t type = 0;
@@ -606,6 +607,32 @@ void motionSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 break;
             std::memcpy(&type, rdram + at, 2);
             anim = type == 9;
+            if (anim)
+            {
+                // The animation's object (the entry's +8, once the file is
+                // set up) and its vtable's +8, which the motion set calls: a
+                // file still being read has neither (a crash at 0x0017F090).
+                uint32_t data = 0, vt = 0, fn = 0;
+                std::memcpy(&data, rdram + at + 8, 4);
+                if (inRam(data))
+                    std::memcpy(&vt, rdram + data, 4);
+                if (inRam(vt))
+                    std::memcpy(&fn, rdram + vt + 8, 4);
+                ready = inRam(fn);
+            }
+        }
+        if (anim && !ready)
+        {
+            static std::atomic<int> loggedNotReady{0};
+            if (loggedNotReady.fetch_add(1) < 8)
+            {
+                std::printf("[puppets] motion file %08X on %08X is not set up yet: not started\n", file,
+                            getRegU32(ctx, 4));
+                std::fflush(stdout);
+            }
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
         }
         if (!anim)
         {

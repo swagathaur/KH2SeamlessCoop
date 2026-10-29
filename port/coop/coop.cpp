@@ -18,6 +18,7 @@
 #include "hits.h"
 #include "mission.h"
 #include "spells.h"
+#include "roomlock.h"
 #include "avatars.h"
 #include "names.h"
 #include "puppets.h"
@@ -748,6 +749,7 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
         heals.push_back(h);
     if (kh2avatars::enabled())
         kh2names::set(kh2avatars::names());
+    kh2partner::setFormsFree(kh2avatars::enabled() && g_session && g_session->active());
     for (const kh2partner::Heal &h : heals)
     {
         if (g_testPartner)
@@ -1030,6 +1032,12 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     // Clients following the host: once the host has been in another room for
     // a moment and we are in free control, go there too.
+    {
+        kh2net::PlayerState host;
+        const bool lead = (g_opt.followHost || kh2story::active()) && !g_session->isHost() && hostState(host) &&
+                          host.world != 0 && host.world != 0xFF;
+        kh2roomlock::set(lead, lead ? host.world : 0xFF, lead ? host.room : 0xFF);
+    }
     if ((g_opt.followHost || kh2story::active()) && !g_session->isHost())
     {
         kh2net::PlayerState host;

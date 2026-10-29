@@ -312,6 +312,7 @@ target_sources(kh2recomp PRIVATE
     port/coop/avatars.cpp
     port/coop/story.cpp
     port/coop/names.cpp
+    port/coop/roomlock.cpp
     port/coop/downed.cpp
     port/coop/enemies.cpp
     port/coop/guest_call.cpp

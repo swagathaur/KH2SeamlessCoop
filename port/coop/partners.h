@@ -92,6 +92,9 @@ uint16_t localWeaponEntry(const uint8_t *rdram);
 void localRide(const uint8_t *rdram, kh2net::PlayerState &ps);
 std::vector<uint8_t> localLoadout(const uint8_t *rdram);
 // A partner here healed us.
+// Drive forms need no party members and take none away (an avatar session:
+// the party is the other players). KH2_TEST_FORMS_FREE=1: always.
+void setFormsFree(bool free);
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp);
 
 // Remote players shown as companions now (for the UI and to keep them out of

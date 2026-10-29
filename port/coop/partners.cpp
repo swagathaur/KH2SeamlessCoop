@@ -50,6 +50,11 @@ std::atomic<bool> g_linked{false};
 std::atomic<uint32_t> g_made[2] = {}; // party members spawnMissing made, by slot - 1
 std::atomic<uint32_t> g_standIns[2] = {}; // dressed stand-in objects in this room (voiceHook)
 PS2Runtime::RecompiledFunction g_sacrifice = nullptr;
+// Drive forms without party members (setFormsFree): FUN_001C99B0(form), the
+// form command's availability by the members it needs (0: all there), says 0.
+constexpr uint32_t kFormMembers = 0x001C99B0;
+PS2Runtime::RecompiledFunction g_formMembers = nullptr;
+std::atomic<bool> g_formsFree{false};
 
 // ---- objentry records ------------------------------------------------------
 
@@ -672,9 +677,20 @@ void partyRuleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 // FUN_001C9860(form) override: while linked, forms leave the party alone.
+void formMembersHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kFormMembers && g_formsFree.load(std::memory_order_relaxed))
+    {
+        setReturnU32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_formMembers, rdram, ctx, runtime);
+}
+
 void sacrificeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (g_linked.load(std::memory_order_relaxed))
+    if (g_linked.load(std::memory_order_relaxed) || g_formsFree.load(std::memory_order_relaxed))
     {
         ctx->pc = getRegU32(ctx, 31);
         return;
@@ -780,6 +796,14 @@ bool install(PS2Runtime &runtime)
         g_sacrifice = nullptr;
         return false;
     }
+    g_formMembers = runtime.lookupFunction(kFormMembers);
+    if (!g_formMembers || !runtime.replaceFunction(kFormMembers, &formMembersHook))
+    {
+        std::fprintf(stderr, "[partner] could not hook 0x%08X\n", kFormMembers);
+        g_formMembers = nullptr;
+    }
+    if (const char *e = std::getenv("KH2_TEST_FORMS_FREE"); e && *e == '1')
+        g_formsFree = true;
     // On by default; KH2_PARTY_RULE=0 leaves rooms' party rules alone (then
     // spawnMissing makes the members late; see partyRuleHook).
     const char *ruleEnv = std::getenv("KH2_PARTY_RULE");
@@ -1467,6 +1491,15 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
         character = 0;
     const uint8_t *rec = rdram + kSaveChars + uint32_t(character) * kLoadoutSize;
     return std::vector<uint8_t>(rec, rec + kLoadoutSize);
+}
+
+void setFormsFree(bool free)
+{
+    static const bool test = [] {
+        const char *e = std::getenv("KH2_TEST_FORMS_FREE");
+        return e && *e == '1';
+    }();
+    g_formsFree = free || test;
 }
 
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp)

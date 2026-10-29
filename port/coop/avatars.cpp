@@ -14,6 +14,7 @@
 #include "guest_call.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include <atomic>
 
 namespace kh2avatars
@@ -97,6 +98,7 @@ std::atomic<uint32_t> g_torn[8] = {}; // avatars torn down (by the game or us): 
 std::atomic<int64_t> g_tornAt[8] = {};  // when (ms): an address is only theirs for a moment (memory is reused)
 std::atomic<uint32_t> g_tornNext{0};
 std::atomic<int64_t> g_leavingAt[4] = {};
+std::atomic<int64_t> g_avatarTornAt{-1000}; // (ms) an avatar's teardown: its releases follow at once
 int64_t nowMs()
 {
     using namespace std::chrono;
@@ -184,7 +186,13 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 std::memcpy(rdram + motion + 0x108 + i * 8, &zero, 4);
             std::memcpy(rdram + motion + 0x148, &zero, 4);
             std::memcpy(rdram + motion + 0x194, &zero, 4);
+            // (and the chain FUN_00180EF0 marks, +0x18C/+0x190: its entries
+            // are in the motion file, which a cutscene starting has just
+            // filled anew for our player)
+            std::memcpy(rdram + motion + 0x18C, &zero, 4);
+            std::memcpy(rdram + motion + 0x190, &zero, 4);
         }
+        g_avatarTornAt = nowMs();
         ctx->pc = kObjTeardown; // (a0 and ra as they are: a tail call)
         return;
     }
@@ -229,6 +237,81 @@ int32_t takeOrbHp(uint32_t sheet)
         if (g_orbSheet[i].load() == sheet)
             return g_orbHp[i].exchange(0);
     return 0;
+}
+
+
+// A file's last reference: YS::CACHE_BUFF::Free (0x00170950) drops the count
+// (u16 at +2) of the file's cache header (list at *0x0034DCA0: data at +0x30,
+// next at +0x3C). An avatar in our player's look uses our player's files
+// without a reference of its own (they were there already), and its
+// teardown gave one back: the motion file our player still used was freed,
+// read over by the next load, and our player's animation was gone (a crash
+// at 0x0017FE84 at a mission's end). The last reference to the file our
+// player's motion uses is not given back.
+constexpr uint32_t kCacheFree = 0x00170950, kCacheHeaders = 0x0034DCA0;
+PS2Runtime::RecompiledFunction g_cacheFree = nullptr;
+std::atomic<uint32_t> g_ourPlayerForFree{0};
+void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // Within an avatar's teardown (it runs at once after teardownHook, on
+    // this thread): the avatar wears a look whose files our player (or the
+    // room) had already; it holds no references of its own to give back.
+    const int64_t sinceTeardown = nowMs() - g_avatarTornAt.load(std::memory_order_relaxed);
+    if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 20)
+    {
+        static int logged = 0;
+        if (logged++ < 20)
+        {
+            std::printf("[avatars] an avatar's teardown gives back file %08X: kept (not theirs)\n", getRegU32(ctx, 4));
+            std::fflush(stdout);
+        }
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_cacheFree, rdram, ctx, runtime);
+}
+
+
+// A mission's end: its script calls trap_mission_complete (0x0019FFE8) and
+// then plays its ending, which swaps our player's motions. An avatar torn
+// down as that ending starts (by the game or by us) took our player's
+// animation with it (a crash at 0x0017FE84). Avatars go at the call, in
+// play, and stay away until the ending is over.
+constexpr uint32_t kMissionComplete = 0x0019FFE8;
+PS2Runtime::RecompiledFunction g_missionComplete = nullptr;
+std::atomic<int64_t> g_missionEndAt{-100000};
+void missionCompleteHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kMissionComplete)
+    {
+        g_missionEndAt = nowMs();
+        std::printf("[avatars] the mission is complete: avatars away until its ending is over\n");
+        std::fflush(stdout);
+    }
+    kh2::callOriginal(g_missionComplete, rdram, ctx, runtime);
+}
+
+
+// The party gauge's face: dk::FACE::getFaceSed asks the party member for a
+// face image from its own files (FUN_0016C060(obj, ...): obj +0x7A0's file,
+// its face entries). Asked of a place holder, the avatar holding that place
+// answers instead: the other player's face, not Ping's or Goofy's.
+constexpr uint32_t kObjFace = 0x0016C060;
+PS2Runtime::RecompiledFunction g_objFace = nullptr;
+std::atomic<uint32_t> g_faceProxy[kMaxAvatars] = {}, g_faceAvatar[kMaxAvatars] = {};
+void objFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4);
+    if (ctx->pc == kObjFace && obj)
+        for (uint32_t i = 0; i < kMaxAvatars; ++i)
+            if (g_faceProxy[i].load(std::memory_order_relaxed) == obj)
+            {
+                const uint32_t avatar = g_faceAvatar[i].load(std::memory_order_relaxed);
+                if (avatar)
+                    SET_GPR_U32(ctx, 4, avatar);
+                break;
+            }
+    kh2::callOriginal(g_objFace, rdram, ctx, runtime);
 }
 
 std::map<int, std::string> g_names; // character in their party place -> their name
@@ -328,6 +411,15 @@ bool install(PS2Runtime &runtime)
     g_addHp = runtime.lookupFunction(kAddHp);
     if (!g_addHp || !runtime.replaceFunction(kAddHp, &addHpHook))
         g_addHp = nullptr;
+    g_cacheFree = runtime.lookupFunction(kCacheFree);
+    if (!g_cacheFree || !runtime.replaceFunction(kCacheFree, &cacheFreeHook))
+        g_cacheFree = nullptr;
+    g_missionComplete = runtime.lookupFunction(kMissionComplete);
+    if (!g_missionComplete || !runtime.replaceFunction(kMissionComplete, &missionCompleteHook))
+        g_missionComplete = nullptr;
+    g_objFace = runtime.lookupFunction(kObjFace);
+    if (!g_objFace || !runtime.replaceFunction(kObjFace, &objFaceHook))
+        g_objFace = nullptr;
     g_teardown = runtime.lookupFunction(kPlayerTeardown);
     if (!g_teardown || !runtime.replaceFunction(kPlayerTeardown, &teardownHook))
         g_teardown = nullptr;
@@ -425,6 +517,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     if (player && !ourKnown && live(rdram, player))
         g_ourPlayer = player;
     g_ourPlayerShared = g_ourPlayer;
+    g_ourPlayerForFree = g_states.empty() ? 0u : g_ourPlayer; // (only with avatars about)
     const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
     const bool cutscene = st.control == 3;
     uint32_t sheetIndex = 0;
@@ -439,7 +532,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.sheet = k < 2 ? kh2state::addr::Slot1 - (k + 1) * kh2state::addr::SlotStride
                             : kSheetBase + (k % kMaxAvatars) * kSheetSize;
         }
-        const bool here = r.present && r.world == st.now.world && r.room == st.now.room;
+        const bool missionEnding = nowMs() - g_missionEndAt.load() < 30000;
+        const bool here = r.present && r.world == st.now.world && r.room == st.now.room && !missionEnding;
         if (s.object && !live(rdram, s.object))
         {
             s.object = 0;
@@ -452,8 +546,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         }();
         if (testEntry)
             want = testEntry;
-        if (s.plainLook)
-            if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
+        // Their own look, also in a drive form: a form's files read in for an
+        // avatar were half there in a crowded room (a mission) when it was
+        // made, and its motion crashed; and the form's files our player has
+        // (if we are in it too) go when we revert, under the avatar.
+        // (KH2_AVATAR_FORMS=1: the form's look anyway.)
+        static const bool forms = [] {
+            const char *e = std::getenv("KH2_AVATAR_FORMS");
+            return e && *e == '1';
+        }();
+        if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
+            if (s.plainLook || !forms)
                 want = base;
         // A cutscene (its actors are the story's): hidden the game's way
         // until it is over, not torn down (an avatar in our own look shares
@@ -740,9 +843,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         uint32_t j = 0;
         for (auto &[id, st2] : g_states)
             if (j < kMaxAvatars)
+            {
+                g_faceProxy[j].store(st2.object && st2.prepared ? st2.proxy : 0u);
+                g_faceAvatar[j].store(st2.object && st2.prepared ? st2.object : 0u);
                 g_usedSheets[j++].store(st2.object || st2.proxy ? st2.sheet : 0u);
+            }
         for (; j < kMaxAvatars; ++j)
+        {
             g_usedSheets[j].store(0);
+            g_faceProxy[j].store(0);
+            g_faceAvatar[j].store(0);
+        }
     }
     {
         uint32_t i = 0;

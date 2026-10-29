@@ -10,6 +10,7 @@
 
 #include "game_state.h"
 #include "partners.h"
+#include "avatars.h"
 #include "guest_call.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
@@ -94,6 +95,24 @@ void castAs(uint32_t standIn, const Cast &c)
         std::printf("[spells] stand-in %08X casts command %u (for its player)\n", standIn, command);
         std::fflush(stdout);
         return kh2guest::Call{kCast, {standIn, command, combo}, {}};
+    });
+}
+
+void castAsPlayer(uint32_t avatar, const Cast &c)
+{
+    const uint32_t command = c.command;
+    kh2guest::post([avatar, command](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+            return std::nullopt;
+        bool live = false;
+        for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+            live = live || a.address == avatar;
+        if (!live)
+            return std::nullopt;
+        kh2avatars::noteCast(avatar);
+        std::printf("[spells] avatar %08X casts command %u (for its player)\n", avatar, command);
+        std::fflush(stdout);
+        return kh2guest::Call{0x0017A590u, {avatar, command}, {}};
     });
 }
 
@@ -204,6 +223,17 @@ void testTick(uint8_t *rdram, uint64_t frame)
     if (done || frame < at)
         return;
     done = true;
+    // An avatar (avatars.h) first.
+    uint32_t avatarFirst = 0;
+    for (uint32_t o : kh2avatars::objects())
+        if (!avatarFirst)
+            avatarFirst = o;
+    if (avatarFirst)
+    {
+        std::printf("[spells] test: avatar %08X casts command %u\n", avatarFirst, command);
+        castAsPlayer(avatarFirst, Cast{uint16_t(command), 0});
+        return;
+    }
     // A remote player's stand-in if there is one, else the first party member
     // (KH2_TEST_CAST_TARGET=player2: a second player object, not ours).
     uint32_t member = 0;

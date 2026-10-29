@@ -37,6 +37,7 @@ PS2Runtime::RecompiledFunction g_execDamage = nullptr;
 PS2Runtime::RecompiledFunction g_takeHit = nullptr;
 std::mutex g_blockedMutex;
 std::vector<uint32_t> g_blocked;
+std::vector<uint32_t> g_protected;
 std::atomic<int> g_blockedLogs{0};
 bool g_log = false;
 int g_logged = 0;
@@ -72,6 +73,8 @@ void takeHitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             std::lock_guard<std::mutex> lock(g_blockedMutex);
             for (uint32_t b : g_blocked)
                 blocked = blocked || (b && (b == by || b == byAttack));
+            for (uint32_t b : g_protected)
+                blocked = blocked || b == obj;
         }
         if (blocked)
         {
@@ -189,6 +192,12 @@ void setBlockedAttackers(std::vector<uint32_t> objects)
 {
     std::lock_guard<std::mutex> lock(g_blockedMutex);
     g_blocked = std::move(objects);
+}
+
+void setProtectedTargets(std::vector<uint32_t> objects)
+{
+    std::lock_guard<std::mutex> lock(g_blockedMutex);
+    g_protected = std::move(objects);
 }
 
 void setCapture(bool on)

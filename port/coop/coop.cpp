@@ -17,6 +17,7 @@
 #include "hits.h"
 #include "mission.h"
 #include "spells.h"
+#include "avatars.h"
 #include "puppets.h"
 #include "story.h"
 #include "downed.h"
@@ -507,7 +508,12 @@ void makeSession()
                 const char *e = std::getenv("KH2_SPELL_REPLAY");
                 return e && *e == '1';
             }();
-            if (standIn && replay)
+            if (kh2avatars::enabled())
+            {
+                if (const uint32_t avatar = kh2avatars::objectFor(origin))
+                    kh2spells::castAsPlayer(avatar, c);
+            }
+            else if (standIn && replay)
                 kh2spells::castAs(standIn, c);
             return;
         }
@@ -718,6 +724,12 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             p.loadout = r.loadout;
             list.push_back(p);
         }
+    // Avatars (avatars.h): second players for them; the partners stand down.
+    if (kh2avatars::enabled())
+    {
+        kh2avatars::update(ram, list);
+        list.clear();
+    }
     for (const kh2partner::Heal &h : kh2partner::update(ram, list))
     {
         if (g_testPartner)
@@ -888,6 +900,9 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2hits::setCapture(false);
         kh2spells::setCapture(false);
         kh2hits::setBlockedAttackers({});
+        kh2hits::setProtectedTargets({});
+        if (kh2avatars::enabled())
+            kh2avatars::reset(ram);
         kh2puppets::update(rdram, {});
         kh2scale::tick(ram, false, false, 1);
         return;
@@ -909,6 +924,9 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         for (const kh2puppets::Assignment &a : kh2puppets::assignments())
             if (a.object)
                 standIns.push_back(a.object);
+        std::vector<uint32_t> avatars = kh2avatars::objects();
+        standIns.insert(standIns.end(), avatars.begin(), avatars.end());
+        kh2hits::setProtectedTargets(avatars);
         kh2hits::setBlockedAttackers(std::move(standIns));
         kh2spells::setCapture(true);
         const kh2state::State st = kh2state::read(ram);

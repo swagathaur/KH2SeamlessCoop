@@ -66,6 +66,8 @@ std::vector<Hit> takeKills();
 // damage). FUN_001B3D00 returns at once for a DAMAGE by one of them (its
 // attacker, or its ATTACK's), except the hits replay() plays.
 void setBlockedAttackers(std::vector<uint32_t> objects);
+// Objects nothing here may hit (avatars.h: their own game takes their hits).
+void setProtectedTargets(std::vector<uint32_t> objects);
 
 std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const Hit &hit);
 bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, uint16_t &entry,

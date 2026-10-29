@@ -18,6 +18,7 @@
 #include "mission.h"
 #include "spells.h"
 #include "avatars.h"
+#include "names.h"
 #include "puppets.h"
 #include "story.h"
 #include "downed.h"
@@ -725,12 +726,17 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             list.push_back(p);
         }
     // Avatars (avatars.h): second players for them; the partners stand down.
+    std::vector<kh2partner::Heal> heals;
     if (kh2avatars::enabled())
     {
-        kh2avatars::update(ram, list);
+        heals = kh2avatars::update(ram, list);
         list.clear();
     }
     for (const kh2partner::Heal &h : kh2partner::update(ram, list))
+        heals.push_back(h);
+    if (kh2avatars::enabled())
+        kh2names::set(kh2avatars::names());
+    for (const kh2partner::Heal &h : heals)
     {
         if (g_testPartner)
         {

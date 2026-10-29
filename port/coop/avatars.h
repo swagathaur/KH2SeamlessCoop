@@ -21,6 +21,8 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "partners.h"
@@ -29,13 +31,18 @@ namespace kh2avatars
 {
 bool enabled();
 // Host loop, every iteration (the same list partners get).
-void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes);
-// Avatar objects in this room (for hits.h), and player `id`'s (0: none).
+// Returns heals this game gave them (items, Cure on their party place).
+std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes);
+// Avatar objects and the party members holding their places, in this room
+// (for hits.h), and player `id`'s avatar (0: none).
 std::vector<uint32_t> objects();
 uint32_t objectFor(uint8_t playerId);
 // The avatar is casting (spells.h castAsPlayer): its own motions (the cast's,
 // whose cues make the spell) play for a moment, rather than its player's.
 void noteCast(uint32_t avatar);
+// Character (save index) -> remote player's name, for the party places they
+// hold (names.h; set after the partners' update, which clears it).
+std::map<int, std::string> names();
 // Session over: take them away.
 void reset(uint8_t *rdram);
 } // namespace kh2avatars

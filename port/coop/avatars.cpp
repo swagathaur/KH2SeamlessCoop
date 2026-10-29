@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <string>
 #include <mutex>
 #include <chrono>
 
@@ -19,6 +20,8 @@ constexpr uint32_t kNoAct = 0x200000u;
 constexpr uint32_t kObjFlags = 0x10C, kObjSheet = 0x48C;
 constexpr uint32_t kSheetBase = 0x01E4E000u, kSheetSize = 0x268, kMaxAvatars = 3;
 constexpr uint32_t kEntrySize = 0x60, kEntryLook = 0x08;
+constexpr uint32_t kFriendTable = 0x01C60528; // YS::FRIEND::Get(i): the party members' objects
+constexpr uint32_t kObjModel = 0x670, kModelParts = 0x104, kWeaponOwner = 0x570;
 // The game's pointers to its player that a new player object takes over.
 constexpr uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x00352400, 0x01C5FF10,
                                     0x01C60018, 0x01C60024, 0x01C6C9AC, kh2state::addr::PlayerPtr};
@@ -36,6 +39,8 @@ struct State
     uint16_t lookFor = 0;
     uint32_t gen = 0;
     double castUntil = 0;
+    uint32_t proxy = 0;      // the party member holding their place (hidden)
+    int32_t writtenHp = -1, writtenMp = -1; // what we last put in the sheet
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -43,6 +48,7 @@ uint32_t g_gen = 0;
 uint16_t g_room = 0xFFFF;
 double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
+std::map<int, std::string> g_names; // character in their party place -> their name
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
 {
@@ -90,6 +96,20 @@ bool lookHere(const uint8_t *rdram, uint16_t entry)
     return false;
 }
 
+// Draw none of an object's model's parts (ModelObj +0x104), nor its weapons'.
+void hide(uint8_t *rdram, uint32_t obj)
+{
+    auto hideModel = [&](uint32_t o) {
+        const uint32_t model = rd<uint32_t>(rdram, o + kObjModel);
+        if (inRam(model))
+            wr<uint32_t>(rdram, model + kModelParts, 0);
+    };
+    hideModel(obj);
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        if (a.type == 5 && rd<uint32_t>(rdram, a.address + kWeaponOwner) == obj)
+            hideModel(a.address);
+}
+
 bool live(const uint8_t *rdram, uint32_t obj)
 {
     if (!obj)
@@ -115,8 +135,12 @@ std::vector<uint32_t> objects()
     std::lock_guard<std::mutex> lock(g_mutex);
     std::vector<uint32_t> out;
     for (auto &[id, s] : g_states)
+    {
         if (s.object)
             out.push_back(s.object);
+        if (s.proxy)
+            out.push_back(s.proxy);
+    }
     return out;
 }
 
@@ -135,8 +159,10 @@ void noteCast(uint32_t avatar)
             s.castUntil = nowSec() + 2.0;
 }
 
-void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
+std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
 {
+    std::vector<kh2partner::Heal> heals;
+    std::map<int, std::string> names;
     const kh2state::State st = kh2state::read(rdram);
     const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
     const uint16_t room = uint16_t(st.now.world << 8 | st.now.room);
@@ -157,6 +183,8 @@ void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
             s.pending = false;
             s.prepared = false;
             s.motion = 0xFFFF;
+            s.proxy = 0;
+            s.writtenHp = s.writtenMp = -1;
         }
     }
     // Ours: the object the game made as the player for this room (a new
@@ -172,7 +200,14 @@ void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
     for (const kh2partner::Remote &r : remotes)
     {
         State &s = g_states[r.playerId];
-        s.sheet = kSheetBase + (sheetIndex++ % kMaxAvatars) * kSheetSize;
+        // Their HP and MP live in the party slot they take (slots 1 and 2:
+        // the party gauges, items and Cure all use those), else in a sheet
+        // of our own (a third player).
+        {
+            const uint32_t k = sheetIndex++;
+            s.sheet = k < 2 ? kh2state::addr::Slot1 - (k + 1) * kh2state::addr::SlotStride
+                            : kSheetBase + (k % kMaxAvatars) * kSheetSize;
+        }
         const bool here = r.present && r.world == st.now.world && r.room == st.now.room;
         if (s.object && !live(rdram, s.object))
         {
@@ -246,20 +281,77 @@ void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
         {
             s.prepared = true;
             const uint32_t from = rd<uint32_t>(rdram, obj + kObjSheet);
-            if (inRam(from))
+            if (inRam(from) && s.sheet >= kSheetBase) // (a party slot's is the game's own)
                 std::memcpy(rdram + s.sheet, rdram + from, kSheetSize);
             wr<uint32_t>(rdram, obj + kObjSheet, s.sheet);
         }
         const uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
         if (!(flags & kNoAct))
             wr<uint32_t>(rdram, obj + kObjFlags, flags | kNoAct);
-        // Their HP and MP (their game's).
+        // Their name for the character in their party place (the party
+        // gauge, item targets, menus: names.h).
+        if (!r.name.empty() && st.now.world < 0x20 && sheetIndex <= 2)
+        {
+            const uint8_t character =
+                rd<uint8_t>(rdram, kh2state::addr::Save + 0x3534 + uint32_t(st.now.world) * 4u + sheetIndex) & 0x7F;
+            if (character > 0 && character < 13)
+                names[character] = r.name;
+        }
+        // Their place in the party: the member in slot (index + 1), hidden
+        // and frozen where the avatar is, on the avatar's sheet. The party
+        // gauge shows it, items and Cure can be used on it, and what they
+        // give goes to its player as a heal.
+        {
+            const uint32_t slot = sheetIndex - 1; // 0 or 1 (party slots 1 and 2)
+            const uint32_t proxy = slot < 2 ? rd<uint32_t>(rdram, kFriendTable + slot * 4) : 0;
+            s.proxy = proxy && live(rdram, proxy) && proxy != obj ? proxy : 0;
+            if (s.proxy)
+            {
+                const uint32_t pf = rd<uint32_t>(rdram, s.proxy + kObjFlags);
+                if (!(pf & kNoAct))
+                    wr<uint32_t>(rdram, s.proxy + kObjFlags, pf | kNoAct);
+                hide(rdram, s.proxy);
+                kh2puppets::Override po;
+                po.object = s.proxy;
+                std::memcpy(po.pos, r.pos, sizeof(po.pos));
+                po.yaw = r.yaw;
+                overrides.push_back(po);
+            }
+        }
+        if (std::getenv("KH2_AVATAR_LOG"))
+        {
+            static int n = 0;
+            if (++n % 60 == 0)
+                std::printf("[avatars] player %u: sheet %08X hp %d/%d mp %d (written %d) proxy %08X\n", r.playerId + 1,
+                            s.sheet, rd<int32_t>(rdram, s.sheet), rd<int32_t>(rdram, s.sheet + 4),
+                            rd<int32_t>(rdram, s.sheet + 0x180), s.writtenHp, s.proxy);
+        }
         if (r.maxHp > 0)
         {
+            // What this game added since we wrote it (a potion, Cure) is a
+            // heal for them.
+            const int32_t hpNow = rd<int32_t>(rdram, s.sheet + kh2state::addr::SlotHp);
+            const int32_t mpNow = rd<int32_t>(rdram, s.sheet + kh2state::addr::SlotMp);
+            kh2partner::Heal h;
+            h.playerId = r.playerId;
+            if (s.writtenHp >= 0 && hpNow > s.writtenHp)
+                h.hp = hpNow - s.writtenHp;
+            if (s.writtenMp >= 0 && mpNow > s.writtenMp)
+                h.mp = mpNow - s.writtenMp;
+            if (h.hp > 0 || h.mp > 0)
+            {
+                std::printf("[avatars] player %u healed here: +%d HP, +%d MP\n", r.playerId + 1, h.hp, h.mp);
+                std::fflush(stdout);
+                heals.push_back(h);
+            }
+            const int32_t hp = std::max<int32_t>(1, std::min(r.hp + h.hp, r.maxHp));
+            const int32_t mp = std::max<int32_t>(0, std::min(r.mp + h.mp, r.maxMp));
             wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotMaxHp, r.maxHp);
-            wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotHp, std::max<int32_t>(1, r.hp));
+            wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotHp, hp);
             wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotMaxMp, r.maxMp);
-            wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotMp, r.mp);
+            wr<int32_t>(rdram, s.sheet + kh2state::addr::SlotMp, mp);
+            s.writtenHp = hp;
+            s.writtenMp = mp;
         }
         kh2puppets::Override o;
         o.object = obj;
@@ -307,6 +399,14 @@ void update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes)
                         wr<uint32_t>(rdram, a, g_ourPlayer);
     kh2puppets::setOverrides(overrides, 1);
     kh2puppets::setMotionGuards(guards);
+    g_names = names;
+    return heals;
+}
+
+std::map<int, std::string> names()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_names;
 }
 
 void reset(uint8_t *rdram)

@@ -403,6 +403,25 @@ void testSecondPlayer(uint8_t *rdram, uint64_t frame)
 void testTick(uint8_t *rdram, uint64_t frame)
 {
     testSecondPlayer(rdram, frame);
+    static const bool logMp = std::getenv("KH2_TEST_LOG_MP") != nullptr;
+    if (logMp && frame % 30 == 0)
+    {
+        uint32_t player = 0, sheet = 0;
+        std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+        if (player >= 0x00100000u && player < 0x02000000u)
+            std::memcpy(&sheet, rdram + player + 0x48C, 4);
+        if (sheet >= 0x00100000u && sheet < 0x02000000u)
+        {
+            int32_t hp = 0, mp = 0;
+            uint32_t flags = 0;
+            std::memcpy(&hp, rdram + sheet, 4);
+            std::memcpy(&mp, rdram + sheet + 0x180, 4);
+            std::memcpy(&flags, rdram + player + 0x7F8, 4);
+            std::printf("[spells] f%llu player %08X sheet %08X hp %d mp %d flags7F8 %08X\n",
+                        (unsigned long long)frame, player, sheet, hp, mp, flags);
+            std::fflush(stdout);
+        }
+    }
     static const char *spec = std::getenv("KH2_TEST_CAST");
     if (!spec || !*spec)
         return;

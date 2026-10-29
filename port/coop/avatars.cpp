@@ -29,6 +29,8 @@ constexpr uint32_t kObjModel = 0x670, kModelParts = 0x104, kWeaponOwner = 0x570;
 constexpr uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x00352400, 0x01C5FF10,
                                     0x01C60018, 0x01C60024, 0x01C6C9AC, kh2state::addr::PlayerPtr};
 
+constexpr uint32_t kHud = 0x003485EC;
+
 struct State
 {
     uint32_t object = 0;
@@ -438,6 +440,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 for (uint32_t a : kPlayerRefs)
                     if (rd<uint32_t>(rdram, a) == s.object)
                         wr<uint32_t>(rdram, a, g_ourPlayer);
+    // The command/drive HUD (*0x003485EC) keeps the player it shows at +0x34,
+    // picked up again while an avatar is being made: without this the drive
+    // gauge loses its label and follows the avatar.
+    if (g_ourPlayer)
+    {
+        const uint32_t hud = rd<uint32_t>(rdram, kHud);
+        if (hud >= 0x00100000u && hud < 0x02000000u)
+            for (auto &[id, s] : g_states)
+                if (s.object && rd<uint32_t>(rdram, hud + 0x34) == s.object)
+                    wr<uint32_t>(rdram, hud + 0x34, g_ourPlayer);
+    }
     {
         uint32_t i = 0;
         for (auto &[id, st2] : g_states)

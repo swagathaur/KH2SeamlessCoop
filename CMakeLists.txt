@@ -308,6 +308,7 @@ target_sources(kh2recomp PRIVATE
     port/coop/hits.cpp
     port/coop/scaling.cpp
     port/coop/mission.cpp
+    port/coop/spells.cpp
     port/coop/story.cpp
     port/coop/names.cpp
     port/coop/downed.cpp

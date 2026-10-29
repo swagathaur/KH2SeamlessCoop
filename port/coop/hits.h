@@ -61,6 +61,12 @@ std::vector<Hit> takeKills();
 // The EnemyHit game event: world, room, the enemy's spawn serial and objentry
 // id (the host checks both: the same serial can be another enemy there), the
 // DAMAGE and its attack parameters.
+// Objects whose hits do nothing here (the remote players' stand-ins: their
+// spells are cast again for the look of it, and the caster's game deals the
+// damage). FUN_001B3D00 returns at once for a DAMAGE by one of them (its
+// attacker, or its ATTACK's), except the hits replay() plays.
+void setBlockedAttackers(std::vector<uint32_t> objects);
+
 std::vector<uint8_t> encode(uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const Hit &hit);
 bool decode(const std::vector<uint8_t> &data, uint8_t &world, uint8_t &room, int16_t &serial, uint16_t &entry,
             Hit &hit);

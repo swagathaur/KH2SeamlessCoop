@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "guest_call.h"
@@ -23,6 +24,8 @@ constexpr uint32_t kFailed = 0x001BB768;     // YS::MISSION::Failed()
 constexpr uint8_t kVersion = 1;
 
 PS2Runtime::RecompiledFunction g_trapFailed = nullptr;
+PS2Runtime::RecompiledFunction g_start = nullptr;
+constexpr uint32_t kStart = 0x001BB288; // YS::MISSION::Start(int, const char*) (a room's program)
 std::atomic<bool> g_following{false};
 std::atomic<bool> g_failed{false};    // host: ours failed (to send)
 std::atomic<bool> g_hostFailed{false}; // client: the host's did (ours may fail now)
@@ -60,6 +63,17 @@ void trapFailedHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_trapFailed, rdram, ctx, runtime);
 }
 
+void startHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t id = getRegU32(ctx, 4), name = getRegU32(ctx, 5);
+    char text[33] = {};
+    if (inRam(name))
+        std::memcpy(text, rdram + name, 32);
+    kh2::callOriginal(g_start, rdram, ctx, runtime);
+    std::printf("[mission] started: %u \"%s\"\n", id, text);
+    std::fflush(stdout);
+}
+
 void put(std::vector<uint8_t> &out, const void *p, size_t n)
 {
     const uint8_t *b = static_cast<const uint8_t *>(p);
@@ -69,6 +83,9 @@ void put(std::vector<uint8_t> &out, const void *p, size_t n)
 
 bool install(PS2Runtime &runtime)
 {
+    g_start = runtime.lookupFunction(kStart);
+    if (!g_start || !runtime.replaceFunction(kStart, &startHook))
+        g_start = nullptr;
     g_trapFailed = runtime.lookupFunction(kTrapFailed);
     if (!g_trapFailed || !runtime.replaceFunction(kTrapFailed, &trapFailedHook))
     {
@@ -90,12 +107,37 @@ bool takeFailed() { return g_failed.exchange(false); }
 // world u8, room u8, battle u16, version u8, timer on u8 + countdown u8 +
 // frames i32, then per count: on u8 + i32; per gauge: on u8 + max i32 + now
 // f32; per combo: on u8 + i32.
+void dumpOnce(const uint8_t *rdram, uint32_t m, const char *who)
+{
+    static uint32_t dumped = 0;
+    static int count = 0;
+    if (!std::getenv("KH2_MISSION_DUMP") || (dumped == m && count > 300) || count > 2000)
+        return;
+    if (dumped != m)
+    {
+        dumped = m;
+        count = 0;
+    }
+    if (++count != 300)
+        return;
+    std::printf("[mission] %s mission %08X:", who, m);
+    for (uint32_t i = 0; i < 0x540; i += 4)
+    {
+        if (i % 32 == 0)
+            std::printf("\n  +%03X", i);
+        std::printf(" %08X", rd<uint32_t>(rdram, m + i));
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
 std::vector<uint8_t> snapshot(const uint8_t *rdram, uint8_t world, uint8_t room, uint16_t battle)
 {
     std::vector<uint8_t> out;
     const uint32_t m = rd<uint32_t>(rdram, kMissionPtr);
     if (!inRam(m))
         return out;
+    dumpOnce(rdram, m, "host");
     out.push_back(world);
     out.push_back(room);
     put(out, &battle, 2);
@@ -139,6 +181,7 @@ void onHostState(uint8_t *rdram, const std::vector<uint8_t> &data, uint8_t world
     const uint32_t m = rd<uint32_t>(rdram, kMissionPtr);
     if (!inRam(m))
         return;
+    dumpOnce(rdram, m, "client");
     size_t p = 5;
     const bool timerOn = data[p] != 0, countDown = data[p + 1] != 0;
     int32_t frames;

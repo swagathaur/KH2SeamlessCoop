@@ -855,7 +855,10 @@ static void spawnMissing(uint8_t *rdram, const kh2state::State &st, const std::v
         }
         if (have)
             continue;
-        if (character == kNobody || character == 0 || character >= 13)
+        // (Bit 7: a member the story puts there, Ping in the Land of Dragons
+        // is 0x83; skipping those left a remade stand-in missing.)
+        const uint8_t who = character & 0x7F;
+        if (who == kNobody || who == 0 || who >= 13)
             continue;
         // Made in the player's look straight away (no room reload): the
         // entry of that place is dressed first, as fillParty's are.

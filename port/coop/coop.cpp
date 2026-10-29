@@ -16,6 +16,7 @@
 #include "game_state.h"
 #include "hits.h"
 #include "mission.h"
+#include "spells.h"
 #include "puppets.h"
 #include "story.h"
 #include "downed.h"
@@ -111,10 +112,14 @@ void addLog(const std::string &line)
 }
 
 // Queue the game's own map jump (runs on the EE thread next frame).
-void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0xFFFF, uint16_t event = 0xFFFF)
+// map: the room's map program (0xFFFF: the save's). A jump into a fight
+// takes the host's: a mission's (08-03 map 71) places the party itself, and
+// with the default one as well everyone was there twice.
+void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0xFFFF, uint16_t event = 0xFFFF,
+                uint16_t map = 0xFFFF)
 {
     addLog("going to " + kh2state::describe({world, room}));
-    kh2guest::post([world, room, door, battle, event](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([world, room, door, battle, event, map](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
         {
             uint32_t task;
@@ -146,6 +151,7 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0x
         const uint16_t keep = 0xFFFF; // map, battle, event: what the save says
         for (int i = 0; i < 3; ++i)
             std::memcpy(loc + 4 + 2 * i, &keep, 2);
+        std::memcpy(loc + 4, &map, 2);
         if (const char *m = std::getenv("KH2_WARP_MAP")) // testing: this map program
         {
             const uint16_t map = uint16_t(std::atoi(m));
@@ -298,12 +304,23 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     std::memcpy(&hdoor, g_hostScene + 2, 2);
     std::memcpy(&hbattle, g_hostScene + 6, 2);
     std::memcpy(&hevent, g_hostScene + 8, 2);
+    uint16_t hmap;
+    std::memcpy(&hmap, g_hostScene + 4, 2);
     const bool hostCut = g_hostScene[10] != 0 && hevent != 0 && hevent != 0xFFFF;
     if (g_storyWarp && hw != 0 && me.control == 0 && !jumping)
     {
         g_storyWarp = false;
         g_lastWarp = now();
-        warpLocked(hw, hr, hdoor);
+        // With the host's fight, if any, in the same jump: loading the room
+        // again for it a moment later (joining the host's battle) left the
+        // first load's party there too (two Soras, two Goofys).
+        if (!hostCut && hbattle != 0xFFFF && hbattle != 0)
+        {
+            g_lastSceneWarp = now();
+            warpLocked(hw, hr, hdoor, hbattle, hevent, hmap);
+        }
+        else
+            warpLocked(hw, hr, hdoor);
         return;
     }
     const uint32_t hostKey = uint32_t(hw) << 24 | uint32_t(hr) << 16 | hevent;
@@ -352,7 +369,7 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
             g_sceneStarted = hostKey;
             g_lastSceneWarp = now();
             addLog("joining the host's cutscene");
-            warpLocked(hw, hr, hdoor, hbattle, hevent);
+            warpLocked(hw, hr, hdoor, hbattle, hevent, hmap);
         }
         return;
     }
@@ -369,7 +386,7 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
             g_sceneStarted = hostKey;
             g_lastSceneWarp = now();
             addLog("watching the host's cutscene");
-            warpLocked(hw, hr, hdoor, hbattle, hevent);
+            warpLocked(hw, hr, hdoor, hbattle, hevent, hmap);
         }
         else if (hevent == me.now.event)
         {
@@ -390,7 +407,7 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
             g_lastSceneWarp = now();
             g_battleDiffSince = -1.0;
             addLog("joining the host's battle");
-            warpLocked(hw, hr, hdoor, hbattle, hevent);
+            warpLocked(hw, hr, hdoor, hbattle, hevent, hmap);
         }
     }
     else
@@ -466,6 +483,32 @@ void makeSession()
             const std::string who = it != g_remotes.end() && !it->second.name.empty() ? it->second.name : "A player";
             addLog(who + " asks to skip the cutscene");
             kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::SpellCast) && g_rdram)
+        {
+            kh2spells::Cast c;
+            uint8_t world, room;
+            if (!kh2spells::decode(data, c, world, room))
+                return;
+            const kh2state::State st = kh2state::read(g_rdram);
+            if (st.now.world != world || st.now.room != room)
+                return;
+            uint32_t standIn = 0;
+            for (const kh2partner::Link &l : kh2partner::links())
+                if (l.playerId == origin && l.object)
+                    standIn = l.object;
+            for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+                if (!standIn && a.playerId == origin && a.object)
+                    standIn = a.object;
+            // (Work in progress, off by default: on a stand-in the cast runs
+            // but shows nothing yet; KH2_SPELL_REPLAY=1 turns it on.)
+            static const bool replay = [] {
+                const char *e = std::getenv("KH2_SPELL_REPLAY");
+                return e && *e == '1';
+            }();
+            if (standIn && replay)
+                kh2spells::castAs(standIn, c);
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::MissionState) && !g_session->isHost() && g_rdram &&
@@ -843,6 +886,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2downed::reset(ram);
         endStory(ram);
         kh2hits::setCapture(false);
+        kh2spells::setCapture(false);
+        kh2hits::setBlockedAttackers({});
         kh2puppets::update(rdram, {});
         kh2scale::tick(ram, false, false, 1);
         return;
@@ -854,6 +899,23 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling), kh2scale::encode());
     updatePartners(ram, guestFrame);
     storyTick(ram, guestFrame);
+    // Spells (spells.h): ours go to the others, whose stand-in of us casts
+    // them for the look of it; a stand-in's hits do nothing here.
+    {
+        std::vector<uint32_t> standIns;
+        for (const kh2partner::Link &l : kh2partner::links())
+            if (l.object)
+                standIns.push_back(l.object);
+        for (const kh2puppets::Assignment &a : kh2puppets::assignments())
+            if (a.object)
+                standIns.push_back(a.object);
+        kh2hits::setBlockedAttackers(std::move(standIns));
+        kh2spells::setCapture(true);
+        const kh2state::State st = kh2state::read(ram);
+        for (const kh2spells::Cast &c : kh2spells::takeCasts())
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SpellCast),
+                                 kh2spells::encode(c, st.now.world, st.now.room));
+    }
     // Missions (mission.h): the host's leads.
     kh2mission::setFollowing(!g_session->isHost() && kh2story::active());
     if (g_session->isHost())

@@ -56,6 +56,7 @@
 #include "story.h"
 #include "scaling.h"
 #include "mission.h"
+#include "spells.h"
 #include "names.h"
 #include "local_players.h"
 #include "net/nat.h"
@@ -1257,6 +1258,7 @@ bool harnessTick(Harness &h, uint64_t frame)
             h.lastSpawnFrame = frame;
             kh2puppets::requestSpawn(entry);
         }
+    kh2spells::testTick(h.runtime->memory().getRDRAM(), frame);
     // --count-calls: how often each guest function was called (through the
     // runtime's dispatch) between two frames, written as calls_A_B.txt.
     for (const auto &[from, to] : o.countCalls)
@@ -1866,6 +1868,7 @@ int main(int argc, char **argv)
     kh2hits::install(runtime);
     kh2scale::install(runtime);
     kh2mission::install(runtime);
+    kh2spells::install(runtime);
     kh2story::install(runtime);
     kh2names::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);

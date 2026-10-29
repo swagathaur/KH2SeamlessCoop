@@ -34,6 +34,10 @@ constexpr uint32_t kReplayStride = 0x240; // DAMAGE 0x60 + parameters 0x80 + ATT
 constexpr uint32_t kReplaySlots = 4;
 
 PS2Runtime::RecompiledFunction g_execDamage = nullptr;
+PS2Runtime::RecompiledFunction g_takeHit = nullptr;
+std::mutex g_blockedMutex;
+std::vector<uint32_t> g_blocked;
+std::atomic<int> g_blockedLogs{0};
 bool g_log = false;
 int g_logged = 0;
 std::atomic<bool> g_capture{false};
@@ -51,6 +55,38 @@ template <typename T> T rd(const uint8_t *ram, uint32_t a)
 }
 bool inRam(uint32_t a) { return a >= 0x00100000u && a < 0x02000000u; }
 void put32(uint8_t *rdram, uint32_t a, uint32_t v) { std::memcpy(rdram + (a & 0x01FFFFFFu), &v, 4); }
+
+// FUN_001B3D00(obj, DAMAGE*): a hit (HP, attacker, reaction, script).
+void takeHitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4), dmg = getRegU32(ctx, 5);
+    const bool replayed = dmg >= kReplayBase && dmg < kReplayBase + kReplaySlots * kReplayStride;
+    if (ctx->pc == kTakeHit && !replayed && inRam(dmg))
+    {
+        uint32_t by = rd<uint32_t>(rdram, dmg + kDmgAttacker), byAttack = 0;
+        const uint32_t attack = rd<uint32_t>(rdram, dmg + kDmgAttack);
+        if (inRam(attack))
+            byAttack = rd<uint32_t>(rdram, attack + kAttackAttacker);
+        bool blocked = false;
+        {
+            std::lock_guard<std::mutex> lock(g_blockedMutex);
+            for (uint32_t b : g_blocked)
+                blocked = blocked || (b && (b == by || b == byAttack));
+        }
+        if (blocked)
+        {
+            if (g_blockedLogs.fetch_add(1) < 20)
+            {
+                std::printf("[hits] a stand-in's hit on %08X does nothing here (its player's game deals it)\n", obj);
+                std::fflush(stdout);
+            }
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    }
+    kh2::callOriginal(g_takeHit, rdram, ctx, runtime);
+}
 
 // Enemy or boss (objentry type 3 or 4)?
 bool isEnemy(const uint8_t *rdram, uint32_t obj)
@@ -141,9 +177,18 @@ bool install(PS2Runtime &runtime)
     g_execDamage = runtime.lookupFunction(kExecDamage);
     if (!g_execDamage || !runtime.replaceFunction(kExecDamage, &execDamageHook))
         return false;
+    g_takeHit = runtime.lookupFunction(kTakeHit);
+    if (!g_takeHit || !runtime.replaceFunction(kTakeHit, &takeHitHook))
+        g_takeHit = nullptr;
     if (g_log)
         std::printf("[hits] logging damage\n");
     return true;
+}
+
+void setBlockedAttackers(std::vector<uint32_t> objects)
+{
+    std::lock_guard<std::mutex> lock(g_blockedMutex);
+    g_blocked = std::move(objects);
 }
 
 void setCapture(bool on)

@@ -1,6 +1,8 @@
 #include "enemies.h"
 #include "hits.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +13,8 @@
 #include "game_state.h"
 #include "guest_call.h"
 #include "puppets.h"
+#include "hle_call.h"
+#include "ps2_runtime.h"
 
 namespace kh2enemies
 {
@@ -87,6 +91,53 @@ std::map<uint16_t, double> g_preloaded; // entry -> when its files were requeste
 std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
 uint16_t g_followRoom = 0xFFFF;
 double g_sharedSince = -1; // when the host and we were first both in this room (clientTick)
+
+// A client's own enemies: once the host and we have shared a room for a few
+// seconds (its spawn list has run on both), the room's later spawns of
+// enemies and bosses (waves, a mission's next group) are the host's to make;
+// ours come as copies of theirs (makeMissing). FUN_00199890(record, group,
+// pos), the step under YS::UNIT_DATA_OBJ::appear that calls the object
+// factory, then makes nothing (its callers take a null object).
+constexpr uint32_t kSpawnUnit = 0x00199890;
+PS2Runtime::RecompiledFunction g_spawnUnit = nullptr;
+std::atomic<bool> g_hostSpawns{false};
+
+void spawnUnitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kSpawnUnit && g_hostSpawns.load(std::memory_order_relaxed))
+    {
+        const uint32_t record = getRegU32(ctx, 4);
+        const uint32_t entry = inRam(record) ? (rd<uint32_t>(rdram, record) & 0xFFFF) : 0;
+        uint8_t type = 0xFF;
+        const uint32_t table = rd<uint32_t>(rdram, kh2state::addr::Obj0Ptr);
+        if (entry && inRam(table))
+        {
+            const uint32_t count = rd<uint32_t>(rdram, table + 4);
+            for (uint32_t i = 0; i < count && i < 4096; ++i)
+                if ((rd<uint32_t>(rdram, table + 8 + i * 0x60) & 0xFFFF) == entry)
+                {
+                    type = rd<uint8_t>(rdram, table + 8 + i * 0x60 + 4);
+                    break;
+                }
+        }
+        if (type == 3 || type == 4 || type == 12) // boss, enemy, giant boss (as scan())
+        {
+            static double lastLog = -10;
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (t - lastLog > 2.0)
+            {
+                lastLog = t;
+                std::printf("[enemies] our game would make %04X #%d: the host's game makes the enemies\n", entry,
+                            rd<int16_t>(rdram, record + kRecordSerial));
+                std::fflush(stdout);
+            }
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    }
+    kh2::callOriginal(g_spawnUnit, rdram, ctx, runtime);
+}
 size_t g_lastSentCount = SIZE_MAX, g_lastFollowCount = SIZE_MAX; // for the log
 
 // Guest job: obj->add_hp(amount) (negative = damage; at 0 the object dies
@@ -171,6 +222,18 @@ void removeBody(uint32_t obj)
     });
 }
 } // namespace
+
+bool install(PS2Runtime &runtime)
+{
+    g_spawnUnit = runtime.lookupFunction(kSpawnUnit);
+    if (!g_spawnUnit || !runtime.replaceFunction(kSpawnUnit, &spawnUnitHook))
+    {
+        std::fprintf(stderr, "[enemies] could not hook 0x%08X\n", kSpawnUnit);
+        g_spawnUnit = nullptr;
+        return false;
+    }
+    return true;
+}
 
 std::vector<Local> scan(const uint8_t *rdram)
 {
@@ -352,6 +415,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     const bool fresh = g_hostTime >= 0 && now - g_hostTime < 1.0 && g_host.world == world && g_host.room == room;
     if (fresh && g_sharedSince < 0)
         g_sharedSince = now; // both of us in this room from now
+    g_hostSpawns = fresh && g_sharedSince >= 0 && now - g_sharedSince > 3.0;
     if (!fresh)
     {
         if (g_lastFollowCount != 0 && g_lastFollowCount != SIZE_MAX)
@@ -629,6 +693,7 @@ bool followed(uint32_t object, int16_t &serial, uint16_t &entry)
 
 void reset()
 {
+    g_hostSpawns = false;
     std::lock_guard<std::mutex> lock(g_mutex);
     for (const auto &[serial, f] : g_follow)
         if (f.frozen)

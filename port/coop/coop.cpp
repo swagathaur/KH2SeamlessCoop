@@ -337,7 +337,16 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     {
         if (g_strayCutSince < 0)
             g_strayCutSince = now();
-        if (now() - g_strayCutSince > 0.75 && now() - g_lastClientSkip > 3.0)
+        // (Not a moment of control 3 that is no cutscene: a form change
+        // (YS::CHANGEFORM's task at 0x00351184) or a reward screen still to
+        // show (dk::TREASURE_INFO's pending infos at 0x00347D58); real
+        // cutscenes last longer than two seconds.)
+        uint32_t formTask = 0, infos = 0;
+        std::memcpy(&formTask, ram + 0x00351184u, 4);
+        std::memcpy(&infos, ram + 0x00347D58u, 4);
+        if (formTask || infos)
+            g_strayCutSince = now();
+        if (now() - g_strayCutSince > 2.0 && now() - g_lastClientSkip > 3.0)
         {
             g_lastClientSkip = now();
             if (kh2skip::skipCutscene(ram))

@@ -13,6 +13,8 @@
 #include "hits.h"
 
 #include <cstdint>
+
+class PS2Runtime;
 #include <vector>
 
 #include "net/protocol.h"
@@ -30,6 +32,9 @@ struct Local
     int32_t hp = 0, maxHp = 0;
     uint32_t sheet = 0; // YS::SHEET*: hp, max hp, min hp
 };
+
+// Hooks the room spawn step (a client's own enemy spawns, see enemies.cpp).
+bool install(PS2Runtime &runtime);
 
 // Enemies and bosses in the object list that came from a spawn entry.
 std::vector<Local> scan(const uint8_t *rdram);

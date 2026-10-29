@@ -1099,6 +1099,50 @@ void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects)
 
 void remove(uint32_t obj) { postLeave(obj); }
 
+void removeKeeping(uint32_t obj, std::vector<uint32_t> keep)
+{
+    auto before = std::make_shared<std::vector<uint32_t>>();
+    kh2guest::post([obj, keep, before](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+        {
+            // Put back what the leave cleared (a player-class object's leave
+            // clears the game's player pointers, also when they are not it).
+            for (size_t i = 0; i < keep.size() && i < before->size(); ++i)
+            {
+                uint32_t now = 0;
+                std::memcpy(&now, env.host(keep[i]), 4);
+                if (now != (*before)[i] && (*before)[i] != obj)
+                {
+                    std::printf("[puppets] %08X's leave changed %08X (%08X -> %08X): put back\n", obj, keep[i],
+                                (*before)[i], now);
+                    std::fflush(stdout);
+                    std::memcpy(env.host(keep[i]), &(*before)[i], 4);
+                }
+            }
+            return std::nullopt;
+        }
+        bool live = false;
+        for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
+            live = live || a.address == obj;
+        if (!live)
+            return std::nullopt;
+        uint32_t vt = 0, fn = 0;
+        std::memcpy(&vt, env.host(obj), 4);
+        if (vt >= 0x00100000u && vt < 0x02000000u)
+            std::memcpy(&fn, env.host(vt + kVtableLeave), 4);
+        if (!fn)
+            return std::nullopt;
+        before->clear();
+        for (uint32_t a : keep)
+        {
+            uint32_t v = 0;
+            std::memcpy(&v, env.host(a), 4);
+            before->push_back(v);
+        }
+        return kh2guest::Call{fn, {obj}, {}};
+    });
+}
+
 void setMode(Mode mode) { g_mode = mode; }
 Mode mode() { return g_mode; }
 

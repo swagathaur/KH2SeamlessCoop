@@ -31,6 +31,8 @@ constexpr uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x003524
 
 constexpr uint32_t kHud = 0x003485EC;
 
+void removeAvatar(uint8_t *rdram, uint32_t obj);
+
 struct State
 {
     uint32_t object = 0;
@@ -72,6 +74,36 @@ void controlHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     kh2::callOriginal(g_control, rdram, ctx, runtime);
 }
+
+// A player-class object's teardown (0x00178280, the vtable's; other classes'
+// tail-jump to it) clears the game's player pointer (0x0034E948) and runs
+// FUN_001781E8: resets for the player (the battle state among them) and the
+// release of its command object (+0xB3C: for an avatar, the one shared
+// PLAYER_COMMAND). An avatar going (a new look, a cutscene) took our player
+// and the fight's state with it. An avatar's goes straight to the base
+// object's teardown (0x00175928).
+constexpr uint32_t kPlayerTeardown = 0x00178280, kObjTeardown = 0x00175928;
+PS2Runtime::RecompiledFunction g_teardown = nullptr;
+std::atomic<uint32_t> g_leaving[4] = {}; // avatars removeAvatar sent off (no longer in g_avatarObjs)
+std::atomic<uint32_t> g_leavingNext{0};
+void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4);
+    bool avatar = false;
+    for (const auto &a : g_avatarObjs)
+        avatar = avatar || (obj && a.load(std::memory_order_relaxed) == obj);
+    for (const auto &a : g_leaving)
+        avatar = avatar || (obj && a.load(std::memory_order_relaxed) == obj);
+    if (avatar && ctx->pc == kPlayerTeardown)
+    {
+        std::printf("[avatars] %08X is torn down as an object (not as the player)\n", obj);
+        std::fflush(stdout);
+        ctx->pc = kObjTeardown; // (a0 and ra as they are: a tail call)
+        return;
+    }
+    kh2::callOriginal(g_teardown, rdram, ctx, runtime);
+}
+
 std::map<int, std::string> g_names; // character in their party place -> their name
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
@@ -153,6 +185,9 @@ bool install(PS2Runtime &runtime)
         g_control = nullptr;
         return false;
     }
+    g_teardown = runtime.lookupFunction(kPlayerTeardown);
+    if (!g_teardown || !runtime.replaceFunction(kPlayerTeardown, &teardownHook))
+        g_teardown = nullptr;
     return true;
 }
 
@@ -264,7 +299,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 std::printf("[avatars] player %u's avatar %08X goes (%s)\n", r.playerId + 1, s.object,
                             !here ? "not here" : cutscene ? "cutscene" : "a new look");
                 std::fflush(stdout);
-                kh2puppets::remove(s.object);
+                removeAvatar(rdram, s.object);
                 s.object = 0;
                 s.prepared = false;
                 s.motion = 0xFFFF;
@@ -427,7 +462,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         if (!still)
         {
             if (it->second.object)
-                kh2puppets::remove(it->second.object);
+                removeAvatar(rdram, it->second.object);
             it = g_states.erase(it);
         }
         else
@@ -465,6 +500,19 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     return heals;
 }
 
+namespace
+{
+void removeAvatar(uint8_t *rdram, uint32_t obj)
+{
+    g_leaving[g_leavingNext.fetch_add(1) % 4].store(obj);
+    std::vector<uint32_t> keep(std::begin(kPlayerRefs), std::end(kPlayerRefs));
+    const uint32_t hud = rd<uint32_t>(rdram, kHud);
+    if (inRam(hud))
+        keep.push_back(hud + 0x34);
+    kh2puppets::removeKeeping(obj, std::move(keep));
+}
+} // namespace
+
 std::map<int, std::string> names()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -477,7 +525,7 @@ void reset(uint8_t *rdram)
     std::lock_guard<std::mutex> lock(g_mutex);
     for (auto &[id, s] : g_states)
         if (s.object)
-            kh2puppets::remove(s.object);
+            removeAvatar(rdram, s.object);
     g_states.clear();
     for (auto &a : g_avatarObjs)
         a.store(0);

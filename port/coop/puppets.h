@@ -65,6 +65,9 @@ void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
 // there and its motion set has that motion.
 void postMotion(uint32_t obj, uint32_t id, float blend = 4.0f);
 // Take object `obj` away (a guest job; its class's leave), if it is still there.
+// remove(), then the words at `keep` that the object's leave changed are put
+// back (a player-class object's leave clears the game's player pointers).
+void removeKeeping(uint32_t obj, std::vector<uint32_t> keep);
 void remove(uint32_t obj);
 // Make an object of `entryId` at `pos` facing `yaw` (a guest job, like a
 // room's spawn list entry: placeholders such as FRIEND_1 (0x237) become the

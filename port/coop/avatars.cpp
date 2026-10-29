@@ -48,6 +48,7 @@ struct State
     double castUntil = 0;
     uint32_t proxy = 0;      // the party member holding their place (hidden)
     int32_t writtenHp = -1, writtenMp = -1; // what we last put in the sheet
+    double quietUntil = 0;   // no heals read until then (an avatar made or gone: the slot is set anew)
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -55,6 +56,7 @@ uint32_t g_gen = 0;
 uint16_t g_room = 0xFFFF;
 double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
+std::atomic<uint32_t> g_ourPlayerShared{0};
 std::atomic<uint32_t> g_avatarObjs[kMaxAvatars] = {}; // for the EE-side hooks
 
 // YS::PLAYER::_OVR_control (0x00178888): a player's per-frame command menu
@@ -86,16 +88,42 @@ constexpr uint32_t kPlayerTeardown = 0x00178280, kObjTeardown = 0x00175928;
 PS2Runtime::RecompiledFunction g_teardown = nullptr;
 std::atomic<uint32_t> g_leaving[4] = {}; // avatars removeAvatar sent off (no longer in g_avatarObjs)
 std::atomic<uint32_t> g_leavingNext{0};
+std::atomic<uint32_t> g_torn[8] = {}; // avatars torn down (by the game or us): not to be sent off again
+std::atomic<int64_t> g_tornAt[8] = {};  // when (ms): an address is only theirs for a moment (memory is reused)
+std::atomic<uint32_t> g_tornNext{0};
+std::atomic<int64_t> g_leavingAt[4] = {};
+int64_t nowMs()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+// Was `obj` an avatar that left (or is leaving) within the last two seconds?
+bool justLeft(uint32_t obj)
+{
+    const int64_t t = nowMs();
+    for (int i = 0; i < 8; ++i)
+        if (obj && g_torn[i].load() == obj && t - g_tornAt[i].load() < 2000)
+            return true;
+    for (int i = 0; i < 4; ++i)
+        if (obj && g_leaving[i].load() == obj && t - g_leavingAt[i].load() < 2000)
+            return true;
+    return false;
+}
 void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t obj = getRegU32(ctx, 4);
     bool avatar = false;
     for (const auto &a : g_avatarObjs)
         avatar = avatar || (obj && a.load(std::memory_order_relaxed) == obj);
-    for (const auto &a : g_leaving)
-        avatar = avatar || (obj && a.load(std::memory_order_relaxed) == obj);
+    for (int i = 0; i < 4; ++i)
+        avatar = avatar || (obj && g_leaving[i].load() == obj && nowMs() - g_leavingAt[i].load() < 5000);
     if (avatar && ctx->pc == kPlayerTeardown)
     {
+        {
+            const uint32_t i = g_tornNext.fetch_add(1) % 8;
+            g_tornAt[i].store(nowMs());
+            g_torn[i].store(obj);
+        }
         std::printf("[avatars] %08X is torn down as an object (not as the player)\n", obj);
         std::fflush(stdout);
         ctx->pc = kObjTeardown; // (a0 and ra as they are: a tail call)
@@ -200,6 +228,8 @@ bool enabled()
     return on;
 }
 
+uint32_t ourPlayer() { return g_ourPlayerShared.load(); }
+
 std::vector<uint32_t> objects()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -259,11 +289,16 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     }
     // Ours: the object the game made as the player for this room (a new
     // avatar's first updates point PlayerPtr at itself too).
+    // (Not a player-class object being made for an avatar: for a moment it
+    // is "the player" before its spawn job has told us; not one that has
+    // gone, whose address the game's pointers may still hold.)
     bool ourKnown = false;
     for (auto &[id, s] : g_states)
-        ourKnown = ourKnown || (s.object && player == s.object);
-    if (player && !ourKnown)
+        ourKnown = ourKnown || (s.object && player == s.object) || s.pending;
+    ourKnown = ourKnown || justLeft(player);
+    if (player && !ourKnown && live(rdram, player))
         g_ourPlayer = player;
+    g_ourPlayerShared = g_ourPlayer;
     const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
     const bool cutscene = st.control == 3;
     uint32_t sheetIndex = 0;
@@ -303,6 +338,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 s.object = 0;
                 s.prepared = false;
                 s.motion = 0xFFFF;
+                s.quietUntil = t + 1.0;
             }
             continue;
         }
@@ -339,6 +375,9 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                         kh2puppets::remove(obj);
                     return;
                 }
+                for (auto &t : g_torn) // (a new object at an old one's address)
+                    if (t.load() == obj)
+                        t.store(0);
                 s.object = obj;
                 s.prepared = false;
                 std::printf("[avatars] player %u's avatar is %08X\n", id + 1, obj);
@@ -350,6 +389,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         if (!s.prepared)
         {
             s.prepared = true;
+            s.writtenHp = s.writtenMp = -1;
+            s.quietUntil = t + 1.0;
             const uint32_t from = rd<uint32_t>(rdram, obj + kObjSheet);
             if (inRam(from) && s.sheet >= kSheetBase) // (a party slot's is the game's own)
                 std::memcpy(rdram + s.sheet, rdram + from, kSheetSize);
@@ -410,11 +451,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             const int32_t mpNow = rd<int32_t>(rdram, s.sheet + kh2state::addr::SlotMp);
             kh2partner::Heal h;
             h.playerId = r.playerId;
-            if (s.writtenHp >= 0 && hpNow > s.writtenHp)
+            const bool quiet = t < s.quietUntil;
+            if (s.writtenHp >= 0 && hpNow > s.writtenHp && !quiet)
                 h.hp = hpNow - s.writtenHp;
             // (MP: the game recharges a party slot's MP by itself, in small
             // steps; only an Ether-sized rise is ours.)
-            if (s.writtenMp >= 0 && mpNow >= s.writtenMp + 10)
+            if (s.writtenMp >= 0 && mpNow >= s.writtenMp + 10 && !quiet)
                 h.mp = mpNow - s.writtenMp;
             if (h.hp > 0 || h.mp > 0)
             {
@@ -504,12 +546,22 @@ namespace
 {
 void removeAvatar(uint8_t *rdram, uint32_t obj)
 {
-    g_leaving[g_leavingNext.fetch_add(1) % 4].store(obj);
+    {
+        const uint32_t i = g_leavingNext.fetch_add(1) % 4;
+        g_leavingAt[i].store(nowMs());
+        g_leaving[i].store(obj);
+    }
     std::vector<uint32_t> keep(std::begin(kPlayerRefs), std::end(kPlayerRefs));
     const uint32_t hud = rd<uint32_t>(rdram, kHud);
     if (inRam(hud))
         keep.push_back(hud + 0x34);
-    kh2puppets::removeKeeping(obj, std::move(keep));
+    kh2puppets::removeKeeping(obj, std::move(keep), [](uint32_t o) {
+        const int64_t t = nowMs();
+        for (int i = 0; i < 8; ++i)
+            if (g_torn[i].load() == o && t - g_tornAt[i].load() < 2000)
+                return true;
+        return false;
+    });
 }
 } // namespace
 

@@ -333,18 +333,21 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     // A cutscene the host is not in, wherever we are: it ended or was
     // skipped there, or our own game started one (its own story's, which is
     // not the one being played). The host's game leads.
+    // Not a moment of control 3 that is no cutscene: a form change
+    // (YS::CHANGEFORM's task at 0x00351184; its control 3 outlasts the task,
+    // about two seconds) or a reward screen still to show (dk::TREASURE_INFO's
+    // pending infos at 0x00347D58). Real cutscenes last longer than 2 s.
+    uint32_t formTask = 0, infos = 0;
+    std::memcpy(&formTask, ram + 0x00351184u, 4);
+    std::memcpy(&infos, ram + 0x00347D58u, 4);
+    static double formSeen = -100.0;
+    if (formTask)
+        formSeen = now();
     if (cut && !(hostCut && myKey == hostKey))
     {
         if (g_strayCutSince < 0)
             g_strayCutSince = now();
-        // (Not a moment of control 3 that is no cutscene: a form change
-        // (YS::CHANGEFORM's task at 0x00351184) or a reward screen still to
-        // show (dk::TREASURE_INFO's pending infos at 0x00347D58); real
-        // cutscenes last longer than two seconds.)
-        uint32_t formTask = 0, infos = 0;
-        std::memcpy(&formTask, ram + 0x00351184u, 4);
-        std::memcpy(&infos, ram + 0x00347D58u, 4);
-        if (formTask || infos)
+        if (formTask || infos || now() - formSeen < 6.0)
             g_strayCutSince = now();
         if (now() - g_strayCutSince > 2.0 && now() - g_lastClientSkip > 3.0)
         {
@@ -1129,6 +1132,19 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         return;
     g_lastSentFrame = guestFrame;
     const kh2state::State st = kh2state::read(rdram);
+    // (A new object is "the player" for a moment while it is made: an avatar
+    // being made is not us, and its look would go out as ours.)
+    if (kh2avatars::enabled())
+    {
+        uint32_t player = 0;
+        std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+        for (uint32_t o : kh2avatars::objects())
+            if (o && o == player)
+                return;
+        const uint32_t ours = kh2avatars::ourPlayer();
+        if (ours && player != ours)
+            return;
+    }
     kh2net::PlayerState ps;
     ps.tick = static_cast<uint32_t>(guestFrame);
     ps.world = st.now.world;
@@ -1140,6 +1156,15 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             ps.pos[i] = st.player.pos[i];
         ps.rotY = st.player.facing;
         ps.model = static_cast<uint16_t>(st.player.entryId);
+        static uint16_t lastModel = 0xFFFF;
+        if (ps.model != lastModel)
+        {
+            uint32_t pp = 0;
+            std::memcpy(&pp, rdram + kh2state::addr::PlayerPtr, 4);
+            std::printf("[coop] our model is %04X now (player %08X)\n", ps.model, pp);
+            std::fflush(stdout);
+            lastModel = ps.model;
+        }
         ps.anim = static_cast<uint16_t>(st.player.motion);
         ps.flags |= 1; // has a body in the world
         kh2partner::localRide(rdram, ps);

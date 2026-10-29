@@ -1421,7 +1421,12 @@ std::vector<Heal> update(uint8_t *rdram, const std::vector<Remote> &remotes)
                 if (character > 0 && character < 13)
                     names[character] = order[i]->name;
             }
-        kh2names::set(names);
+        // (Nobody to stand in for: names are cleared once and then left to
+        // whoever else sets them, the avatars.)
+        static bool hadNames = false;
+        if (!names.empty() || hadNames)
+            kh2names::set(names);
+        hadNames = !names.empty();
     }
     return heals;
 }

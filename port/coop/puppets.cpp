@@ -1099,10 +1099,10 @@ void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects)
 
 void remove(uint32_t obj) { postLeave(obj); }
 
-void removeKeeping(uint32_t obj, std::vector<uint32_t> keep)
+void removeKeeping(uint32_t obj, std::vector<uint32_t> keep, std::function<bool(uint32_t)> gone)
 {
     auto before = std::make_shared<std::vector<uint32_t>>();
-    kh2guest::post([obj, keep, before](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([obj, keep, before, gone](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
         {
             // Put back what the leave cleared (a player-class object's leave
@@ -1124,7 +1124,7 @@ void removeKeeping(uint32_t obj, std::vector<uint32_t> keep)
         bool live = false;
         for (const kh2state::ActorInfo &a : kh2state::actors(env.rdram))
             live = live || a.address == obj;
-        if (!live)
+        if (!live || (gone && gone(obj))) // (gone: the game tore it down itself already)
             return std::nullopt;
         uint32_t vt = 0, fn = 0;
         std::memcpy(&vt, env.host(obj), 4);

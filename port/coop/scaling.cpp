@@ -160,6 +160,21 @@ void tick(uint8_t *rdram, bool inSession, bool host, int count)
         const uint32_t sheet = rd<uint32_t>(rdram, a.address + kObjSheet);
         if (!inRam(sheet))
             continue;
+        // Never the party's sheets (an avatar's HP lives in a party slot) or
+        // the avatars' own (avatars.h).
+        if ((sheet >= kh2state::addr::Slot1 - 3 * kh2state::addr::SlotStride &&
+             sheet < kh2state::addr::Slot1 + kh2state::addr::SlotStride) ||
+            (sheet >= 0x01E4E000u && sheet < 0x01E4F000u))
+        {
+            static int skipped = 0;
+            if (skipped++ < 5)
+            {
+                std::printf("[scale] %s %08X (type %u) has a party sheet (%08X): left alone\n", a.name, a.address,
+                            unsigned(a.type), sheet);
+                std::fflush(stdout);
+            }
+            continue;
+        }
         const int32_t hp = rd<int32_t>(rdram, sheet), max = rd<int32_t>(rdram, sheet + 4);
         if (hp <= 0 || max <= 0)
             continue;

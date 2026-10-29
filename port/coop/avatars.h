@@ -38,6 +38,9 @@ bool enabled();
 std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes);
 // Avatar objects and the party members holding their places, in this room
 // (for hits.h), and player `id`'s avatar (0: none).
+// Our own player object as the avatars know it (0: not yet): the game's
+// player pointer is another object for a moment while an avatar is made.
+uint32_t ourPlayer();
 std::vector<uint32_t> objects();
 uint32_t objectFor(uint8_t playerId);
 // The avatar is casting (spells.h castAsPlayer): its own motions (the cast's,

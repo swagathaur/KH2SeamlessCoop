@@ -26,6 +26,50 @@ bool g_holdUsed = false; // this hold already skipped something
 bool g_skippedThisScene = false; // until control comes back or the event changes
 uint32_t g_sceneKey = 0;
 
+// The screen fades (dk::Fade, 0x110 bytes each from dk::getAllFade's
+// 0x003493A0; the 7th, 0x00349A00, is getWideMaskBeforeFade, the cutscenes'
+// mask): +0x13 how dark (0x80 black), +0xFC state (3 fading out, 4 held
+// black, 1 and 2 fading in, 0 clear), +0x100 time left, +0x104 darkness per
+// unit of it. A cutscene skipped as it starts (a co-op client catching up
+// with the host, which is past it; --skip-cutscenes) can leave its mask
+// held black: the scene's own fade-in was skipped with it, and the screen
+// stayed black for the whole fight that followed.
+constexpr uint32_t kFades = 0x003493A0, kFadeSize = 0x110, kFadeCount = 7;
+double g_heldBlackSince[kFadeCount] = {-1, -1, -1, -1, -1, -1, -1};
+
+void clearStuckFades(uint8_t *rdram, double t, bool cutscene)
+{
+    uint32_t control = 0, jumping = 0;
+    std::memcpy(&control, rdram + kh2state::addr::Cntrl, 4);
+    std::memcpy(&jumping, rdram + kh2state::addr::MapJumpTask, 4);
+    const bool playing = !cutscene && control == 0 && !jumping && t - g_lastSkip < 60.0;
+    for (uint32_t i = 0; i < kFadeCount; ++i)
+    {
+        uint8_t *f = rdram + kFades + i * kFadeSize;
+        int32_t state;
+        std::memcpy(&state, f + 0xFC, 4);
+        if (!playing || state != 4 || f[0x13] < 0x80)
+        {
+            g_heldBlackSince[i] = -1;
+            continue;
+        }
+        if (g_heldBlackSince[i] < 0)
+            g_heldBlackSince[i] = t;
+        if (t - g_heldBlackSince[i] < 1.0)
+            continue;
+        // Fade it in the game's way (state 2: over 16 frames).
+        const float frames = 16.0f, perFrame = 128.0f / frames;
+        const int32_t fadingIn = 2;
+        std::memcpy(f + 0x100, &frames, 4);
+        std::memcpy(f + 0x104, &perFrame, 4);
+        std::memcpy(f + 0xFC, &fadingIn, 4);
+        g_heldBlackSince[i] = -1;
+        std::printf("[skip] fade %u (0x%08X) stayed black after a skipped cutscene: fading it in\n", i,
+                    kFades + i * kFadeSize);
+        std::fflush(stdout);
+    }
+}
+
 double now()
 {
     using namespace std::chrono;
@@ -115,5 +159,6 @@ void tick(uint8_t *rdram, double skipHeld)
         if (scene.now.event != 0 && scene.now.event != 0xFFFF && skipCutscene(rdram))
             g_skippedThisScene = true;
     }
+    clearStuckFades(rdram, t, cutscene);
 }
 } // namespace kh2skip

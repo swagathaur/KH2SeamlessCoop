@@ -63,6 +63,10 @@
 #include "english_text.h"
 #include "databuff.h"
 #include "image_slots.h"
+
+// patches/ps2recomp/0048: per-function call counts (--count-calls).
+extern std::atomic<bool> g_ps2CallCountOn;
+extern uint32_t *g_ps2CallCounts;
 #include "gpu_sync.h"
 #include "hd_textures.h"
 #include "file_override.h"
@@ -143,6 +147,7 @@ struct Options
     uint64_t arrangeAt = 0;            // --arrange-at: testing, Arrange windows at this frame
     uint64_t storySaveTest = 0;        // --story-save-test: make a save image and check whose story it holds
     std::set<uint64_t> ramDumpAt;      // guest frames at which to write all 32 MB of RDRAM
+    std::vector<std::pair<uint64_t, uint64_t>> countCalls; // --count-calls=A-B: functions called in [A, B)
     std::set<uint64_t> stackDumpAt;    // guest frames at which to print every host thread's stack
     std::string renderer = "auto";     // gpu | soft | auto (gpu when windowed)
     unsigned ssaa = 1;                 // GPU renderer super-sampling: 1, 2, 4, 8, 16
@@ -299,6 +304,8 @@ void usage()
         "  --english               English text (game/files/english: tools/egs_extract.py --english)\n"
         "  --override-dir=DIR      use the game files in DIR (by the game's names) instead of the disc's\n"
         "  --skip-cutscenes-until=F  testing: skip them until frame F\n"
+        "  --count-calls=A-B[,..] testing: count the guest functions called from frame A to B\n"
+        "                          (shots dir, calls_A_B.txt)\n"
         "  --hurt-enemies=F:N      testing: take N HP off every enemy at frame F (as if hit)\n"
         "  --no-settings           don't read kh2recomp.ini\n"
         "  --mark-actors           debug: mark each object's projected feet and head in screenshots\n"
@@ -400,6 +407,13 @@ bool parseUnchecked(int argc, char **argv, Options &o)
             std::stringstream ss(value(a));
             for (std::string t; std::getline(ss, t, ',');)
                 if (!t.empty()) o.ramDumpAt.insert(std::stoull(t));
+        }
+        else if (a.rfind("--count-calls=", 0) == 0)
+        {
+            std::stringstream ss(value(a));
+            for (std::string t; std::getline(ss, t, ',');)
+                if (const size_t d = t.find('-'); d != std::string::npos)
+                    o.countCalls.emplace_back(std::stoull(t.substr(0, d)), std::stoull(t.substr(d + 1)));
         }
         else if (a.rfind("--stack-dump=", 0) == 0)
         {
@@ -1242,6 +1256,42 @@ bool harnessTick(Harness &h, uint64_t frame)
             h.lastSpawnFrame = frame;
             kh2puppets::requestSpawn(entry);
         }
+    // --count-calls: how often each guest function was called (through the
+    // runtime's dispatch) between two frames, written as calls_A_B.txt.
+    for (const auto &[from, to] : o.countCalls)
+    {
+        static std::vector<uint32_t> counts;
+        static std::set<uint64_t> started;
+        if (frame >= from && frame < to && !g_ps2CallCountOn.load() && started.insert(from).second)
+        {
+            counts.assign(0x02000000u / 4u, 0u);
+            g_ps2CallCounts = counts.data();
+            g_ps2CallCountOn.store(true);
+        }
+        else if (frame >= to && g_ps2CallCountOn.load() && started.count(from) && !started.count(to | (1ull << 63)))
+        {
+            started.insert(to | (1ull << 63));
+            g_ps2CallCountOn.store(false);
+            char name[64];
+            std::snprintf(name, sizeof(name), "calls_%06llu_%06llu.txt", (unsigned long long)from,
+                          (unsigned long long)to);
+            std::error_code ec;
+            std::filesystem::create_directories(o.shotDir, ec);
+            const std::filesystem::path path = std::filesystem::path(o.shotDir) / name;
+            size_t n = 0;
+            if (FILE *f = std::fopen(path.string().c_str(), "w"))
+            {
+                for (size_t i = 0; i < counts.size(); ++i)
+                    if (counts[i])
+                    {
+                        std::fprintf(f, "%08X %u\n", unsigned(i * 4u), counts[i]);
+                        ++n;
+                    }
+                std::fclose(f);
+            }
+            std::printf("[harness] wrote %s (%zu functions)\n", path.string().c_str(), n);
+        }
+    }
     if (hit(o.ramDumpAt) && frame != h.lastRamDumpFrame)
     {
         h.lastRamDumpFrame = frame;

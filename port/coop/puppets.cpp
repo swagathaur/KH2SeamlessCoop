@@ -545,6 +545,48 @@ bool usable(const kh2state::ActorInfo &a)
 // form's look has no model until the look has loaded (+0x670 is null for a
 // few frames), and the game then calls through a null table. Give it a
 // plain matrix until the model is there: the weapon sits at the holder.
+// FUN_0017EFA0(MOTION*, motion file, f12, f13): starts a motion from its
+// file, whose first animation part (BAR type 9) it plays without looking:
+// a file that has none (a drive form's motion on a stand-in made in that
+// form, whose motions are not all loaded) left it calling through 0. Such a
+// motion is not started; the current one goes on.
+constexpr uint32_t kMotionSet = 0x0017EFA0;
+PS2Runtime::RecompiledFunction g_motionSet = nullptr;
+
+void motionSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t file = getRegU32(ctx, 5);
+    if (ctx->pc == kMotionSet && file >= 0x00100000u && file < 0x02000000u - 0x10)
+    {
+        uint32_t count = 0;
+        std::memcpy(&count, rdram + file + 4, 4);
+        bool anim = false;
+        for (uint32_t i = 0; i < count && i < 256 && !anim; ++i)
+        {
+            uint16_t type = 0;
+            const uint32_t at = file + 0x10 + i * 0x10;
+            if (at + 0x10 > 0x02000000u)
+                break;
+            std::memcpy(&type, rdram + at, 2);
+            anim = type == 9;
+        }
+        if (!anim)
+        {
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1) < 8)
+            {
+                std::printf("[puppets] motion file %08X on %08X has no animation (not loaded): not started\n", file,
+                            getRegU32(ctx, 4));
+                std::fflush(stdout);
+            }
+            setReturnU32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    }
+    kh2::callOriginal(g_motionSet, rdram, ctx, runtime);
+}
+
 constexpr uint32_t kBoneMatrix = 0x0011D6C0;
 PS2Runtime::RecompiledFunction g_boneMatrix = nullptr;
 std::atomic<uint32_t> g_boneMisses{0};
@@ -579,6 +621,9 @@ void boneMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_motionSet = runtime.lookupFunction(kMotionSet);
+    if (!g_motionSet || !runtime.replaceFunction(kMotionSet, &motionSetHook))
+        g_motionSet = nullptr;
     g_boneMatrix = runtime.lookupFunction(kBoneMatrix);
     if (!g_boneMatrix || !runtime.replaceFunction(kBoneMatrix, &boneMatrixHook))
         g_boneMatrix = nullptr;

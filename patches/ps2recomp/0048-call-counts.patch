@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kh2 port <kh2@localhost>
+Subject: [PATCH] 0048 count the functions the game calls (--count-calls)
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -124,6 +124,10 @@
+     uint32_t align;
+ };
+ 
++// patch 0048: counting the functions the game calls (the harness's --count-calls).
++std::atomic<bool> g_ps2CallCountOn{false};
++uint32_t *g_ps2CallCounts = nullptr; // one per word of guest RAM, by (pc & 0x1FFFFFF) >> 2
++
+ namespace
+ {
+     template <class Present>
+@@ -214,6 +218,11 @@
+ 
+     void pushDispatchPc(uint32_t pc)
+     {
++        if (g_ps2CallCountOn.load(std::memory_order_relaxed)) [[unlikely]]
++        {
++            if (uint32_t *counts = g_ps2CallCounts)
++                ++counts[(pc & 0x01FFFFFFu) >> 2];
++        }
+         DispatchHistory &h = g_dispatchHistory;
+         h.pcs[h.next] = pc;
+         h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());

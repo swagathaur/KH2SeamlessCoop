@@ -23,6 +23,122 @@ constexpr uint32_t kCast = 0x001A6178; // (caster, command id, combo)
 PS2Runtime::RecompiledFunction g_cast = nullptr;
 std::atomic<int> g_logged{0};
 std::atomic<bool> g_capture{false};
+
+// Spells the others know (net, SpellsKnown): each game loads their data too.
+// FUN_001A6658(slot) picks a spell slot's record (Fire, Blizzard, Thunder,
+// Cure, Magnet, Reflect) by what this save has learned (0: not learned);
+// MAGIC::Read loads the files of those, and the room's magic table
+// (0x00350800, 0x2C a slot, +0x28 the record, record +0x26 its command) is
+// what a cast looks the command up in. A slot only the others know gets its
+// first record (the data is there for their avatars' casts), and is hidden
+// from this player's own menu (YS::MAGIC::GetCommand gives 0 for it).
+constexpr uint32_t kSpellRecord = 0x001A6658, kGetCommand = 0x001A67B0;
+constexpr uint32_t kMagicTable = 0x00350800, kMagicSlotSize = 0x2C, kMagicSlots = 6;
+constexpr uint32_t kMagicData = 0x01C6CB28; // -> u32 ?, u32 count, records of 0x38 (byte 0: slot)
+PS2Runtime::RecompiledFunction g_spellRecord = nullptr, g_getCommand = nullptr;
+std::atomic<uint8_t> g_localLevels[kMagicSlots] = {};
+std::atomic<uint8_t> g_othersKnow[kMagicSlots] = {};
+std::atomic<bool> g_borrowed[kMagicSlots] = {};
+std::atomic<bool> g_share{false};
+
+uint32_t firstRecord(const uint8_t *rdram, uint32_t slot)
+{
+    uint32_t data = 0;
+    std::memcpy(&data, rdram + kMagicData, 4);
+    if (data < 0x00100000u || data >= 0x02000000u)
+        return 0;
+    uint32_t count = 0;
+    std::memcpy(&count, rdram + data + 4, 4);
+    for (uint32_t i = 0; i < count && i < 256; ++i)
+    {
+        const uint32_t rec = data + 8 + i * 0x38;
+        if (rdram[rec] == slot)
+            return rec;
+    }
+    return 0;
+}
+
+void spellRecordHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t slot = getRegU32(ctx, 4);
+    kh2::callOriginal(g_spellRecord, rdram, ctx, runtime);
+    if (slot >= kMagicSlots)
+        return;
+    const uint32_t rec = getRegU32(ctx, 2);
+    g_localLevels[slot] = rec ? uint8_t(rdram[rec + 1] + 1) : 0;
+    bool borrowed = false;
+    if (!rec && g_share.load() && g_othersKnow[slot].load())
+        if (const uint32_t first = firstRecord(rdram, slot))
+        {
+            setReturnU32(ctx, first);
+            borrowed = true;
+        }
+    if (borrowed != g_borrowed[slot].load())
+    {
+        g_borrowed[slot] = borrowed;
+        std::printf("[spells] spell slot %u: %s\n", slot,
+                    borrowed ? "only the others know it; its data is loaded for their casts" : "ours");
+        std::fflush(stdout);
+    }
+}
+
+void getCommandHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t slot = getRegU32(ctx, 4);
+    if (ctx->pc == kGetCommand && slot < kMagicSlots && g_borrowed[slot].load())
+    {
+        setReturnU32(ctx, 0); // not ours to cast
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_getCommand, rdram, ctx, runtime);
+}
+
+// A command the room's magic table has, for `command`'s element (theirs can
+// be Fira where ours is Fire).
+uint32_t localCommand(const uint8_t *rdram, uint32_t command)
+{
+    uint32_t slotOf = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < kMagicSlots; ++i)
+    {
+        uint32_t rec = 0;
+        std::memcpy(&rec, rdram + kMagicTable + i * kMagicSlotSize + 0x28, 4);
+        if (rec >= 0x00100000u && rec < 0x02000000u)
+        {
+            uint16_t c = 0;
+            std::memcpy(&c, rdram + rec + 0x26, 2);
+            if (c == command)
+                return command;
+        }
+    }
+    uint32_t data = 0;
+    std::memcpy(&data, rdram + kMagicData, 4);
+    if (data >= 0x00100000u && data < 0x02000000u)
+    {
+        uint32_t count = 0;
+        std::memcpy(&count, rdram + data + 4, 4);
+        for (uint32_t i = 0; i < count && i < 256 && slotOf == 0xFFFFFFFFu; ++i)
+        {
+            const uint32_t rec = data + 8 + i * 0x38;
+            uint16_t c = 0;
+            std::memcpy(&c, rdram + rec + 0x26, 2);
+            if (c == command)
+                slotOf = rdram[rec];
+        }
+    }
+    if (slotOf < kMagicSlots)
+    {
+        uint32_t rec = 0;
+        std::memcpy(&rec, rdram + kMagicTable + slotOf * kMagicSlotSize + 0x28, 4);
+        if (rec >= 0x00100000u && rec < 0x02000000u)
+        {
+            uint16_t c = 0;
+            std::memcpy(&c, rdram + rec + 0x26, 2);
+            return c;
+        }
+    }
+    return command;
+}
 std::mutex g_mutex;
 std::vector<Cast> g_casts;
 
@@ -94,6 +210,19 @@ void debugHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_spellRecord = runtime.lookupFunction(kSpellRecord);
+    if (!g_spellRecord || !runtime.replaceFunction(kSpellRecord, &spellRecordHook))
+        g_spellRecord = nullptr;
+    g_getCommand = runtime.lookupFunction(kGetCommand);
+    if (!g_getCommand || !runtime.replaceFunction(kGetCommand, &getCommandHook))
+        g_getCommand = nullptr;
+    if (const char *e = std::getenv("KH2_TEST_OTHERS_KNOW")) // e.g. 100000: the others know Fire
+    {
+        std::vector<uint8_t> levels(kMagicSlots, 0);
+        for (uint32_t i = 0; i < kMagicSlots && e[i]; ++i)
+            levels[i] = uint8_t(e[i] - '0');
+        setOthersKnow(levels, true);
+    }
     if (const char *e = std::getenv("KH2_DEBUG_HOOK"))
     {
         g_debugAddr = uint32_t(std::strtoul(e, nullptr, 16));
@@ -156,10 +285,27 @@ void castAsPlayer(uint32_t avatar, const Cast &c)
         if (!live)
             return std::nullopt;
         kh2avatars::noteCast(avatar);
-        std::printf("[spells] avatar %08X casts command %u (for its player)\n", avatar, command);
+        const uint32_t ours = localCommand(env.rdram, command);
+        std::printf("[spells] avatar %08X casts command %u (for its player%s)\n", avatar, ours,
+                    ours != command ? ", as this room's level of it" : "");
         std::fflush(stdout);
-        return kh2guest::Call{0x0017A590u, {avatar, command}, {}};
+        return kh2guest::Call{0x0017A590u, {avatar, ours}, {}};
     });
+}
+
+std::vector<uint8_t> knownSpells()
+{
+    std::vector<uint8_t> out(kMagicSlots);
+    for (uint32_t i = 0; i < kMagicSlots; ++i)
+        out[i] = g_localLevels[i].load();
+    return out;
+}
+
+void setOthersKnow(const std::vector<uint8_t> &levels, bool share)
+{
+    g_share = share;
+    for (uint32_t i = 0; i < kMagicSlots; ++i)
+        g_othersKnow[i] = i < levels.size() ? levels[i] : 0;
 }
 
 std::vector<uint8_t> encode(const Cast &c, uint8_t world, uint8_t room)

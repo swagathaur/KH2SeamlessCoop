@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <deque>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -78,6 +79,7 @@ uint8_t g_sceneSent[kSceneSize] = {}; // host: the scene as last sent
 bool g_sceneSentValid = false;
 uint8_t g_hostScene[kSceneSize] = {}; // client: the host's scene
 bool g_haveHostScene = false;
+std::map<uint8_t, std::vector<uint8_t>> g_spellsKnown; // player -> their spell levels
 bool g_storyWarp = false;              // client: reload the room in the host's story
 uint32_t g_sceneStarted = 0xFFFFFFFFu; // client: the host's cutscene we started here
 double g_lastSceneWarp = -100.0;
@@ -485,6 +487,16 @@ void makeSession()
             const std::string who = it != g_remotes.end() && !it->second.name.empty() ? it->second.name : "A player";
             addLog(who + " asks to skip the cutscene");
             kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::SpellsKnown) && data.size() == 6)
+        {
+            g_spellsKnown[origin] = data;
+            std::vector<uint8_t> all(6, 0);
+            for (const auto &[id, levels] : g_spellsKnown)
+                for (size_t i = 0; i < 6; ++i)
+                    all[i] = std::max(all[i], levels[i]);
+            kh2spells::setOthersKnow(all, kh2avatars::enabled());
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::SpellCast) && g_rdram)
@@ -907,6 +919,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2spells::setCapture(false);
         kh2hits::setBlockedAttackers({});
         kh2hits::setProtectedTargets({});
+        kh2spells::setOthersKnow({}, false);
         if (kh2avatars::enabled())
             kh2avatars::reset(ram);
         kh2puppets::update(rdram, {});
@@ -935,6 +948,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2hits::setProtectedTargets(avatars);
         kh2hits::setBlockedAttackers(std::move(standIns));
         kh2spells::setCapture(true);
+        if (guestFrame % 120 == 60)
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SpellsKnown), kh2spells::knownSpells());
         const kh2state::State st = kh2state::read(ram);
         for (const kh2spells::Cast &c : kh2spells::takeCasts())
             g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SpellCast),

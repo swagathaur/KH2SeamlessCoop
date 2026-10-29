@@ -69,7 +69,8 @@ enum class GameEventType : uint16_t
     EnemyScaling = 8, // host -> clients: enemy HP and damage per extra player (f32, f32), players (i32)
     MissionState = 10,  // host -> clients: its mission's timer, counts, gauges (mission.h)
     MissionFailed = 11, // host -> clients: its mission failed (ours fails with it)
-    SpellCast = 12,     // to everyone: world u8, room u8, command u16, combo u8 (the sender's player cast it)
+    SpellCast = 12,
+    SpellsKnown = 13,   // to everyone: the sender's spell levels, 6 x u8 (spells.h)     // to everyone: world u8, room u8, command u16, combo u8 (the sender's player cast it)
     EnemyKill = 9,    // host -> clients: as EnemyHit (the blow that killed one), then the attacker's player id u8 (0xFF: none)
 };
 

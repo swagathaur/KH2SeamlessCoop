@@ -35,3 +35,5 @@
 0x001AC8B0    subtitle placement        game_patches.cpp (widescreen)
 0x0014AD58    cutscene letterbox        game_patches.cpp (no-letterbox)
 0x0022D880    cutscene subtitles        game_patches.cpp (no-subtitles)
+0x001A6658    spell record by level     spells.cpp (borrowed spells)
+0x001A67B0    MAGIC::GetCommand         spells.cpp (borrowed spells)

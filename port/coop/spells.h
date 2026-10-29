@@ -29,6 +29,13 @@ void castAs(uint32_t standIn, const Cast &c);
 // Cast `c` with a player-class object (an avatar), through the player's own
 // magic command (FUN_0017A590), which makes the spell's attack and effects.
 void castAsPlayer(uint32_t avatar, const Cast &c);
+// Spell levels this save has learned (6 slots: Fire, Blizzard, Thunder,
+// Cure, Magnet, Reflect; 0 not learned), as last read for a room.
+std::vector<uint8_t> knownSpells();
+// What the other players know (the highest of theirs per slot): from the next
+// room on its data is loaded here too, for their avatars' casts (share false:
+// none, as alone).
+void setOthersKnow(const std::vector<uint8_t> &levels, bool share);
 std::vector<uint8_t> encode(const Cast &c, uint8_t world, uint8_t room);
 bool decode(const std::vector<uint8_t> &data, Cast &c, uint8_t &world, uint8_t &room);
 

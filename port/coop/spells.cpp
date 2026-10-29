@@ -6,6 +6,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "game_state.h"
 #include "partners.h"
@@ -112,8 +113,85 @@ bool decode(const std::vector<uint8_t> &data, Cast &c, uint8_t &world, uint8_t &
     return true;
 }
 
+// Prototype (KH2_TEST_P2=1): a second player object (--spawn-test=F:54)
+// that ignores our controller (no action, +0x10C 0x200000) and has an HP/MP
+// sheet of its own (a copy of ours at 0x01E4E000; +0x48C points there).
+void testSecondPlayer(uint8_t *rdram, uint64_t frame)
+{
+    static const bool on = [] {
+        const char *e = std::getenv("KH2_TEST_P2");
+        return e && *e == '1';
+    }();
+    if (!on)
+        return;
+    constexpr uint32_t kSheet = 0x01E4E000, kSheetSize = 0x268;
+    static uint32_t prepared = 0;
+    uint32_t player = 0;
+    std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+    // Only once our player is there, and only an object made after it.
+    static uint32_t ourPlayer = 0;
+    if (!player || frame < 2900)
+        return;
+    if (!ourPlayer)
+        ourPlayer = player;
+    uint32_t p2 = 0;
+    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        if (a.type == 0 && a.address != ourPlayer && !p2)
+            p2 = a.address;
+    auto rd32 = [&](uint32_t a) {
+        uint32_t v;
+        std::memcpy(&v, rdram + a, 4);
+        return v;
+    };
+    if (!p2)
+        return;
+    {
+        // The game's own pointers to "the player" (controls, camera,
+        // targeting, ...): the second player's first updates point them at
+        // it, and ours stopped answering the controller. Ours again, every
+        // frame.
+        static const uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x00352400,
+                                               0x01C5FF10, 0x01C60018, 0x01C60024, 0x01C6C9AC,
+                                               kh2state::addr::PlayerPtr};
+        static int restoredTotal = 0;
+        for (uint32_t a : kPlayerRefs)
+            if (rd32(a) == p2)
+            {
+                std::memcpy(rdram + a, &ourPlayer, 4);
+                if (restoredTotal++ < 40)
+                    std::printf("[p2] f%llu %08X pointed at the new player: ours again\n", (unsigned long long)frame, a);
+            }
+    }
+    if (prepared != p2)
+    {
+        prepared = p2;
+        const uint32_t flags = rd32(p2 + 0x10C) | 0x200000u;
+        std::memcpy(rdram + p2 + 0x10C, &flags, 4);
+        const uint32_t sheet = rd32(p2 + 0x48C);
+        if (sheet >= 0x00100000u && sheet < 0x02000000u - kSheetSize)
+        {
+            std::memcpy(rdram + kSheet, rdram + sheet, kSheetSize);
+            std::memcpy(rdram + p2 + 0x48C, &kSheet, 4);
+        }
+        std::printf("[p2] second player %08X: no action, its own sheet at %08X (was %08X)\n", p2, kSheet, sheet);
+        std::fflush(stdout);
+    }
+    if (frame % 30 == 0)
+    {
+        float a[3], b[3];
+        std::memcpy(a, rdram + player + kh2state::addr::ObjPos, 12);
+        std::memcpy(b, rdram + p2 + kh2state::addr::ObjPos, 12);
+        const uint32_t ours = rd32(player + 0x48C), theirs = rd32(p2 + 0x48C);
+        std::printf("[p2] f%llu ours %.0f,%.0f,%.0f hp %d mp %d | p2 %.0f,%.0f,%.0f hp %d mp %d motion %u flags %08X\n",
+                    (unsigned long long)frame, a[0], a[1], a[2], int32_t(rd32(ours)), int32_t(rd32(ours + 0x180)), b[0],
+                    b[1], b[2], int32_t(rd32(theirs)), int32_t(rd32(theirs + 0x180)), rd32(p2 + 0x154), rd32(p2 + 0x10C));
+        std::fflush(stdout);
+    }
+}
+
 void testTick(uint8_t *rdram, uint64_t frame)
 {
+    testSecondPlayer(rdram, frame);
     static const char *spec = std::getenv("KH2_TEST_CAST");
     if (!spec || !*spec)
         return;

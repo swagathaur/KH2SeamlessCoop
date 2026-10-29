@@ -1513,6 +1513,50 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
     return std::vector<uint8_t>(rec, rec + kLoadoutSize);
 }
 
+// Avatars: a world's party slots past one per other player are emptied
+// (the room then makes only the place holders), and given back when the
+// session ends (keep < 0). Per save address, what was there.
+std::map<uint32_t, uint8_t> g_trimmed;
+void keepParty(uint8_t *rdram, uint8_t world, int keep)
+{
+    if (keep < 0 || world == 0 || world >= 0x20)
+    {
+        for (const auto &[addr, was] : g_trimmed)
+            if (rd<uint8_t>(rdram, addr) == kNobody)
+                wr<uint8_t>(rdram, addr, was);
+        if (!g_trimmed.empty())
+        {
+            std::printf("[partner] the party is back as it was (%zu place(s))\n", g_trimmed.size());
+            std::fflush(stdout);
+        }
+        g_trimmed.clear();
+        return;
+    }
+    for (int k = 1; k <= 3; ++k)
+    {
+        const uint32_t addr = kSaveParty + uint32_t(world) * 4u + uint32_t(k);
+        const uint8_t cur = rd<uint8_t>(rdram, addr);
+        if (k > keep && cur != kNobody)
+        {
+            g_trimmed.emplace(addr, cur);
+            wr<uint8_t>(rdram, addr, kNobody);
+            std::printf("[partner] party place %d of world %02X (%02X) left out: the other players are the party\n", k,
+                        world, cur);
+            std::fflush(stdout);
+        }
+        else if (k <= keep)
+        {
+            auto it = g_trimmed.find(addr);
+            if (it != g_trimmed.end())
+            {
+                if (cur == kNobody)
+                    wr<uint8_t>(rdram, addr, it->second);
+                g_trimmed.erase(it);
+            }
+        }
+    }
+}
+
 void setReduceParty(bool on, int players)
 {
     g_reduceTo = std::min(players, 2);

@@ -784,6 +784,12 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
     if (kh2avatars::enabled())
     {
         kh2partner::setReduceParty(g_session && g_session->active(), int(list.size()));
+        {
+            const kh2state::State now = kh2state::read(ram);
+            const bool on = g_session && g_session->active() && !list.empty();
+            if (now.player.valid && now.now.world != 0x0F) // (not the World Map)
+                kh2partner::keepParty(ram, now.now.world, on ? std::min<int>(int(list.size()), 2) : -1);
+        }
         heals = kh2avatars::update(ram, list);
         list.clear();
     }
@@ -966,6 +972,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2spells::setOthersKnow({}, false);
         if (kh2avatars::enabled())
             kh2avatars::reset(ram);
+            kh2partner::keepParty(ram, 0, -1); // the party as it was
         kh2puppets::update(rdram, {});
         kh2scale::tick(ram, false, false, 1);
         return;

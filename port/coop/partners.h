@@ -97,6 +97,9 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram);
 void setFormsFree(bool free);
 // A room's party is cut to one companion per other player (avatars on).
 void setReduceParty(bool on, int players);
+// A world's party places past `keep` are emptied (avatars; keep < 0: all
+// given back).
+void keepParty(uint8_t *rdram, uint8_t world, int keep);
 // A drive form's look -> the character's own (0: not a form's).
 uint16_t formBaseLook(const uint8_t *rdram, uint16_t model);
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp);

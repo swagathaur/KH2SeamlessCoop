@@ -39,3 +39,4 @@
 0x001A67B0    MAGIC::GetCommand         spells.cpp (borrowed spells)
 0x001C99B0    form needs members        partners.cpp (drive forms free)
 0x00178280    player teardown           avatars.cpp (avatars leave as objects)
+0x00187520    object add_hp             avatars.cpp (orb heals stay local)

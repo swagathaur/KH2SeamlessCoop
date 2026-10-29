@@ -11,6 +11,7 @@
 
 #include "game_state.h"
 #include "puppets.h"
+#include "guest_call.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
 #include <atomic>
@@ -24,6 +25,7 @@ constexpr uint32_t kObjFlags = 0x10C, kObjSheet = 0x48C;
 constexpr uint32_t kSheetBase = 0x01E4E000u, kSheetSize = 0x268, kMaxAvatars = 3;
 constexpr uint32_t kEntrySize = 0x60, kEntryLook = 0x08;
 constexpr uint32_t kFriendTable = 0x01C60528; // YS::FRIEND::Get(i): the party members' objects
+constexpr uint32_t kObjModelData = 0x7AC; // 0 until the model's files are in
 constexpr uint32_t kObjModel = 0x670, kModelParts = 0x104, kWeaponOwner = 0x570;
 // The game's pointers to its player that a new player object takes over.
 constexpr uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x00352400, 0x01C5FF10,
@@ -49,6 +51,8 @@ struct State
     uint32_t proxy = 0;      // the party member holding their place (hidden)
     int32_t writtenHp = -1, writtenMp = -1; // what we last put in the sheet
     double quietUntil = 0;   // no heals read until then (an avatar made or gone: the slot is set anew)
+    double madeAt = 0;       // when it was made (prepared)
+    bool plainLook = false;  // their form's look did not load here: their own look instead (this room)
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -132,6 +136,46 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_teardown, rdram, ctx, runtime);
 }
 
+
+// Orbs: a prize's effect (FUN_001A52A8, with its type's amounts) gives HP
+// through the object's add_hp (0x00187520) from 0x001A5308, to every party
+// member: also to the one holding a remote player's place. An orb heals only
+// whoever picked it up (their HP comes over as usual), so what an orb gave
+// the place here is no heal for them. Potions and Cure come by the sheet's
+// own heal (from 0x001A1980) and are.
+constexpr uint32_t kAddHp = 0x00187520, kOrbHeal = 0x001A5308;
+PS2Runtime::RecompiledFunction g_addHp = nullptr;
+std::atomic<uint32_t> g_orbSheet[4] = {};
+std::atomic<int32_t> g_orbHp[4] = {};
+void addHpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const int32_t amount = static_cast<int32_t>(getRegU32(ctx, 5));
+    if (ctx->pc == kAddHp && amount > 0 && getRegU32(ctx, 31) == kOrbHeal)
+    {
+        uint32_t sheet = 0;
+        std::memcpy(&sheet, rdram + ((getRegU32(ctx, 4) + 0x48C) & 0x01FFFFFFu), 4);
+        if (sheet)
+            for (int i = 0; i < 4; ++i)
+            {
+                uint32_t cur = g_orbSheet[i].load();
+                if (cur == sheet || (cur == 0 && g_orbSheet[i].compare_exchange_strong(cur, sheet)) || cur == sheet)
+                {
+                    g_orbHp[i].fetch_add(amount);
+                    break;
+                }
+            }
+    }
+    kh2::callOriginal(g_addHp, rdram, ctx, runtime);
+}
+// What orbs gave `sheet` since last asked.
+int32_t takeOrbHp(uint32_t sheet)
+{
+    for (int i = 0; i < 4; ++i)
+        if (g_orbSheet[i].load() == sheet)
+            return g_orbHp[i].exchange(0);
+    return 0;
+}
+
 std::map<int, std::string> g_names; // character in their party place -> their name
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
@@ -180,18 +224,30 @@ bool lookHere(const uint8_t *rdram, uint16_t entry)
     return false;
 }
 
-// Draw none of an object's model's parts (ModelObj +0x104), nor its weapons'.
-void hide(uint8_t *rdram, uint32_t obj)
+// Hide an object the game's way: its vtable +0x44 (what the event scripts'
+// trap_obj_hide calls; YS::OBJ::is_hide then sees 0x80 or 0x100 at +0x10C).
+// (A party member's +0x670 is not a ModelObj as a player's is: writing a
+// parts mask there wrote into its mesh, and Ping showed as a head.)
+double g_lastHideAsk = 0;
+void show(uint8_t *rdram, uint32_t obj)
 {
-    auto hideModel = [&](uint32_t o) {
-        const uint32_t model = rd<uint32_t>(rdram, o + kObjModel);
-        if (inRam(model))
-            wr<uint32_t>(rdram, model + kModelParts, 0);
-    };
-    hideModel(obj);
-    for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
-        if (a.type == 5 && rd<uint32_t>(rdram, a.address + kWeaponOwner) == obj)
-            hideModel(a.address);
+    const uint32_t vt = inRam(obj) ? rd<uint32_t>(rdram, obj) : 0;
+    const uint32_t fn = inRam(vt) ? rd<uint32_t>(rdram, vt + 0x48) : 0;
+    if (inRam(fn))
+        kh2guest::postCall(kh2guest::Call{fn, {obj}, {}});
+}
+void hide(uint8_t *rdram, uint32_t obj, double t)
+{
+    if (rd<uint32_t>(rdram, obj + kObjFlags) & 0x180u)
+        return; // hidden
+    if (t - g_lastHideAsk < 0.5)
+        return;
+    g_lastHideAsk = t;
+    const uint32_t vt = rd<uint32_t>(rdram, obj);
+    const uint32_t fn = inRam(vt) ? rd<uint32_t>(rdram, vt + 0x44) : 0;
+    if (!inRam(fn))
+        return;
+    kh2guest::postCall(kh2guest::Call{fn, {obj}, {}});
 }
 
 bool live(const uint8_t *rdram, uint32_t obj)
@@ -213,6 +269,9 @@ bool install(PS2Runtime &runtime)
         g_control = nullptr;
         return false;
     }
+    g_addHp = runtime.lookupFunction(kAddHp);
+    if (!g_addHp || !runtime.replaceFunction(kAddHp, &addHpHook))
+        g_addHp = nullptr;
     g_teardown = runtime.lookupFunction(kPlayerTeardown);
     if (!g_teardown || !runtime.replaceFunction(kPlayerTeardown, &teardownHook))
         g_teardown = nullptr;
@@ -285,6 +344,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.motion = 0xFFFF;
             s.proxy = 0;
             s.writtenHp = s.writtenMp = -1;
+            s.plainLook = false;
         }
     }
     // Ours: the object the game made as the player for this room (a new
@@ -326,6 +386,9 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         }();
         if (testEntry)
             want = testEntry;
+        if (s.plainLook)
+            if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
+                want = base;
         // Not here, or a cutscene (its actors are the story's): away.
         if (!here || cutscene || (s.object && s.entry != want))
         {
@@ -391,6 +454,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.prepared = true;
             s.writtenHp = s.writtenMp = -1;
             s.quietUntil = t + 1.0;
+            s.madeAt = t;
             const uint32_t from = rd<uint32_t>(rdram, obj + kObjSheet);
             if (inRam(from) && s.sheet >= kSheetBase) // (a party slot's is the game's own)
                 std::memcpy(rdram + s.sheet, rdram + from, kSheetSize);
@@ -399,6 +463,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         const uint32_t flags = rd<uint32_t>(rdram, obj + kObjFlags);
         if (!(flags & kNoAct))
             wr<uint32_t>(rdram, obj + kObjFlags, flags | kNoAct);
+        // A form's look whose files never came (a room with no room for
+        // them): the avatar has no model (+0x7AC) and is not drawn. Their own
+        // look instead, for this room.
+        if (!s.plainLook && t - s.madeAt > 4.0 && rd<uint32_t>(rdram, obj + kObjModelData) == 0 &&
+            kh2partner::formBaseLook(rdram, s.entry))
+        {
+            std::printf("[avatars] player %u's avatar (look %04X) has no model here: their own look instead\n",
+                        r.playerId + 1, s.entry);
+            std::fflush(stdout);
+            s.plainLook = true;
+        }
         // Their name for the character in their party place (the party
         // gauge, item targets, menus: names.h).
         if (!r.name.empty() && st.now.world < 0x20 && sheetIndex <= 2)
@@ -421,13 +496,40 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         {
             const uint32_t slot = sheetIndex - 1; // 0 or 1 (party slots 1 and 2)
             const uint32_t proxy = slot < 2 ? rd<uint32_t>(rdram, kFriendTable + slot * 4) : 0;
+            const uint32_t was = s.proxy;
             s.proxy = proxy && live(rdram, proxy) && proxy != obj ? proxy : 0;
+            if (was && was != s.proxy && live(rdram, was))
+                show(rdram, was); // no longer anyone's place: seen again
             if (s.proxy)
             {
                 const uint32_t pf = rd<uint32_t>(rdram, s.proxy + kObjFlags);
                 if (!(pf & kNoAct))
                     wr<uint32_t>(rdram, s.proxy + kObjFlags, pf | kNoAct);
-                hide(rdram, s.proxy);
+                hide(rdram, s.proxy, t);
+                if (std::getenv("KH2_AVATAR_LOG"))
+                {
+                    static int n = 0;
+                    if (++n % 120 == 1)
+                    {
+                        float pp[3];
+                        std::memcpy(pp, rdram + s.proxy + 0x540, 12);
+                        std::printf("[avatars] proxy %08X (flags %08X model %08X parts %08X) at %.0f,%.0f,%.0f; near it:\n", s.proxy,
+                                    rd<uint32_t>(rdram, s.proxy + kObjFlags),
+                                    rd<uint32_t>(rdram, s.proxy + kObjModel),
+                                    inRam(rd<uint32_t>(rdram, s.proxy + kObjModel))
+                                        ? rd<uint32_t>(rdram, rd<uint32_t>(rdram, s.proxy + kObjModel) + kModelParts)
+                                        : 0u,
+                                    pp[0], pp[1], pp[2]);
+                        for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+                        {
+                            const float dx = a.pos[0] - pp[0], dz = a.pos[2] - pp[2];
+                            if (dx * dx + dz * dz < 200.0f * 200.0f)
+                                std::printf("[avatars]   %08X type %u %.32s (owner+570 %08X)\n", a.address,
+                                            unsigned(a.type), a.name, rd<uint32_t>(rdram, a.address + kWeaponOwner));
+                        }
+                        std::fflush(stdout);
+                    }
+                }
                 kh2puppets::Override po;
                 po.object = s.proxy;
                 std::memcpy(po.pos, r.pos, sizeof(po.pos));
@@ -452,8 +554,15 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             kh2partner::Heal h;
             h.playerId = r.playerId;
             const bool quiet = t < s.quietUntil;
-            if (s.writtenHp >= 0 && hpNow > s.writtenHp && !quiet)
-                h.hp = hpNow - s.writtenHp;
+            const int32_t orb = takeOrbHp(s.sheet); // (an orb picked up here: not theirs)
+            if (s.writtenHp >= 0 && hpNow > s.writtenHp + orb && !quiet)
+                h.hp = hpNow - s.writtenHp - orb;
+            else if (orb > 0 && s.writtenHp >= 0 && hpNow > s.writtenHp)
+            {
+                std::printf("[avatars] an orb gave player %u's place %d HP here: theirs is their own\n",
+                            r.playerId + 1, hpNow - s.writtenHp);
+                std::fflush(stdout);
+            }
             // (MP: the game recharges a party slot's MP by itself, in small
             // steps; only an Ether-sized rise is ours.)
             if (s.writtenMp >= 0 && mpNow >= s.writtenMp + 10 && !quiet)
@@ -505,6 +614,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         {
             if (it->second.object)
                 removeAvatar(rdram, it->second.object);
+            if (it->second.proxy && live(rdram, it->second.proxy))
+                show(rdram, it->second.proxy);
             it = g_states.erase(it);
         }
         else
@@ -523,10 +634,20 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     if (g_ourPlayer)
     {
         const uint32_t hud = rd<uint32_t>(rdram, kHud);
-        if (hud >= 0x00100000u && hud < 0x02000000u)
-            for (auto &[id, s] : g_states)
-                if (s.object && rd<uint32_t>(rdram, hud + 0x34) == s.object)
-                    wr<uint32_t>(rdram, hud + 0x34, g_ourPlayer);
+        // (Always ours: an avatar gone since, or one being made, left there
+        // too; the client's drive gauge read an avatar's sheet, 0.)
+        if (hud >= 0x00100000u && hud < 0x02000000u && live(rdram, g_ourPlayer) && !g_states.empty() && rd<uint32_t>(rdram, hud + 0x34) != 0 &&
+            rd<uint32_t>(rdram, hud + 0x34) != g_ourPlayer)
+        {
+            static int logged = 0;
+            if (logged++ < 10)
+            {
+                std::printf("[avatars] the HUD showed %08X: back to our player %08X\n",
+                            rd<uint32_t>(rdram, hud + 0x34), g_ourPlayer);
+                std::fflush(stdout);
+            }
+            wr<uint32_t>(rdram, hud + 0x34, g_ourPlayer);
+        }
     }
     {
         uint32_t i = 0;
@@ -576,8 +697,12 @@ void reset(uint8_t *rdram)
     (void)rdram;
     std::lock_guard<std::mutex> lock(g_mutex);
     for (auto &[id, s] : g_states)
+    {
         if (s.object)
             removeAvatar(rdram, s.object);
+        if (s.proxy && live(rdram, s.proxy))
+            show(rdram, s.proxy); // the party member is theirs again
+    }
     g_states.clear();
     for (auto &a : g_avatarObjs)
         a.store(0);

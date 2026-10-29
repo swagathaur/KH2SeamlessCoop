@@ -1498,6 +1498,12 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
     return std::vector<uint8_t>(rec, rec + kLoadoutSize);
 }
 
+uint16_t formBaseLook(const uint8_t *rdram, uint16_t model)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return baseLook(rdram, model);
+}
+
 void setFormsFree(bool free)
 {
     static const bool test = [] {

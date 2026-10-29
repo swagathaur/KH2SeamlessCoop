@@ -15,6 +15,7 @@
 #include "scaling.h"
 #include "game_state.h"
 #include "hits.h"
+#include "mission.h"
 #include "puppets.h"
 #include "story.h"
 #include "downed.h"
@@ -467,6 +468,20 @@ void makeSession()
             kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::MissionState) && !g_session->isHost() && g_rdram &&
+            kh2story::active())
+        {
+            const kh2state::State st = kh2state::read(g_rdram);
+            kh2mission::onHostState(const_cast<uint8_t *>(g_rdram), data, st.now.world, st.now.room, st.now.battle);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::MissionFailed) && !g_session->isHost() && g_rdram &&
+            kh2story::active())
+        {
+            addLog("the host's mission failed");
+            kh2mission::onHostFailed(const_cast<uint8_t *>(g_rdram));
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyKill) && !g_session->isHost() && g_rdram &&
             g_opt.sharedEnemies && !data.empty())
         {
@@ -839,6 +854,20 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling), kh2scale::encode());
     updatePartners(ram, guestFrame);
     storyTick(ram, guestFrame);
+    // Missions (mission.h): the host's leads.
+    kh2mission::setFollowing(!g_session->isHost() && kh2story::active());
+    if (g_session->isHost())
+    {
+        if (kh2mission::takeFailed())
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::MissionFailed), {});
+        if (guestFrame % 10 == 0)
+        {
+            const kh2state::State st = kh2state::read(ram);
+            std::vector<uint8_t> m = kh2mission::snapshot(ram, st.now.world, st.now.room, st.now.battle);
+            if (!m.empty())
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::MissionState), m);
+        }
+    }
     // Downed players (downed.h): who else is here, and who is down.
     {
         std::vector<kh2downed::Other> others;

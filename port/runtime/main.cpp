@@ -55,6 +55,7 @@
 #include "hits.h"
 #include "story.h"
 #include "scaling.h"
+#include "mission.h"
 #include "names.h"
 #include "local_players.h"
 #include "net/nat.h"
@@ -1864,6 +1865,7 @@ int main(int argc, char **argv)
     kh2partner::install(runtime);
     kh2hits::install(runtime);
     kh2scale::install(runtime);
+    kh2mission::install(runtime);
     kh2story::install(runtime);
     kh2names::install(runtime);
     kh2puppets::setMode(opt.puppetSpawn ? kh2puppets::Mode::Spawn : kh2puppets::Mode::Borrow);

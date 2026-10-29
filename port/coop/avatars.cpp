@@ -314,6 +314,59 @@ void objFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_objFace, rdram, ctx, runtime);
 }
 
+// The friend gauge reads its face once, when a party member is first set on
+// it (FUN_00155300 -> FUN_001542C8, guarded by gauge +0x15A2). An avatar is
+// made a few seconds after that, so the gauge is told again once it exists:
+// the flag is cleared and the setter called, and the face is asked of the
+// place holder (objFaceHook answers with the avatar's).
+constexpr uint32_t kFriendGaugeSet = 0x00155300;
+PS2Runtime::RecompiledFunction g_friendGaugeSet = nullptr;
+constexpr uint32_t kMaxGauges = 4;
+std::atomic<uint32_t> g_friendGauges[kMaxGauges] = {};
+void friendGaugeSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gauge = getRegU32(ctx, 4);
+    if (ctx->pc == kFriendGaugeSet && gauge)
+    {
+        bool known = false;
+        for (auto &g : g_friendGauges)
+            known = known || g.load() == gauge;
+        if (!known)
+            for (auto &g : g_friendGauges)
+            {
+                uint32_t empty = 0;
+                if (g.compare_exchange_strong(empty, gauge))
+                    break;
+            }
+    }
+    kh2::callOriginal(g_friendGaugeSet, rdram, ctx, runtime);
+}
+// Re-set every friend gauge showing `proxy`, so its face is read again.
+void refreshFace(uint8_t *rdram, uint32_t proxy)
+{
+    if (!g_friendGaugeSet || !proxy)
+        return;
+    for (auto &g : g_friendGauges)
+    {
+        const uint32_t gauge = g.load();
+        uint32_t shown = 0;
+        if (gauge)
+            std::memcpy(&shown, rdram + ((gauge + 0x34) & 0x01FFFFFFu), 4);
+        if (!gauge || shown != proxy)
+            continue;
+        std::printf("[avatars] gauge %08X shows %08X: its face is read again\n", gauge, proxy);
+        std::fflush(stdout);
+        kh2guest::post([gauge, proxy](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+            uint32_t now = 0;
+            std::memcpy(&now, env.host(gauge + 0x34), 4);
+            if (!first || now != proxy)
+                return std::nullopt;
+            env.rdram[(gauge + 0x15A2) & 0x01FFFFFFu] = 0;
+            return kh2guest::Call{kFriendGaugeSet, {gauge}, {}};
+        });
+    }
+}
+
 std::map<int, std::string> g_names; // character in their party place -> their name
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
@@ -420,6 +473,9 @@ bool install(PS2Runtime &runtime)
     g_objFace = runtime.lookupFunction(kObjFace);
     if (!g_objFace || !runtime.replaceFunction(kObjFace, &objFaceHook))
         g_objFace = nullptr;
+    g_friendGaugeSet = runtime.lookupFunction(kFriendGaugeSet);
+    if (!g_friendGaugeSet || !runtime.replaceFunction(kFriendGaugeSet, &friendGaugeSetHook))
+        g_friendGaugeSet = nullptr;
     g_teardown = runtime.lookupFunction(kPlayerTeardown);
     if (!g_teardown || !runtime.replaceFunction(kPlayerTeardown, &teardownHook))
         g_teardown = nullptr;
@@ -844,8 +900,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         for (auto &[id, st2] : g_states)
             if (j < kMaxAvatars)
             {
-                g_faceProxy[j].store(st2.object && st2.prepared ? st2.proxy : 0u);
-                g_faceAvatar[j].store(st2.object && st2.prepared ? st2.object : 0u);
+                const uint32_t faceProxy = st2.object && st2.prepared ? st2.proxy : 0u;
+                const uint32_t faceAvatar = st2.object && st2.prepared ? st2.object : 0u;
+                const uint32_t wasProxy = g_faceProxy[j].exchange(faceProxy);
+                const uint32_t wasAvatar = g_faceAvatar[j].exchange(faceAvatar);
+                if (faceAvatar && (faceAvatar != wasAvatar || faceProxy != wasProxy))
+                    refreshFace(rdram, faceProxy);
                 g_usedSheets[j++].store(st2.object || st2.proxy ? st2.sheet : 0u);
             }
         for (; j < kMaxAvatars; ++j)

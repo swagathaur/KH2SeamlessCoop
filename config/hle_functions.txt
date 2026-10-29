@@ -41,3 +41,5 @@
 0x00178280    player teardown           avatars.cpp (avatars leave as objects)
 0x00187520    object add_hp             avatars.cpp (orb heals stay local)
 0x00170950    CACHE_BUFF::Free          avatars.cpp (our player motion file kept)
+0x0016C060    object face entries       avatars.cpp (a place holder's face is its avatar's)
+0x00155300    GAUGE_FRIEND set member   avatars.cpp (face read again once the avatar exists)

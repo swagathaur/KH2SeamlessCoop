@@ -44,7 +44,7 @@ uint8_t typeOf(const uint8_t *rdram, uint32_t obj)
     const uint32_t rec = rd<uint32_t>(rdram, obj + kh2state::addr::ObjEntry);
     return inRam(rec) ? rd<uint8_t>(rdram, rec + 4) : 0xFF;
 }
-bool isEnemyType(uint8_t t) { return t == 3 || t == 4 || t == 12; } // boss, enemy, giant boss
+bool isEnemyType(uint8_t t) { return t == 3 || t == 4 || t == 12 || t == 21; } // boss, enemy, giant boss, large enemy
 
 float damageFactor()
 {

@@ -120,7 +120,7 @@ void spawnUnitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                     break;
                 }
         }
-        if (type == 3 || type == 4 || type == 12) // boss, enemy, giant boss (as scan())
+        if (type == 3 || type == 4 || type == 12 || type == 21) // boss, enemy, giant boss, large enemy (as scan())
         {
             static double lastLog = -10;
             const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -240,7 +240,7 @@ std::vector<Local> scan(const uint8_t *rdram)
     std::vector<Local> out;
     for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
     {
-        if (a.type != 3 && a.type != 4 && a.type != 12) // boss, enemy, giant boss (Twilight Thorn)
+        if (a.type != 3 && a.type != 4 && a.type != 12 && a.type != 21) // boss, enemy, giant boss (Twilight Thorn), large enemy (Assault Rider, Large Body)
             continue;
         const uint32_t rec = rd<uint32_t>(rdram, a.address + kObjSpawnRecord);
         const uint32_t sheet = rd<uint32_t>(rdram, a.address + kObjSheet);

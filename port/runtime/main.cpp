@@ -1354,7 +1354,7 @@ bool harnessTick(Harness &h, uint64_t frame)
             char hp[64] = "";
             uint32_t sheet = 0;
             std::memcpy(&sheet, ram + ((a.address + 0x48C) & 0x01FFFFFFu), 4);
-            if ((a.type <= 1 || a.type == 3 || a.type == 4 || a.type == 12) && sheet >= 0x00100000u && sheet < 0x02000000u)
+            if ((a.type <= 1 || a.type == 3 || a.type == 4 || a.type == 12 || a.type == 21) && sheet >= 0x00100000u && sheet < 0x02000000u)
             {
                 int32_t v[3];
                 std::memcpy(v, ram + sheet, sizeof(v));
@@ -1425,7 +1425,7 @@ bool harnessTick(Harness &h, uint64_t frame)
             uint8_t *ram = h.runtime->memory().getRDRAM();
             for (const kh2state::ActorInfo &a : kh2state::actors(ram))
             {
-                if (a.type != 3 && a.type != 4 && a.type != 12)
+                if (a.type != 3 && a.type != 4 && a.type != 12 && a.type != 21)
                     continue;
                 uint32_t sheet = 0;
                 std::memcpy(&sheet, ram + ((a.address + 0x48C) & 0x01FFFFFFu), 4);

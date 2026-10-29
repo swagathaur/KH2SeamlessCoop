@@ -485,8 +485,9 @@ bool install(PS2Runtime &runtime)
 bool enabled()
 {
     static const bool on = [] {
+        // On unless turned off (KH2_AVATARS=0).
         const char *e = std::getenv("KH2_AVATARS");
-        return e && *e == '1';
+        return !(e && *e == '0');
     }();
     return on;
 }

@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <deque>
 #include <map>
 #include <set>
 #if defined(_WIN32)
@@ -127,6 +128,7 @@ struct Options
     std::string cdRoot;
     bool headless = false;
     uint64_t frames = 0;               // stop after this many guest frames (0 = run forever)
+    std::string controlFile;           // --control=FILE: commands read while running (see Control below)
     double timeoutSeconds = 0.0;       // wall-clock limit (0 = none)
     uint64_t screenshotEvery = 0;      // save a PNG every N guest frames
     std::set<uint64_t> screenshotAt;   // ...and/or at these guest frames
@@ -234,6 +236,7 @@ void usage()
         "                          dress puppet entry ID (84C/84D) as entry LOOK\n"
         "  --spawn-test=FRAME:ID   experiment: create objentry ID (hex) in front of the player at FRAME\n"
         "  --actors-at=A,B,..      print the live object list at these frames\n"
+        "  --control=FILE          read commands from FILE while running (appended lines; see main.cpp Control)\n"
         "  --ram-dump=A,B,..       write the guest's 32 MB of RAM to SHOTS/ram_FRAME.bin at these frames\n"
         "  --shots=DIR             screenshot directory (default: shots)\n"
         "  --input=SCRIPT          pad script, file or inline: '<frame> <BTN>[+BTN] [hold];...'\n"
@@ -367,6 +370,7 @@ bool parseUnchecked(int argc, char **argv, Options &o)
         else if (a.rfind("--cd-root=", 0) == 0) o.cdRoot = value(a);
         else if (a == "--headless") o.headless = true;
         else if (a.rfind("--frames=", 0) == 0) o.frames = std::stoull(value(a));
+        else if (a.rfind("--control=", 0) == 0) o.controlFile = value(a);
         else if (a.rfind("--timeout=", 0) == 0) o.timeoutSeconds = std::stod(value(a));
         else if (a.rfind("--screenshot-every=", 0) == 0) o.screenshotEvery = std::stoull(value(a));
         else if (a.rfind("--screenshot-at=", 0) == 0)
@@ -962,6 +966,219 @@ void dumpGs(Harness &h, uint64_t frame)
 
 // Screenshots, GS dumps, status lines and the frame/time limits; shared by the
 // headless harness and the windowed GPU presenter. False = stop.
+// --control=FILE: a live session driven from outside. Lines appended to FILE
+// are run in order, one batch per frame, until a "wait":
+//   input BTN[+BTN]|- FRAMES [LX LY [RX RY]]  hold buttons/sticks for FRAMES from now
+//   press BTN[+BTN]                            the same for 6 frames
+//   wait FRAMES                                run nothing more until FRAMES have passed
+//   shot                                       screenshot now (SHOTS/frame_N.png)
+//   state                                      where we are, the player, HP, co-op status
+//   peek ADDR LEN | poke ADDR HEXBYTES         guest memory (hex)
+//   warp WORLD ROOM [BTL EVT]                  (decimal, as --warp-test)
+//   tp X Y Z                                   put the player there
+//   dump                                       all 32 MB of RAM to SHOTS/ram_N.bin
+//   echo TEXT                                  "[control] echo TEXT" (a marker to wait for)
+//   partner on|off                             the Echo test partner (as --partner-test)
+//   quit                                       stop
+// Each command run is logged as "[control] ...".
+struct Control
+{
+    std::ifstream in;
+    std::streamoff offset = 0;
+    std::string partial;
+    std::deque<std::string> queue;
+    uint64_t waitUntil = 0;
+    std::vector<Options::ScriptStep> steps; // by guest frame (scriptFrame)
+    bool quit = false;
+};
+Control g_control;
+uint32_t ctlRd32(const uint8_t *ram, uint32_t a)
+{
+    uint32_t v = 0;
+    std::memcpy(&v, ram + (a & 0x01FFFFFFu), 4);
+    return v;
+}
+
+void controlRead(const std::string &file)
+{
+    std::ifstream f(file, std::ios::binary);
+    if (!f)
+        return;
+    f.seekg(0, std::ios::end);
+    const std::streamoff size = f.tellg();
+    if (size < g_control.offset)
+        g_control.offset = 0; // a new file
+    if (size == g_control.offset)
+        return;
+    f.seekg(g_control.offset);
+    std::string data(size_t(size - g_control.offset), '\0');
+    f.read(data.data(), std::streamsize(data.size()));
+    g_control.offset = size;
+    g_control.partial += data;
+    size_t nl;
+    while ((nl = g_control.partial.find('\n')) != std::string::npos)
+    {
+        std::string line = g_control.partial.substr(0, nl);
+        g_control.partial.erase(0, nl + 1);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (!line.empty())
+            g_control.queue.push_back(line);
+    }
+}
+
+void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
+{
+    const Options &o = *h.opt;
+    if (o.controlFile.empty())
+        return;
+    controlRead(o.controlFile);
+    uint8_t *ram = h.runtime->memory().getRDRAM();
+    while (!g_control.queue.empty() && frame >= g_control.waitUntil)
+    {
+        const std::string line = g_control.queue.front();
+        g_control.queue.pop_front();
+        std::istringstream ls(line);
+        std::string cmd;
+        ls >> cmd;
+        auto say = [&](const std::string &what) {
+            std::printf("[control] f%llu %s\n", (unsigned long long)frame, what.c_str());
+            std::fflush(stdout);
+        };
+        if (cmd == "input" || cmd == "press")
+        {
+            Options::ScriptStep st{scriptFrame + 1, 6, 0, 0x80, 0x80, 0x80, 0x80};
+            std::string buttons;
+            ls >> buttons;
+            if (cmd == "input")
+                ls >> st.frames;
+            bool ok = true;
+            if (buttons != "-")
+            {
+                std::stringstream bs(buttons);
+                for (std::string b; std::getline(bs, b, '+');)
+                {
+                    const uint32_t m = buttonMask(b);
+                    ok = ok && m;
+                    st.buttons |= m;
+                }
+            }
+            unsigned v[4] = {0x80, 0x80, 0x80, 0x80};
+            for (unsigned &x : v)
+                if (!(ls >> x)) break;
+            st.lx = uint8_t(v[0]); st.ly = uint8_t(v[1]); st.rx = uint8_t(v[2]); st.ry = uint8_t(v[3]);
+            if (!ok)
+                say("unknown button in: " + line);
+            else
+            {
+                g_control.steps.push_back(st);
+                say(line);
+            }
+        }
+        else if (cmd == "wait")
+        {
+            uint64_t n = 0;
+            ls >> n;
+            g_control.waitUntil = frame + n;
+        }
+        else if (cmd == "shot")
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(o.shotDir, ec);
+            h.lastShotFrame = frame;
+            saveShot(h, frame);
+            char name[64];
+            std::snprintf(name, sizeof(name), "frame_%06llu.png", (unsigned long long)frame);
+            say(std::string("shot ") + name);
+        }
+        else if (cmd == "state")
+        {
+            const kh2state::State st = kh2state::read(ram);
+            char buf[400];
+            std::snprintf(buf, sizeof(buf), "state %s ev=%u ctl=%u btl=%u player=%08X pos=%.0f,%.0f,%.0f hp=%d/%d mp=%d/%d drive=%u/%u%s%s",
+                          kh2state::describe(st.now).c_str(), st.now.event, st.control, st.battle,
+                          ctlRd32(ram, kh2state::addr::PlayerPtr), st.player.pos[0], st.player.pos[1],
+                          st.player.pos[2], st.party[0].hp, st.party[0].maxHp, st.party[0].mp, st.party[0].maxMp,
+                          unsigned(st.party[0].drive), unsigned(st.party[0].maxDrive), kh2coop::active() ? " | " : "", kh2coop::active() ? kh2coop::statusText().c_str() : "");
+            say(buf);
+        }
+        else if (cmd == "peek")
+        {
+            std::string a;
+            uint32_t len = 16;
+            ls >> a >> len;
+            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & 0x01FFFFFFu;
+            std::string out = "peek " + a + ":";
+            for (uint32_t i = 0; i < len && i < 256 && addr + i < 0x02000000u; ++i)
+            {
+                char b[4];
+                std::snprintf(b, sizeof(b), " %02X", ram[addr + i]);
+                out += b;
+            }
+            say(out);
+        }
+        else if (cmd == "poke")
+        {
+            std::string a, hex;
+            ls >> a >> hex;
+            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & 0x01FFFFFFu;
+            for (size_t n = 0; 2 * n + 2 <= hex.size() && addr + n < 0x02000000u; ++n)
+                ram[addr + n] = uint8_t(std::stoul(hex.substr(2 * n, 2), nullptr, 16));
+            say(line);
+        }
+        else if (cmd == "warp")
+        {
+            unsigned w = 0, r = 0, b = 0xFFFF, e = 0xFFFF;
+            ls >> w >> r >> b >> e;
+            kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
+            say(line);
+        }
+        else if (cmd == "tp")
+        {
+            float p[4] = {0, 0, 0, 1};
+            ls >> p[0] >> p[1] >> p[2];
+            const uint32_t player = ctlRd32(ram, kh2state::addr::PlayerPtr);
+            if (player && player < 0x02000000u)
+                std::memcpy(ram + player + kh2state::addr::ObjPos, p, sizeof(p));
+            say(line);
+        }
+        else if (cmd == "dump")
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "ram_%06llu.bin", (unsigned long long)frame);
+            const std::filesystem::path path = std::filesystem::path(o.shotDir) / name;
+            std::error_code ec;
+            std::filesystem::create_directories(o.shotDir, ec);
+            if (FILE *f = std::fopen(path.string().c_str(), "wb"))
+            {
+                std::fwrite(ram, 1, 32u * 1024u * 1024u, f);
+                std::fclose(f);
+            }
+            say("dump " + path.string());
+        }
+        else if (cmd == "echo")
+            say(line);
+        else if (cmd == "partner")
+        {
+            std::string on;
+            ls >> on;
+            kh2coop::setTestPartner(on != "off");
+            say(line);
+        }
+        else if (cmd == "quit")
+        {
+            say("quit");
+            g_control.quit = true;
+        }
+        else
+            say("unknown command: " + line);
+    }
+    // Finished steps go.
+    auto &v = g_control.steps;
+    v.erase(std::remove_if(v.begin(), v.end(), [&](const Options::ScriptStep &st) { return scriptFrame >= st.start + st.frames + 60; }),
+            v.end());
+}
+
 bool harnessTick(Harness &h, uint64_t frame)
 {
     const Options &o = *h.opt;
@@ -1385,6 +1602,12 @@ bool harnessTick(Harness &h, uint64_t frame)
         std::fflush(stdout);
     }
 
+    if (g_control.quit)
+    {
+        std::printf("[harness] quit (control) at guest frame %llu\n", (unsigned long long)frame);
+        h.result = kExitFramesReached;
+        return false;
+    }
     if (o.frames && frame >= o.frames)
     {
         std::printf("[harness] reached %llu guest frames in %.1fs\n", (unsigned long long)frame, elapsed(h));
@@ -1426,14 +1649,17 @@ bool headlessPump(void *userData)
         uint32_t pressed = (mash && frame % o.mashEvery == 0) ? o.mashMask : 0u;
         uint32_t heldAll = held;
         uint32_t sticks = 0x80808080u;
-        for (const Options::ScriptStep &st : o.script)
-            if (scriptFrame >= st.start && scriptFrame < st.start + st.frames)
-            {
-                heldAll |= st.buttons;
-                if (scriptFrame == st.start)
-                    pressed |= st.buttons;
-                sticks = (uint32_t(st.rx) << 24) | (uint32_t(st.ry) << 16) | (uint32_t(st.lx) << 8) | st.ly;
-            }
+        controlTick(h, frame, scriptFrame);
+        const std::vector<Options::ScriptStep> *lists[] = {&o.script, &g_control.steps};
+        for (const std::vector<Options::ScriptStep> *list : lists)
+            for (const Options::ScriptStep &st : *list)
+                if (scriptFrame >= st.start && scriptFrame < st.start + st.frames)
+                {
+                    heldAll |= st.buttons;
+                    if (scriptFrame == st.start)
+                        pressed |= st.buttons;
+                    sticks = (uint32_t(st.rx) << 24) | (uint32_t(st.ry) << 16) | (uint32_t(st.lx) << 8) | st.ly;
+                }
         // The host loop can skip guest frames: a button newly held is a press
         // even when its first frame was not seen.
         static uint32_t lastHeld = 0;

@@ -924,8 +924,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         for (; i < kMaxAvatars; ++i)
             g_avatarObjs[i].store(0);
     }
-    kh2puppets::setOverrides(overrides, 1);
-    kh2puppets::setMotionGuards(guards);
+    kh2puppets::setOverrides(overrides, 2);
+    kh2puppets::setMotionGuards(guards, 1);
     g_names = names;
     return heals;
 }
@@ -973,7 +973,7 @@ void reset(uint8_t *rdram)
     g_states.clear();
     for (auto &a : g_avatarObjs)
         a.store(0);
-    kh2puppets::setOverrides({}, 1);
-    kh2puppets::setMotionGuards({});
+    kh2puppets::setOverrides({}, 2);
+    kh2puppets::setMotionGuards({}, 1);
 }
 } // namespace kh2avatars

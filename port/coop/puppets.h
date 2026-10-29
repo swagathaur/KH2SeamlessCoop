@@ -33,7 +33,8 @@ struct Target
 // Party members other players stand in for (partners.h): only the motion
 // their player is playing may be started on them (object, motion index; up
 // to two; an empty list: none).
-void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects);
+// Channel 0: partners (partners.cpp); 1: avatars (avatars.cpp).
+void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects, int channel = 0);
 
 enum class Mode
 {
@@ -87,7 +88,8 @@ struct Override
     float pos[3] = {0, 0, 0};
     float yaw = 0;
 };
-// Channel 0: the host's enemies (enemies.cpp); 1: partners (partners.cpp).
+// Channel 0: the host's enemies (enemies.cpp); 1: partners (partners.cpp);
+// 2: avatars (avatars.cpp). Each is set whole by its owner every frame.
 void setOverrides(std::vector<Override> overrides, int channel = 0);
 
 struct Assignment

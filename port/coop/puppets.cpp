@@ -58,7 +58,7 @@ double now()
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
 std::atomic<bool> g_anyOverride{false};
-std::vector<Override> g_overrides[2]; // per channel, under g_mutex
+std::vector<Override> g_overrides[3]; // per channel, under g_mutex
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
@@ -392,7 +392,7 @@ struct Guard
     std::atomic<uint32_t> motion{0}; // puppet object + 0x140; 0: none
     std::atomic<int32_t> wanted{-1};
 };
-Guard g_guards[kMaxPuppets + 2]; // our puppets, then the party members players stand in for
+Guard g_guards[kMaxPuppets + 4]; // our puppets, then the party members players stand in for (2), then avatars (2)
 float g_lastMotionTime[kMaxPuppets + 2] = {};
 uint64_t g_lastStepFrame[kMaxPuppets + 2] = {}; // guest frame of the last look at it
 PS2Runtime::RecompiledFunction g_motionUpdate = nullptr;
@@ -1170,15 +1170,15 @@ void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void
 void setOverrides(std::vector<Override> overrides, int channel)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_overrides[channel & 1] = std::move(overrides);
-    g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty();
+    g_overrides[channel < 0 || channel > 2 ? 0 : channel] = std::move(overrides);
+    g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty() || !g_overrides[2].empty();
 }
 
-void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects)
+void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects, int channel)
 {
     for (size_t i = 0; i < 2; ++i)
     {
-        Guard &g = g_guards[kMaxPuppets + i];
+        Guard &g = g_guards[kMaxPuppets + (channel == 1 ? 2 : 0) + i];
         const bool on = i < objects.size() && objects[i].first;
         g.wanted.store(on ? objects[i].second : -1, std::memory_order_relaxed);
         g.motion.store(on ? objects[i].first + kh2state::addr::ObjMotion : 0, std::memory_order_relaxed);

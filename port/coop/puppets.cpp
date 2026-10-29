@@ -550,6 +550,43 @@ bool usable(const kh2state::ActorInfo &a)
 // a file that has none (a drive form's motion on a stand-in made in that
 // form, whose motions are not all loaded) left it calling through 0. Such a
 // motion is not started; the current one goes on.
+// FUN_00185A68(obj, kind, arg): a motion's cue, handed to the object at
+// obj+0x9F4 through its vtable +0x50. A stand-in (a party member) playing
+// Sora's victory motion met a cue meant for the player: its +0x9F4 is the
+// player, whose class has nothing there, and the game called 0. Such a cue
+// is dropped.
+constexpr uint32_t kMotionCue = 0x00185A68;
+PS2Runtime::RecompiledFunction g_motionCue = nullptr;
+
+void motionCueHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4);
+    uint32_t to = 0, vt = 0, fn = 0;
+    auto rd32 = [&](uint32_t a) {
+        uint32_t v = 0;
+        if (a >= 0x00100000u && a < 0x02000000u - 4)
+            std::memcpy(&v, rdram + a, 4);
+        return v;
+    };
+    to = rd32(obj + 0x9F4);
+    vt = to ? rd32(to) : 0;
+    fn = vt ? rd32(vt + 0x50) : 0;
+    if (ctx->pc == kMotionCue && !fn)
+    {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 8)
+        {
+            std::printf("[puppets] motion cue %u on %08X has nobody to take it (%08X): dropped\n", getRegU32(ctx, 5),
+                        obj, to);
+            std::fflush(stdout);
+        }
+        setReturnU32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_motionCue, rdram, ctx, runtime);
+}
+
 constexpr uint32_t kMotionSet = 0x0017EFA0;
 PS2Runtime::RecompiledFunction g_motionSet = nullptr;
 
@@ -621,6 +658,9 @@ void boneMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_motionCue = runtime.lookupFunction(kMotionCue);
+    if (!g_motionCue || !runtime.replaceFunction(kMotionCue, &motionCueHook))
+        g_motionCue = nullptr;
     g_motionSet = runtime.lookupFunction(kMotionSet);
     if (!g_motionSet || !runtime.replaceFunction(kMotionSet, &motionSetHook))
         g_motionSet = nullptr;

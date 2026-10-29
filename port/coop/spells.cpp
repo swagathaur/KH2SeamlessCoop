@@ -126,8 +126,26 @@ void testTick(uint8_t *rdram, uint64_t frame)
     if (done || frame < at)
         return;
     done = true;
-    // A remote player's stand-in if there is one, else the first party member.
+    // A remote player's stand-in if there is one, else the first party member
+    // (KH2_TEST_CAST_TARGET=player2: a second player object, not ours).
     uint32_t member = 0;
+    if (const char *t = std::getenv("KH2_TEST_CAST_TARGET"); t && std::strcmp(t, "player2") == 0)
+    {
+        uint32_t player = 0;
+        std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+        for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+        {
+            if (a.type == 0 && a.address != player && !member)
+                member = a.address;
+            if (a.type == 0)
+            {
+                uint32_t sheet = 0;
+                std::memcpy(&sheet, rdram + a.address + 0x48C, 4);
+                std::printf("[spells] test: player-class object %08X%s, sheet %08X\n", a.address,
+                            a.address == player ? " (ours)" : "", sheet);
+            }
+        }
+    }
     for (const kh2partner::Link &l : kh2partner::links())
         if (l.object && !member)
             member = l.object;
@@ -146,6 +164,10 @@ void testTick(uint8_t *rdram, uint64_t frame)
             std::fflush(stdout);
             return std::nullopt;
         }
+        // KH2_TEST_CAST_VIA=command: through the player's own magic command
+        // (FUN_0017A590(player, command)), not the cast itself.
+        if (const char *v = std::getenv("KH2_TEST_CAST_VIA"); v && std::strcmp(v, "command") == 0)
+            return kh2guest::Call{0x0017A590u, {member, cmd}, {}};
         return kh2guest::Call{kCast, {member, cmd, 0u}, {}};
     });
 }

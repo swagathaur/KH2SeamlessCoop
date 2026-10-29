@@ -11,6 +11,9 @@
 
 #include "game_state.h"
 #include "puppets.h"
+#include "hle_call.h"
+#include "ps2_runtime.h"
+#include <atomic>
 
 namespace kh2avatars
 {
@@ -48,6 +51,25 @@ uint32_t g_gen = 0;
 uint16_t g_room = 0xFFFF;
 double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
+std::atomic<uint32_t> g_avatarObjs[kMaxAvatars] = {}; // for the EE-side hooks
+
+// YS::PLAYER::_OVR_control (0x00178888): a player's per-frame command menu
+// update (the command object at +0xB3C, which every player object points
+// at: there is one). An avatar ran it too, and our button presses went
+// through the command menu twice.
+constexpr uint32_t kPlayerControl = 0x00178888;
+PS2Runtime::RecompiledFunction g_control = nullptr;
+void controlHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t obj = getRegU32(ctx, 4);
+    for (const auto &a : g_avatarObjs)
+        if (obj && a.load(std::memory_order_relaxed) == obj && ctx->pc == kPlayerControl)
+        {
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    kh2::callOriginal(g_control, rdram, ctx, runtime);
+}
 std::map<int, std::string> g_names; // character in their party place -> their name
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
@@ -120,6 +142,17 @@ bool live(const uint8_t *rdram, uint32_t obj)
     return false;
 }
 } // namespace
+
+bool install(PS2Runtime &runtime)
+{
+    g_control = runtime.lookupFunction(kPlayerControl);
+    if (!g_control || !runtime.replaceFunction(kPlayerControl, &controlHook))
+    {
+        g_control = nullptr;
+        return false;
+    }
+    return true;
+}
 
 bool enabled()
 {
@@ -292,10 +325,16 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // gauge, item targets, menus: names.h).
         if (!r.name.empty() && st.now.world < 0x20 && sheetIndex <= 2)
         {
-            const uint8_t character =
-                rd<uint8_t>(rdram, kh2state::addr::Save + 0x3534 + uint32_t(st.now.world) * 4u + sheetIndex) & 0x7F;
-            if (character > 0 && character < 13)
+            const uint8_t raw = rd<uint8_t>(rdram, kh2state::addr::Save + 0x3534 + uint32_t(st.now.world) * 4u + sheetIndex);
+            const uint8_t character = raw & 0x7F;
+            if (character > 0 && character < 13 && !(raw & 0x80))
                 names[character] = r.name;
+            // A world's own companion there (bit 7: Ping is 0x83, not her
+            // character number): the world companions' names (characters
+            // 3-15, Ping is 14) are theirs; only one of them is in a party.
+            if (raw & 0x80)
+                for (int c = 3; c <= 15; ++c)
+                    names[c] = r.name;
         }
         // Their place in the party: the member in slot (index + 1), hidden
         // and frozen where the avatar is, on the avatar's sheet. The party
@@ -336,7 +375,9 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             h.playerId = r.playerId;
             if (s.writtenHp >= 0 && hpNow > s.writtenHp)
                 h.hp = hpNow - s.writtenHp;
-            if (s.writtenMp >= 0 && mpNow > s.writtenMp)
+            // (MP: the game recharges a party slot's MP by itself, in small
+            // steps; only an Ether-sized rise is ours.)
+            if (s.writtenMp >= 0 && mpNow >= s.writtenMp + 10)
                 h.mp = mpNow - s.writtenMp;
             if (h.hp > 0 || h.mp > 0)
             {
@@ -397,6 +438,14 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 for (uint32_t a : kPlayerRefs)
                     if (rd<uint32_t>(rdram, a) == s.object)
                         wr<uint32_t>(rdram, a, g_ourPlayer);
+    {
+        uint32_t i = 0;
+        for (auto &[id, st2] : g_states)
+            if (st2.object && i < kMaxAvatars)
+                g_avatarObjs[i++].store(st2.object);
+        for (; i < kMaxAvatars; ++i)
+            g_avatarObjs[i].store(0);
+    }
     kh2puppets::setOverrides(overrides, 1);
     kh2puppets::setMotionGuards(guards);
     g_names = names;
@@ -417,6 +466,8 @@ void reset(uint8_t *rdram)
         if (s.object)
             kh2puppets::remove(s.object);
     g_states.clear();
+    for (auto &a : g_avatarObjs)
+        a.store(0);
     kh2puppets::setOverrides({}, 1);
     kh2puppets::setMotionGuards({});
 }

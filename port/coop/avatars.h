@@ -27,8 +27,11 @@
 
 #include "partners.h"
 
+class PS2Runtime;
+
 namespace kh2avatars
 {
+bool install(PS2Runtime &runtime);
 bool enabled();
 // Host loop, every iteration (the same list partners get).
 // Returns heals this game gave them (items, Cure on their party place).

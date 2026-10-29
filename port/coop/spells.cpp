@@ -53,8 +53,54 @@ void castHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 } // namespace
 
+// Debugging: KH2_DEBUG_HOOK=ADDR (hex) logs the first calls of that guest
+// function: its arguments, the caller and what $a0 points at.
+PS2Runtime::RecompiledFunction g_debugOriginal = nullptr;
+uint32_t g_debugAddr = 0;
+std::atomic<int> g_debugCalls{0};
+void debugHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    static const int skip = [] {
+        const char *e = std::getenv("KH2_DEBUG_HOOK_SKIP");
+        return e ? std::atoi(e) : 0;
+    }();
+    const int n = g_debugCalls.fetch_add(1);
+    // Each (a0, caller) once.
+    static std::mutex m;
+    static std::vector<std::pair<uint32_t, uint32_t>> seen;
+    bool fresh = false;
+    {
+        std::lock_guard<std::mutex> lock(m);
+        const auto key = std::make_pair(getRegU32(ctx, 4), getRegU32(ctx, 31));
+        bool have = false;
+        for (const auto &k : seen)
+            have = have || k == key;
+        if (!have && seen.size() < 40)
+        {
+            seen.push_back(key);
+            fresh = true;
+        }
+    }
+    if (n >= skip && fresh && ctx->pc == g_debugAddr)
+    {
+        uint32_t player = 0;
+        std::memcpy(&player, rdram + kh2state::addr::PlayerPtr, 4);
+        std::printf("[debug-hook] %08X(a0 %08X, a1 %08X, a2 %08X) from %08X; player %08X\n", g_debugAddr,
+                    getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 31), player);
+        std::fflush(stdout);
+    }
+    kh2::callOriginal(g_debugOriginal, rdram, ctx, runtime);
+}
+
 bool install(PS2Runtime &runtime)
 {
+    if (const char *e = std::getenv("KH2_DEBUG_HOOK"))
+    {
+        g_debugAddr = uint32_t(std::strtoul(e, nullptr, 16));
+        g_debugOriginal = runtime.lookupFunction(g_debugAddr);
+        if (!g_debugOriginal || !runtime.replaceFunction(g_debugAddr, &debugHook))
+            g_debugOriginal = nullptr;
+    }
     g_cast = runtime.lookupFunction(kCast);
     if (!g_cast || !runtime.replaceFunction(kCast, &castHook))
     {

@@ -1,0 +1,43 @@
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -64,6 +64,13 @@
+ #include <cstdlib>
+ #include <unordered_map>
+ #include <sstream>
++// Calls through a null pointer (target 0: a blank vtable slot or callback), or
++// indirect calls to no known function (a stale pointer), are skipped as if the
++// callee had returned 0, and logged, instead of following the missing-function
++// policy (dispatchGuestBranch). Off unless set. (A free function: the runtime
++// header, included by all generated code, stays as it is.)
++static std::atomic<bool> g_nullCallsReturnZero{false};
++void ps2SetNullCallsReturnZero(bool on) { g_nullCallsReturnZero.store(on, std::memory_order_relaxed); }
+ 
+ namespace ps2_stubs
+ {
+@@ -1524,6 +1531,26 @@
+         return false;
+     }
+ 
++    if (g_nullCallsReturnZero.load(std::memory_order_relaxed) &&
++        (targetPc == 0u || (kind == GuestBranchKind::IndirectCall && !hasFunction(targetPc))))
++    {
++        // A call through a null (or stale) pointer: the callee is skipped and returns 0.
++        static std::atomic<uint32_t> s_nullCalls{0};
++        const uint32_t n = s_nullCalls.fetch_add(1, std::memory_order_relaxed);
++        if (n < 32 || (n & 1023u) == 0)
++        {
++            const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
++            std::printf("[guest-branch:null-call] call to 0x%08X at 0x%08X (ra 0x%08X) skipped, "
++                        "returning 0 (%u so far)\n",
++                        targetPc, sourcePc, ra, n + 1);
++            std::fflush(stdout);
++        }
++        ctx->r[2] = _mm_setzero_si128();
++        ctx->r[3] = _mm_setzero_si128();
++        ctx->pc = fallthroughPc;
++        return true;
++    }
++
+     if (!hasFunction(targetPc))
+     {
+         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);

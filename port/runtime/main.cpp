@@ -83,6 +83,9 @@ extern uint32_t *g_ps2CallCounts;
 #include "android_host.h"
 #endif
 
+// patches/ps2recomp/0049-null-call-guard.patch
+void ps2SetNullCallsReturnZero(bool on);
+
 namespace ps2_stubs
 {
 void setMpegLegacyGuestGlobals(bool enabled); // patches/ps2recomp/0004
@@ -2082,6 +2085,14 @@ int main(int argc, char **argv)
     runtime.setMissingFunctionPolicy(opt.missing == "continue"
                                          ? PS2Runtime::MissingFunctionPolicy::ContinueToTarget
                                          : PS2Runtime::MissingFunctionPolicy::Stop);
+    // A call through a null or stale pointer (a blank vtable slot: an object
+    // freed under a pointer still kept somewhere) is skipped as if it returned
+    // 0, and logged ("[guest-branch:null-call]"), instead of ending the game
+    // (patch 0049). KH2_NULL_CALLS=stop ends it, as before (for debugging).
+    {
+        const char *e = std::getenv("KH2_NULL_CALLS");
+        ps2SetNullCallsReturnZero(!(e && std::strcmp(e, "stop") == 0));
+    }
     kh2ovl::install(runtime);
     kh2pad2::install(runtime);
     kh2gs::install(runtime);

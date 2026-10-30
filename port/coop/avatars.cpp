@@ -645,6 +645,34 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         g_avatarPending = pending;
     }
     g_ourPlayerForFree = g_states.empty() ? 0u : g_ourPlayer; // (only with avatars about)
+    // The game's "a drive form is on" flag (word 0x00351EB8; FUN_001BC568 and
+    // the Drive command check it): making a player object in a form sets it,
+    // an avatar in the other player's form included, and nothing cleared it
+    // when the avatar went back: our own Drive stayed greyed out. It is ours
+    // alone: cleared while our player is in no form and none is starting
+    // (YS::CHANGEFORM's task, 0x00351184).
+    if (!g_states.empty() && g_ourPlayer && live(rdram, g_ourPlayer))
+    {
+        constexpr uint32_t kDriveOn = 0x00351EB8, kFormTask = 0x00351184;
+        uint32_t entry = 0, flag = 0, task = 0;
+        std::memcpy(&flag, rdram + kDriveOn, 4);
+        std::memcpy(&task, rdram + kFormTask, 4);
+        const uint32_t rec = rd<uint32_t>(rdram, g_ourPlayer + kh2state::addr::ObjEntry);
+        if (inRam(rec))
+            entry = rd<uint32_t>(rdram, rec) & 0xFFFF;
+        const bool ourForm = entry && kh2partner::formBaseLook(rdram, uint16_t(entry)) != 0;
+        if ((flag & 1) && !ourForm && !task)
+        {
+            flag &= ~1u;
+            std::memcpy(rdram + kDriveOn, &flag, 4);
+            static int logged = 0;
+            if (logged++ < 10)
+            {
+                std::printf("[avatars] the drive flag was set for an avatar's form: cleared (our player is in none)\n");
+                std::fflush(stdout);
+            }
+        }
+    }
     const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
     const bool cutscene = st.control == 3;
     uint32_t sheetIndex = 0;
@@ -677,10 +705,13 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // avatar were half there in a crowded room (a mission) when it was
         // made, and its motion crashed; and the form's files our player has
         // (if we are in it too) go when we revert, under the avatar.
-        // (Now on by default: KH2_AVATAR_FORMS=0 gives the base look.)
-        static const bool forms = [] { // on unless KH2_AVATAR_FORMS=0
+        // Off unless KH2_AVATAR_FORMS=1: an avatar made in a drive form's look
+        // is a form player of this game, and our own transformation then
+        // never finished (YS::CHANGEFORM's task waited on with the avatar in
+        // any form), besides the "drive form on" flag (cleared, see update).
+        static const bool forms = [] {
             const char *e = std::getenv("KH2_AVATAR_FORMS");
-            return !(e && *e == '0');
+            return e && *e == '1';
         }();
         if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
             if (s.plainLook || !forms)

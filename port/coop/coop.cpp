@@ -788,7 +788,32 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             const kh2state::State now = kh2state::read(ram);
             const bool on = g_session && g_session->active() && !list.empty();
             if (now.player.valid && now.now.world != 0x0F) // (not the World Map)
-                kh2partner::keepParty(ram, now.now.world, on ? std::min<int>(int(list.size()), 2) : -1);
+            {
+                const int keep = on ? std::min<int>(int(list.size()), 2) : -1;
+                kh2partner::keepParty(ram, now.now.world, keep);
+                // The room already made when the party was trimmed (a save
+                // just loaded, a player just joined) still has all its party
+                // members: it is reloaded once, in place, when the player is
+                // free to move (stepRefresh), and made with just the place
+                // holders. Later rooms are made from the trimmed party.
+                static uint16_t refreshedRoom = 0xFFFF;
+                const uint16_t roomKey = uint16_t(now.now.world << 8 | now.now.room);
+                if (keep >= 0 && roomKey != refreshedRoom && now.control == 0 && now.battle == 0 &&
+                    !g_refresh.wanted && !g_refresh.jumping)
+                {
+                    int members = 0;
+                    for (const kh2state::ActorInfo &a : kh2state::actors(ram))
+                        members += a.type == 1 ? 1 : 0;
+                    if (members > keep)
+                    {
+                        refreshedRoom = roomKey;
+                        g_refresh.wanted = true;
+                        std::printf("[partner] this room has %d party member(s) for %d player(s): reloading it\n",
+                                    members, keep);
+                        std::fflush(stdout);
+                    }
+                }
+            }
         }
         heals = kh2avatars::update(ram, list);
         list.clear();
@@ -858,7 +883,7 @@ void stepRefresh(uint8_t *ram)
         std::memcpy(r.pos, ram + ((player + kh2state::addr::ObjPos) & 0x01FFFFFFu), sizeof(r.pos));
         std::memcpy(r.dir, ram + ((player + kh2state::addr::ObjDir) & 0x01FFFFFFu), sizeof(r.dir));
         r.since = now();
-        addLog("reloading the room to show your partners");
+        addLog("reloading the room (party)");
         warpLocked(st.now.world, st.now.room, st.now.door);
         return;
     }

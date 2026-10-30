@@ -50,6 +50,7 @@
 #include "game_patches.h"
 #include "game_state.h"
 #include "coop.h"
+#include "unlock.h"
 #include "guest_call.h"
 #include "puppets.h"
 #include "partners.h"
@@ -1139,6 +1140,11 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "unlock")
+        {
+            const std::string did = kh2unlock::apply(ram);
+            say(line + ": " + (did.empty() ? std::string("not loaded yet") : did));
+        }
         else if (cmd == "tp")
         {
             float p[4] = {0, 0, 0, 1};
@@ -1738,6 +1744,7 @@ bool headlessPump(void *userData)
         }
     }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
+    kh2unlock::tick(h.runtime->memory().getRDRAM(), frame);
     if (kh2pgs::active() && frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;
@@ -1782,6 +1789,7 @@ bool playPump(void *userData)
         }
     }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
+    kh2unlock::tick(h.runtime->memory().getRDRAM(), frame);
     if (frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;

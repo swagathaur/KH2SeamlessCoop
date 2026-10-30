@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -26,6 +27,7 @@
 #include "local_players.h"
 #include "puppets.h"
 #include "partners.h"
+#include "unlock.h"
 #include "host_input.h"
 #include "movie_eof.h"
 #include "cutscene_skip.h"
@@ -52,6 +54,46 @@ double g_speed = 1.0;
 
 // Keyboard rebinding: the action waiting for a key (-1: none), and whether the
 // key is added to its list rather than replacing it.
+// The settings menu's sections fold away (a header each); which are open is
+// remembered next to the settings file (kh2recomp-menu.txt), as soon as one is
+// opened or closed.
+std::map<std::string, bool> g_sectionOpen;
+bool g_sectionsLoaded = false;
+std::filesystem::path sectionsPath() { return g_iniPath.parent_path() / "kh2recomp-menu.txt"; }
+void loadSections()
+{
+    if (g_sectionsLoaded)
+        return;
+    g_sectionsLoaded = true;
+    std::ifstream in(sectionsPath());
+    for (std::string line; std::getline(in, line);)
+    {
+        const size_t eq = line.rfind('=');
+        if (eq != std::string::npos && eq > 0)
+            g_sectionOpen[line.substr(0, eq)] = line.compare(eq + 1, 1, "1") == 0;
+    }
+}
+void saveSections()
+{
+    std::ofstream out(sectionsPath(), std::ios::trunc);
+    for (const auto &[name, open] : g_sectionOpen)
+        out << name << '=' << (open ? 1 : 0) << '\n';
+}
+bool section(const char *label, bool openByDefault = true)
+{
+    loadSections();
+    const auto it = g_sectionOpen.find(label);
+    const bool was = it == g_sectionOpen.end() ? openByDefault : it->second;
+    ImGui::SetNextItemOpen(was, ImGuiCond_Always);
+    const bool open = ImGui::CollapsingHeader(label);
+    if (open != was)
+    {
+        g_sectionOpen[label] = open;
+        saveSections();
+    }
+    return open;
+}
+
 int g_bindAction = -1;
 bool g_bindAdd = false;
 
@@ -161,7 +203,7 @@ void drawKeyboard()
             stopCapture();
         }
     }
-    if (!ImGui::CollapsingHeader("Keyboard"))
+    if (!section("Keyboard", false))
         return;
     ImGui::TextDisabled("Click a binding, then press a key (Esc cancels). + adds a second key.");
     kh2keys::Bindings b = kh2input::keyBindings();
@@ -326,306 +368,366 @@ void draw()
         return;
     }
 
-    ImGui::SeparatorText("Display");
-    int ssaa = 0;
-    for (int i = 0; i < 5; ++i)
-        if (kSsaa[i] == kh2pgs::superSampling())
-            ssaa = i;
-    if (ImGui::Combo("Super-sampling", &ssaa, kSsaaNames, 5))
-        kh2pgs::setSuperSampling(kSsaa[ssaa]);
-    ImGui::SetItemTooltip("Renders each pixel from several samples: smoother edges, less shimmer, and a\n"
-                          "sharper picture (2x the PS2's resolution from 4x, 4x from 16x).");
-    bool ssTex = kh2pgs::superSampledTextures();
-    if (ImGui::Checkbox("Super-sample screen effects", &ssTex))
-        kh2pgs::setSuperSampledTextures(ssTex);
-    ImGui::SetItemTooltip("KH2 redraws the finished frame for its screen effects. Off, that pass drops\n"
-                          "back to PS2 resolution.");
-    bool sharpTex = kh2pgs::sharpestTextures();
-    if (ImGui::Checkbox("Sharpest textures", &sharpTex))
-        kh2pgs::setSharpestTextures(sharpTex);
-    ImGui::SetItemTooltip("Always use full-size textures, even far away (no mipmaps). Sharper at high\n"
-                          "resolution; can shimmer.");
-    if (kh2hd::loaded())
+    if (section("Display"))
     {
-        bool hd = kh2hd::enabled();
-        if (ImGui::Checkbox("HD textures (PC release)", &hd))
-            kh2hd::setEnabled(hd);
-        ImGui::SetItemTooltip("Menus, fonts and other 2D art from the PC release's remastered textures.");
-    }
-    bool fsr = kh2pgs::fsr();
-    if (ImGui::Checkbox("Sharp upscaling (AMD FSR 1)", &fsr))
-        kh2pgs::setFsr(fsr);
-    {
-        // Window sizes for the shown aspect; the picture is letterboxed otherwise.
-        const bool wide = kh2pgs::displayAspect() > 1.5f;
-        static const unsigned k43[][2] = {{640, 480}, {960, 720}, {1280, 960}, {1440, 1080}, {1920, 1440}, {2880, 2160}};
-        static const unsigned k169[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
-        const auto *sizes = wide ? k169 : k43;
-        const int count = wide ? 5 : 6;
-        unsigned w = 0, h = 0;
-        kh2pgs::windowSize(w, h);
-        char current[32];
-        std::snprintf(current, sizeof(current), "%u x %u", w, h);
-        ImGui::BeginDisabled(kh2pgs::fullscreen());
-        if (ImGui::BeginCombo("Window size", current))
+        int ssaa = 0;
+        for (int i = 0; i < 5; ++i)
+            if (kSsaa[i] == kh2pgs::superSampling())
+                ssaa = i;
+        if (ImGui::Combo("Super-sampling", &ssaa, kSsaaNames, 5))
+            kh2pgs::setSuperSampling(kSsaa[ssaa]);
+        ImGui::SetItemTooltip("Renders each pixel from several samples: smoother edges, less shimmer, and a\n"
+                              "sharper picture (2x the PS2's resolution from 4x, 4x from 16x).");
+        bool ssTex = kh2pgs::superSampledTextures();
+        if (ImGui::Checkbox("Super-sample screen effects", &ssTex))
+            kh2pgs::setSuperSampledTextures(ssTex);
+        ImGui::SetItemTooltip("KH2 redraws the finished frame for its screen effects. Off, that pass drops\n"
+                              "back to PS2 resolution.");
+        bool sharpTex = kh2pgs::sharpestTextures();
+        if (ImGui::Checkbox("Sharpest textures", &sharpTex))
+            kh2pgs::setSharpestTextures(sharpTex);
+        ImGui::SetItemTooltip("Always use full-size textures, even far away (no mipmaps). Sharper at high\n"
+                              "resolution; can shimmer.");
+        if (kh2hd::loaded())
         {
-            for (int i = 0; i < count; ++i)
-            {
-                char label[32];
-                std::snprintf(label, sizeof(label), "%u x %u", sizes[i][0], sizes[i][1]);
-                if (ImGui::Selectable(label, sizes[i][0] == w && sizes[i][1] == h))
-                    kh2pgs::setWindowSize(sizes[i][0], sizes[i][1]);
-            }
-            ImGui::EndCombo();
+            bool hd = kh2hd::enabled();
+            if (ImGui::Checkbox("HD textures (PC release)", &hd))
+                kh2hd::setEnabled(hd);
+            ImGui::SetItemTooltip("Menus, fonts and other 2D art from the PC release's remastered textures.");
         }
-        ImGui::EndDisabled();
-    }
-    bool full = kh2pgs::fullscreen();
-    if (ImGui::Checkbox("Fullscreen (Alt+Enter)", &full))
-        kh2pgs::setFullscreen(full);
-    bool vs = kh2pgs::vsync();
-    if (ImGui::Checkbox("VSync", &vs))
-        kh2pgs::setVsync(vs);
-    bool fps = kh2pgs::showFps();
-    if (ImGui::Checkbox("Show frame rate (F2)", &fps))
-        kh2pgs::setShowFps(fps);
-    bool hud = kh2pgs::hudVisible();
-    if (ImGui::Checkbox("Show game state (F3)", &hud))
-        kh2pgs::setHudVisible(hud);
+        bool fsr = kh2pgs::fsr();
+        if (ImGui::Checkbox("Sharp upscaling (AMD FSR 1)", &fsr))
+            kh2pgs::setFsr(fsr);
+        {
+            // Window sizes for the shown aspect; the picture is letterboxed otherwise.
+            const bool wide = kh2pgs::displayAspect() > 1.5f;
+            static const unsigned k43[][2] = {{640, 480}, {960, 720}, {1280, 960}, {1440, 1080}, {1920, 1440}, {2880, 2160}};
+            static const unsigned k169[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+            const auto *sizes = wide ? k169 : k43;
+            const int count = wide ? 5 : 6;
+            unsigned w = 0, h = 0;
+            kh2pgs::windowSize(w, h);
+            char current[32];
+            std::snprintf(current, sizeof(current), "%u x %u", w, h);
+            ImGui::BeginDisabled(kh2pgs::fullscreen());
+            if (ImGui::BeginCombo("Window size", current))
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    char label[32];
+                    std::snprintf(label, sizeof(label), "%u x %u", sizes[i][0], sizes[i][1]);
+                    if (ImGui::Selectable(label, sizes[i][0] == w && sizes[i][1] == h))
+                        kh2pgs::setWindowSize(sizes[i][0], sizes[i][1]);
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+        }
+        bool full = kh2pgs::fullscreen();
+        if (ImGui::Checkbox("Fullscreen (Alt+Enter)", &full))
+            kh2pgs::setFullscreen(full);
+        bool vs = kh2pgs::vsync();
+        if (ImGui::Checkbox("VSync", &vs))
+            kh2pgs::setVsync(vs);
+        bool fps = kh2pgs::showFps();
+        if (ImGui::Checkbox("Show frame rate (F2)", &fps))
+            kh2pgs::setShowFps(fps);
+        bool hud = kh2pgs::hudVisible();
+        if (ImGui::Checkbox("Show game state (F3)", &hud))
+            kh2pgs::setHudVisible(hud);
 
 #if defined(__ANDROID__)
-    kh2android::drawDriverMenu();
+        kh2android::drawDriverMenu();
 #endif
-    ImGui::SeparatorText("Sound");
-    int vol = int(g_opt.volume * 100.0f + 0.5f);
-    if (ImGui::SliderInt("Volume", &vol, 0, 100, "%d%%"))
-    {
-        g_opt.volume = vol / 100.0f;
-        ps2_native_iop::setVolume(g_opt.volume);
     }
-
-    ImGui::SeparatorText("Speed");
-    ImGui::SliderFloat("Fast-forward (hold Tab)", &g_opt.fastForwardSpeed, 1.5f, 8.0f, "%.1fx");
-    ImGui::Checkbox("Pause when the window is in the background", &g_opt.pauseUnfocused);
-    bool skipMovies = kh2movie::skipping();
-    if (ImGui::Checkbox("Skip movies", &skipMovies))
-        kh2movie::setSkip(skipMovies);
-    ImGui::SetItemTooltip("Skip the pre-rendered movies (hold B, or Tab, to skip the one playing)");
-    bool skipCut = kh2skip::autoSkip();
-    if (ImGui::Checkbox("Skip cutscenes", &skipCut))
-        kh2skip::setAutoSkip(skipCut);
-    ImGui::SetItemTooltip("Skip every in-engine cutscene, as the pause menu's Skip does (hold B to skip just one)");
-
-    ImGui::SeparatorText("Game patches");
-    const std::vector<kh2patches::Info> patches = kh2patches::available();
-    if (patches.empty())
-        ImGui::TextDisabled("None built (tools/game_patches.py).");
-    for (const kh2patches::Info &p : patches)
+    if (section("Sound"))
     {
-        bool on = kh2patches::isEnabled(p.name);
-        if (ImGui::Checkbox(p.description, &on) && g_runtime)
+        int vol = int(g_opt.volume * 100.0f + 0.5f);
+        if (ImGui::SliderInt("Volume", &vol, 0, 100, "%d%%"))
         {
-            kh2patches::setEnabled(*g_runtime, p.name, on);
-            applyAspect();
+            g_opt.volume = vol / 100.0f;
+            ps2_native_iop::setVolume(g_opt.volume);
         }
     }
 
-    ImGui::SeparatorText("Co-op (preview: players see each other's position)");
+    if (section("Speed"))
     {
-        char *name = g_coopName;
-        char *address = g_coopAddress;
-        static bool seeded = false;
-        if (!seeded)
+        ImGui::SliderFloat("Fast-forward (hold Tab)", &g_opt.fastForwardSpeed, 1.5f, 8.0f, "%.1fx");
+        ImGui::Checkbox("Pause when the window is in the background", &g_opt.pauseUnfocused);
+        bool skipMovies = kh2movie::skipping();
+        if (ImGui::Checkbox("Skip movies", &skipMovies))
+            kh2movie::setSkip(skipMovies);
+        ImGui::SetItemTooltip("Skip the pre-rendered movies (hold B, or Tab, to skip the one playing)");
+        bool skipCut = kh2skip::autoSkip();
+        if (ImGui::Checkbox("Skip cutscenes", &skipCut))
+            kh2skip::setAutoSkip(skipCut);
+        ImGui::SetItemTooltip("Skip every in-engine cutscene, as the pause menu's Skip does (hold B to skip just one)");
+    }
+
+    if (section("Game patches"))
+    {
+        const std::vector<kh2patches::Info> patches = kh2patches::available();
+        if (patches.empty())
+            ImGui::TextDisabled("None built (tools/game_patches.py).");
+        for (const kh2patches::Info &p : patches)
         {
-            seeded = true;
-            std::snprintf(g_coopName, sizeof(g_coopName), "%s", kh2coop::options().name.c_str());
-            const std::string &join = kh2coop::options().join;
-            std::snprintf(g_coopAddress, sizeof(g_coopAddress), "%s", (join.empty() ? g_opt.lastAddress : join).c_str());
-        }
-        ImGui::TextUnformatted(kh2coop::statusText().c_str());
-        // Getting through routers (net/nat.h).
-        const kh2coop::NatInfo nat = kh2coop::natInfo();
-        if (nat.hosting)
-        {
-            ImGui::TextWrapped("%s", nat.router.c_str());
-            if (!nat.share.empty())
+            bool on = kh2patches::isEnabled(p.name);
+            if (ImGui::Checkbox(p.description, &on) && g_runtime)
             {
-                ImGui::Text("Address to give the others: %s", nat.share.c_str());
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Copy##share"))
-                    ImGui::SetClipboardText(nat.share.c_str());
+                kh2patches::setEnabled(*g_runtime, p.name, on);
+                applyAspect();
             }
-            else
-                ImGui::TextDisabled("Finding your public address...");
-            static char invite[64] = "";
-            textField("invite", "", "their address", invite, sizeof(invite), 180);
-            ImGui::SameLine();
-            if (ImGui::Button("Let in") && invite[0])
-                kh2coop::letIn(invite);
-            ImGui::SetItemTooltip("If someone cannot get in: they send you the address their Co-op menu shows while "
-                                  "joining, you press Let in, and they press Join again (within 30 s)");
-        }
-        if (nat.connecting)
-        {
-            if (!nat.mine.empty())
-            {
-                ImGui::TextWrapped("Your address: %s. If joining does not work, send it to the host to Let in.",
-                                   nat.mine.c_str());
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Copy##mine"))
-                    ImGui::SetClipboardText(nat.mine.c_str());
-            }
-            if (ImGui::Button("Cancel"))
-                kh2coop::leave();
-        }
-        if (!kh2coop::active() && !nat.connecting)
-        {
-            textField("name", "Your name", nullptr, name, sizeof(g_coopName), 180);
-            if (ImGui::Button("Host"))
-            {
-                kh2coop::host(name, kh2coop::options().port);
-                save(); // remember the name
-            }
-            ImGui::SetItemTooltip("Others join with the address shown once hosting (UDP port %u; the router is asked "
-                                  "to open it)", unsigned(kh2coop::options().port));
-            ImGui::SameLine();
-            textField("addr", "", "host IP[:port]", address, sizeof(g_coopAddress), 180);
-            ImGui::SameLine();
-            if (ImGui::Button("Join") && address[0])
-            {
-                kh2coop::join(name, address);
-                save(); // remember the name and the address
-            }
-        }
-        else
-        {
-            const std::vector<kh2partner::Link> links = kh2partner::links();
-            for (const kh2coop::RemotePlayer &r : kh2coop::remotes())
-            {
-                const char *where = "";
-                for (const kh2partner::Link &l : links)
-                    if (l.playerId == r.id)
-                        where = l.slot == 1 ? "  - in your party (first companion)" : "  - in your party (second companion)";
-                ImGui::BulletText("%s  %.0f ms%s", r.name.c_str(), r.rttMs, where);
-            }
-            if (!kh2coop::isHost())
-            {
-                if (ImGui::Button("Go to the host's room"))
-                    kh2coop::warpToHost();
-                ImGui::SameLine();
-                bool follow = kh2coop::followHost();
-                if (ImGui::Checkbox("Follow the host", &follow))
-                    kh2coop::setFollowHost(follow);
-                ImGui::SetItemTooltip("Go to the host's room whenever they change rooms (when you are free to move)");
-                bool shared = kh2coop::sharedEnemies();
-                if (ImGui::Checkbox("Shared enemies", &shared))
-                    kh2coop::setSharedEnemies(shared);
-                ImGui::SetItemTooltip("In the host's room, enemies are where the host's are, with the host's HP; your hits count for everyone");
-                bool story = kh2coop::sharedStory();
-                if (ImGui::Checkbox("Shared story", &story))
-                    kh2coop::setSharedStory(story);
-                ImGui::SetItemTooltip("Play in the host's story: go where they go and watch their cutscenes (only the host skips). "
-                                      "Your own story, and your place in it, come back when you leave; saving keeps yours.");
-            }
-            if (kh2coop::isHost())
-                scalingSliders();
-            else
-                ImGui::TextDisabled("The host's enemies: HP +%.0f%%, damage +%.0f%% per extra player (%d players)",
-                                    kh2scale::hpPerPlayer() * 100.0f, kh2scale::damagePerPlayer() * 100.0f,
-                                    kh2scale::players());
-            bool puppets = kh2puppets::enabled();
-            if (ImGui::Checkbox("Show other players", &puppets))
-                kh2puppets::setEnabled(puppets);
-            ImGui::SameLine();
-            ImGui::Checkbox("Name tags", &g_opt.nameTags);
-            if (ImGui::Button("Leave session"))
-                kh2coop::leave();
         }
     }
 
-    ImGui::SeparatorText("Controls");
-    int layout = kh2input::confirmOnBottom() ? 0 : 1;
-    const char *layouts[] = {"Bottom button confirms (international)", "Right button confirms (Japanese)"};
-    if (ImGui::Combo("Layout", &layout, layouts, 2))
-        kh2input::setConfirmOnBottom(layout == 0);
-    bool rumble = kh2input::rumbleEnabled();
-    if (ImGui::Checkbox("Vibration", &rumble))
-        kh2input::setRumbleEnabled(rumble);
-    bool mouse = kh2input::mouseCamera();
-    if (ImGui::Checkbox("Mouse camera (hold right button)", &mouse))
-        kh2input::setMouseCamera(mouse);
-    float sens = kh2input::mouseSensitivity();
-    if (ImGui::SliderFloat("Mouse sensitivity", &sens, 0.25f, 4.0f, "%.2f"))
-        kh2input::setMouseSensitivity(sens);
+    if (section("Co-op (preview: players see each other's position)"))
     {
-        const std::string pad = kh2input::controllerName();
-        if (pad.empty())
-            ImGui::TextDisabled("No controller: keyboard (layout below)");
-        else
-            ImGui::TextDisabled("Controller: %s", pad.c_str());
-    }
-    drawKeyboard();
-
-    // Local multiplayer (local_players.h): a window per player on this PC.
-    ImGui::SeparatorText("Local players (this PC)");
-    {
-        const int me = kh2local::player();
-        const char *pads[] = {"The first one found", "Controller 1", "Controller 2", "Controller 3", "Controller 4",
-                              "None (keyboard only)"};
-        const int choice = kh2input::controller();
-        int item = choice == -1 ? 0 : choice == -2 ? 5 : choice + 1;
-        ImGui::SetNextItemWidth(200);
-        if (ImGui::Combo("This window's controller", &item, pads, 6))
-            kh2input::setController(item == 0 ? -1 : item == 5 ? -2 : item - 1);
-        ImGui::SetItemTooltip("Each window reads its own controller, also when it is not the active window "
-                              "(the keyboard works in the active window)");
-        if (me > 1)
-            ImGui::TextWrapped("This window is local player %d (own memory card: %s). Close it to leave.", me,
-                               kh2local::memoryCardFolder(me).c_str());
-        else
         {
-            const std::vector<int> playing = kh2local::running();
-            for (int p = 2; p <= 3; ++p)
+            char *name = g_coopName;
+            char *address = g_coopAddress;
+            static bool seeded = false;
+            if (!seeded)
             {
-                if (std::find(playing.begin(), playing.end(), p) != playing.end())
+                seeded = true;
+                std::snprintf(g_coopName, sizeof(g_coopName), "%s", kh2coop::options().name.c_str());
+                const std::string &join = kh2coop::options().join;
+                std::snprintf(g_coopAddress, sizeof(g_coopAddress), "%s", (join.empty() ? g_opt.lastAddress : join).c_str());
+            }
+            ImGui::TextUnformatted(kh2coop::statusText().c_str());
+            // Getting through routers (net/nat.h).
+            const kh2coop::NatInfo nat = kh2coop::natInfo();
+            if (nat.hosting)
+            {
+                ImGui::TextWrapped("%s", nat.router.c_str());
+                if (!nat.share.empty())
                 {
-                    ImGui::BulletText("Player %d is playing (controller %d)", p, p);
-                    continue;
+                    ImGui::Text("Address to give the others: %s", nat.share.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy##share"))
+                        ImGui::SetClipboardText(nat.share.c_str());
                 }
-                char label[40];
-                std::snprintf(label, sizeof(label), "Add player %d", p);
-                if (ImGui::Button(label))
+                else
+                    ImGui::TextDisabled("Finding your public address...");
+                static char invite[64] = "";
+                textField("invite", "", "their address", invite, sizeof(invite), 180);
+                ImGui::SameLine();
+                if (ImGui::Button("Let in") && invite[0])
+                    kh2coop::letIn(invite);
+                ImGui::SetItemTooltip("If someone cannot get in: they send you the address their Co-op menu shows while "
+                                      "joining, you press Let in, and they press Join again (within 30 s)");
+            }
+            if (nat.connecting)
+            {
+                if (!nat.mine.empty())
                 {
-                    // In a session: the new window joins it (ours, or the one we
-                    // joined); otherwise we host first.
-                    const kh2coop::Options &co = kh2coop::options();
-                    if (!kh2coop::active() && !kh2coop::host(co.name, co.port))
-                        g_status = "Could not host: " + kh2coop::statusText();
-                    else
+                    ImGui::TextWrapped("Your address: %s. If joining does not work, send it to the host to Let in.",
+                                       nat.mine.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy##mine"))
+                        ImGui::SetClipboardText(nat.mine.c_str());
+                }
+                if (ImGui::Button("Cancel"))
+                    kh2coop::leave();
+            }
+            if (!kh2coop::active() && !nat.connecting)
+            {
+                textField("name", "Your name", nullptr, name, sizeof(g_coopName), 180);
+                if (ImGui::Button("Host"))
+                {
+                    kh2coop::host(name, kh2coop::options().port);
+                    save(); // remember the name
+                }
+                ImGui::SetItemTooltip("Others join with the address shown once hosting (UDP port %u; the router is asked "
+                                      "to open it)", unsigned(kh2coop::options().port));
+                ImGui::SameLine();
+                textField("addr", "", "host IP[:port]", address, sizeof(g_coopAddress), 180);
+                ImGui::SameLine();
+                if (ImGui::Button("Join") && address[0])
+                {
+                    kh2coop::join(name, address);
+                    save(); // remember the name and the address
+                }
+            }
+            else
+            {
+                const std::vector<kh2partner::Link> links = kh2partner::links();
+                for (const kh2coop::RemotePlayer &r : kh2coop::remotes())
+                {
+                    const char *where = "";
+                    for (const kh2partner::Link &l : links)
+                        if (l.playerId == r.id)
+                            where = l.slot == 1 ? "  - in your party (first companion)" : "  - in your party (second companion)";
+                    ImGui::BulletText("%s  %.0f ms%s", r.name.c_str(), r.rttMs, where);
+                }
+                if (!kh2coop::isHost())
+                {
+                    if (ImGui::Button("Go to the host's room"))
+                        kh2coop::warpToHost();
+                    ImGui::SameLine();
+                    bool follow = kh2coop::followHost();
+                    if (ImGui::Checkbox("Follow the host", &follow))
+                        kh2coop::setFollowHost(follow);
+                    ImGui::SetItemTooltip("Go to the host's room whenever they change rooms (when you are free to move)");
+                    bool shared = kh2coop::sharedEnemies();
+                    if (ImGui::Checkbox("Shared enemies", &shared))
+                        kh2coop::setSharedEnemies(shared);
+                    ImGui::SetItemTooltip("In the host's room, enemies are where the host's are, with the host's HP; your hits count for everyone");
+                    bool story = kh2coop::sharedStory();
+                    if (ImGui::Checkbox("Shared story", &story))
+                        kh2coop::setSharedStory(story);
+                    ImGui::SetItemTooltip("Play in the host's story: go where they go and watch their cutscenes (only the host skips). "
+                                          "Your own story, and your place in it, come back when you leave; saving keeps yours.");
+                }
+                if (kh2coop::isHost())
+                    scalingSliders();
+                else
+                    ImGui::TextDisabled("The host's enemies: HP +%.0f%%, damage +%.0f%% per extra player (%d players)",
+                                        kh2scale::hpPerPlayer() * 100.0f, kh2scale::damagePerPlayer() * 100.0f,
+                                        kh2scale::players());
+                bool puppets = kh2puppets::enabled();
+                if (ImGui::Checkbox("Show other players", &puppets))
+                    kh2puppets::setEnabled(puppets);
+                ImGui::SameLine();
+                ImGui::Checkbox("Name tags", &g_opt.nameTags);
+                if (ImGui::Button("Leave session"))
+                    kh2coop::leave();
+            }
+        }
+    }
+
+    if (section("Controls"))
+    {
+        int layout = kh2input::confirmOnBottom() ? 0 : 1;
+        const char *layouts[] = {"Bottom button confirms (international)", "Right button confirms (Japanese)"};
+        if (ImGui::Combo("Layout", &layout, layouts, 2))
+            kh2input::setConfirmOnBottom(layout == 0);
+        bool rumble = kh2input::rumbleEnabled();
+        if (ImGui::Checkbox("Vibration", &rumble))
+            kh2input::setRumbleEnabled(rumble);
+        bool mouse = kh2input::mouseCamera();
+        if (ImGui::Checkbox("Mouse camera (hold right button)", &mouse))
+            kh2input::setMouseCamera(mouse);
+        float sens = kh2input::mouseSensitivity();
+        if (ImGui::SliderFloat("Mouse sensitivity", &sens, 0.25f, 4.0f, "%.2f"))
+            kh2input::setMouseSensitivity(sens);
+        {
+            const std::string pad = kh2input::controllerName();
+            if (pad.empty())
+                ImGui::TextDisabled("No controller: keyboard (layout below)");
+            else
+                ImGui::TextDisabled("Controller: %s", pad.c_str());
+        }
+        drawKeyboard();
+    }
+
+        // Local multiplayer (local_players.h): a window per player on this PC.
+    if (section("Local players (this PC)"))
+    {
+        {
+            const int me = kh2local::player();
+            const char *pads[] = {"The first one found", "Controller 1", "Controller 2", "Controller 3", "Controller 4",
+                                  "None (keyboard only)"};
+            const int choice = kh2input::controller();
+            int item = choice == -1 ? 0 : choice == -2 ? 5 : choice + 1;
+            ImGui::SetNextItemWidth(200);
+            if (ImGui::Combo("This window's controller", &item, pads, 6))
+                kh2input::setController(item == 0 ? -1 : item == 5 ? -2 : item - 1);
+            ImGui::SetItemTooltip("Each window reads its own controller, also when it is not the active window "
+                                  "(the keyboard works in the active window)");
+            if (me > 1)
+                ImGui::TextWrapped("This window is local player %d (own memory card: %s). Close it to leave.", me,
+                                   kh2local::memoryCardFolder(me).c_str());
+            else
+            {
+                const std::vector<int> playing = kh2local::running();
+                for (int p = 2; p <= 3; ++p)
+                {
+                    if (std::find(playing.begin(), playing.end(), p) != playing.end())
                     {
-                        const std::string address =
-                            kh2coop::isHost() ? "127.0.0.1:" + std::to_string(co.port) : co.join;
-                        std::string err;
-                        g_status = kh2local::spawn(p, address, "Player " + std::to_string(p), p - 1, err)
-                                       ? "Player " + std::to_string(p) + " is starting (controller " +
-                                             std::to_string(p) + ")"
-                                       : "Player " + std::to_string(p) + ": " + err;
+                        ImGui::BulletText("Player %d is playing (controller %d)", p, p);
+                        continue;
                     }
+                    char label[40];
+                    std::snprintf(label, sizeof(label), "Add player %d", p);
+                    if (ImGui::Button(label))
+                    {
+                        // In a session: the new window joins it (ours, or the one we
+                        // joined); otherwise we host first.
+                        const kh2coop::Options &co = kh2coop::options();
+                        if (!kh2coop::active() && !kh2coop::host(co.name, co.port))
+                            g_status = "Could not host: " + kh2coop::statusText();
+                        else
+                        {
+                            const std::string address =
+                                kh2coop::isHost() ? "127.0.0.1:" + std::to_string(co.port) : co.join;
+                            std::string err;
+                            g_status = kh2local::spawn(p, address, "Player " + std::to_string(p), p - 1, err)
+                                           ? "Player " + std::to_string(p) + " is starting (controller " +
+                                                 std::to_string(p) + ")"
+                                           : "Player " + std::to_string(p) + ": " + err;
+                        }
+                    }
+                    ImGui::SetItemTooltip("Opens another game window for player %d, with controller %d and their own "
+                                          "memory card (%s); it joins this game. Its sound starts off (Volume, in its menu).",
+                                          p, p, kh2local::memoryCardFolder(p).c_str());
+                    ImGui::SameLine();
                 }
-                ImGui::SetItemTooltip("Opens another game window for player %d, with controller %d and their own "
-                                      "memory card (%s); it joins this game. Its sound starts off (Volume, in its menu).",
-                                      p, p, kh2local::memoryCardFolder(p).c_str());
-                ImGui::SameLine();
+                ImGui::NewLine();
             }
-            ImGui::NewLine();
+            if (ImGui::Button("Arrange windows"))
+            {
+                const int n = kh2local::arrangeWindows();
+                g_status = "Arranged " + std::to_string(n) + " window" + (n == 1 ? "" : "s");
+            }
+            ImGui::SetItemTooltip("Tile the game windows on this monitor (two side by side; three as one large and two "
+                                  "small). Each window also remembers where you put it.");
         }
-        if (ImGui::Button("Arrange windows"))
+    }
+    if (section("Unlocks (testing)", false))
+    {
+        const uint8_t *ram = g_runtime->memory().getRDRAM();
+        const std::vector<kh2unlock::Entry> sp = kh2unlock::spells(ram);
+        const std::vector<kh2unlock::Entry> fo = kh2unlock::forms(ram);
+        if (sp.empty() || fo.empty())
+            ImGui::TextDisabled("Load a save first.");
+        else
         {
-            const int n = kh2local::arrangeWindows();
-            g_status = "Arranged " + std::to_string(n) + " window" + (n == 1 ? "" : "s");
+            ImGui::TextDisabled("Learned in this game; save in game to keep them in the save file.");
+            ImGui::SeparatorText("Magic");
+            for (size_t i = 0; i < sp.size(); ++i)
+            {
+                ImGui::PushID(int(i));
+                const bool full = sp[i].have >= sp[i].max;
+                ImGui::BeginDisabled(full);
+                if (ImGui::Button(full ? "Max" : "+1 level", ImVec2(90, 0)))
+                    kh2unlock::giveSpell(int(i));
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::Text("%s  (level %d/%d)", sp[i].name.c_str(), sp[i].have, sp[i].max);
+                ImGui::PopID();
+            }
+            ImGui::SeparatorText("Drive forms");
+            for (size_t i = 0; i < fo.size(); ++i)
+            {
+                ImGui::PushID(100 + int(i));
+                const bool have = fo[i].have > 0;
+                ImGui::BeginDisabled(have);
+                if (ImGui::Button(have ? "Learned" : "Learn", ImVec2(90, 0)))
+                    kh2unlock::giveForm(int(i));
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::Text("%s", fo[i].name.c_str());
+                ImGui::PopID();
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Unlock everything"))
+                kh2unlock::giveAll();
+            ImGui::SetItemTooltip("Every spell at level 3, every drive form, and a full 9-bar drive gauge.");
+            ImGui::SameLine();
+            if (ImGui::Button("Fill drive gauge"))
+                kh2unlock::fillDrive();
+            ImGui::SetItemTooltip("Drive gauge to 9 of 9 bars.");
         }
-        ImGui::SetItemTooltip("Tile the game windows on this monitor (two side by side; three as one large and two "
-                              "small). Each window also remembers where you put it.");
     }
 
     ImGui::Separator();

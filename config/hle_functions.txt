@@ -43,3 +43,4 @@
 0x00170950    CACHE_BUFF::Free          avatars.cpp (our player motion file kept)
 0x0016C060    object face entries       avatars.cpp (a place holder's face is its avatar's)
 0x00155300    GAUGE_FRIEND set member   avatars.cpp (face read again once the avatar exists)
+0x001BC2A8    command state (menu)      partners.cpp (KH2_LOG_COMMANDS diagnostics)

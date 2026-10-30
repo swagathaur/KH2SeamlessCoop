@@ -703,6 +703,30 @@ void formMembersHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_formMembers, rdram, ctx, runtime);
 }
 
+// Diagnostics (KH2_LOG_COMMANDS=1): FUN_001BC2A8(elem, player, ...), a
+// command's state in the menu (0: usable, 2: short of MP, 5: greyed), logged
+// when it changes, by command id (elem +2).
+constexpr uint32_t kCommandState = 0x001BC2A8;
+PS2Runtime::RecompiledFunction g_commandState = nullptr;
+void commandStateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t elem = getRegU32(ctx, 4);
+    uint32_t id = 0;
+    if (elem >= 0x00100000u && elem < 0x02000000u)
+        std::memcpy(&id, rdram + elem, 4); // u16 +0, u16 +2
+    const uint32_t ra = getRegU32(ctx, 31);
+    kh2::callOriginal(g_commandState, rdram, ctx, runtime);
+    static std::map<uint32_t, uint32_t> last;
+    const uint32_t v = getRegU32(ctx, 2);
+    auto it = last.find(id);
+    if (it == last.end() || it->second != v)
+    {
+        last[id] = v;
+        std::printf("[partner] command %08X (elem %08X) is now %u (from %08X)\n", id, elem, v, ra);
+        std::fflush(stdout);
+    }
+}
+
 void sacrificeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (g_linked.load(std::memory_order_relaxed) || g_formsFree.load(std::memory_order_relaxed))
@@ -810,6 +834,12 @@ bool install(PS2Runtime &runtime)
         std::fprintf(stderr, "[partner] could not hook 0x%08X\n", kSacrifice);
         g_sacrifice = nullptr;
         return false;
+    }
+    if (const char *e = std::getenv("KH2_LOG_COMMANDS"); e && *e == '1')
+    {
+        g_commandState = runtime.lookupFunction(kCommandState);
+        if (!g_commandState || !runtime.replaceFunction(kCommandState, &commandStateHook))
+            g_commandState = nullptr;
     }
     g_formMembers = runtime.lookupFunction(kFormMembers);
     if (!g_formMembers || !runtime.replaceFunction(kFormMembers, &formMembersHook))

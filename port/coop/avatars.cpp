@@ -64,6 +64,7 @@ double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
 std::atomic<uint32_t> g_ourPlayerShared{0};
 std::atomic<uint32_t> g_avatarObjs[kMaxAvatars] = {}; // for the EE-side hooks
+std::atomic<bool> g_avatarPending{false}; // an avatar's spawn job is under way
 
 // YS::PLAYER::_OVR_control (0x00178888): a player's per-frame command menu
 // update (the command object at +0xB3C, which every player object points
@@ -143,8 +144,12 @@ bool unlinkPlayer(uint8_t *rdram, uint32_t obj)
                 std::memcpy(&tail, rdram + list + 4, 4);
                 if (tail == obj)
                     std::memcpy(rdram + list + 4, &prev, 4);
-                const uint32_t zero = 0;
-                std::memcpy(rdram + ((obj + 0x8B4) & 0x01FFFFFFu), &zero, 4);
+                // (Its own next is left as it is: the game may be walking
+                // the list as it kills objects (a cutscene's start kills
+                // the players: ours too, to remake it with the event's
+                // files). A next of 0 here ended that walk at the avatar,
+                // our player lived on with its motion file refilled under
+                // it, and crashed at 0x0017FE84.)
                 found = true;
                 break;
             }
@@ -268,6 +273,33 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         ctx->pc = getRegU32(ctx, 31);
         return;
     }
+    // (Diagnostics: the frees for a few seconds after an avatar's teardown.)
+    if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 4000)
+    {
+        const uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t h = 0;
+        std::memcpy(&h, rdram + kCacheHeaders, 4);
+        char name[40] = {};
+        uint16_t refs = 0;
+        uint32_t found = 0;
+        for (int i = 0; i < 400 && h >= 0x00100000u && h < 0x02000000u; ++i)
+        {
+            uint32_t data = 0, next = 0;
+            std::memcpy(&data, rdram + h + 0x30, 4);
+            std::memcpy(&next, rdram + h + 0x3C, 4);
+            if (h == a0 || data == a0)
+            {
+                found = h;
+                std::memcpy(&refs, rdram + h + 2, 2);
+                std::memcpy(name, rdram + h + 4, 39);
+                break;
+            }
+            h = next;
+        }
+        std::printf("[avatars] free %08X (header %08X %s refs %u) from %08X, %lld ms after a teardown\n", a0, found, name,
+                    unsigned(refs), getRegU32(ctx, 31), static_cast<long long>(sinceTeardown));
+        std::fflush(stdout);
+    }
     kh2::callOriginal(g_cacheFree, rdram, ctx, runtime);
 }
 
@@ -302,7 +334,39 @@ std::atomic<uint32_t> g_faceProxy[kMaxAvatars] = {}, g_faceAvatar[kMaxAvatars] =
 void objFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t obj = getRegU32(ctx, 4);
+    // Asked of an avatar itself: the HUD's own gauge, while the HUD pointed
+    // at a new avatar for a moment (one in a drive form gave us its face).
+    // Ours answers.
+    bool ownGauge = false;
     if (ctx->pc == kObjFace && obj)
+        for (uint32_t i = 0; i < kMaxAvatars; ++i)
+            if (g_faceAvatar[i].load(std::memory_order_relaxed) == obj || g_avatarObjs[i].load(std::memory_order_relaxed) == obj)
+            {
+                if (const uint32_t ours = g_ourPlayerShared.load())
+                    SET_GPR_U32(ctx, 4, ours);
+                ownGauge = true;
+                break;
+            }
+    // (One still being made is not listed yet: while one is, any
+    // player-class object but ours is it.)
+    if (ctx->pc == kObjFace && obj && !ownGauge && g_avatarPending.load(std::memory_order_relaxed))
+    {
+        const uint32_t ours = g_ourPlayerShared.load();
+        uint32_t entry = 0;
+        std::memcpy(&entry, rdram + ((obj + kh2state::addr::ObjEntry) & 0x01FFFFFFu), 4);
+        if (ours && obj != ours && entry >= 0x00100000u && entry < 0x02000000u && rdram[entry + 4] == 0)
+        {
+            bool proxy = false;
+            for (uint32_t i = 0; i < kMaxAvatars; ++i)
+                proxy = proxy || g_faceProxy[i].load(std::memory_order_relaxed) == obj;
+            if (!proxy)
+            {
+                SET_GPR_U32(ctx, 4, ours);
+                ownGauge = true;
+            }
+        }
+    }
+    if (ctx->pc == kObjFace && obj && !ownGauge)
         for (uint32_t i = 0; i < kMaxAvatars; ++i)
             if (g_faceProxy[i].load(std::memory_order_relaxed) == obj)
             {
@@ -574,6 +638,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     if (player && !ourKnown && live(rdram, player))
         g_ourPlayer = player;
     g_ourPlayerShared = g_ourPlayer;
+    {
+        bool pending = false;
+        for (auto &[id, s2] : g_states)
+            pending = pending || s2.pending;
+        g_avatarPending = pending;
+    }
     g_ourPlayerForFree = g_states.empty() ? 0u : g_ourPlayer; // (only with avatars about)
     const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
     const bool cutscene = st.control == 3;
@@ -607,10 +677,10 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // avatar were half there in a crowded room (a mission) when it was
         // made, and its motion crashed; and the form's files our player has
         // (if we are in it too) go when we revert, under the avatar.
-        // (KH2_AVATAR_FORMS=1: the form's look anyway.)
-        static const bool forms = [] {
+        // (Now on by default: KH2_AVATAR_FORMS=0 gives the base look.)
+        static const bool forms = [] { // on unless KH2_AVATAR_FORMS=0
             const char *e = std::getenv("KH2_AVATAR_FORMS");
-            return e && *e == '1';
+            return !(e && *e == '0');
         }();
         if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
             if (s.plainLook || !forms)

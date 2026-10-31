@@ -701,6 +701,7 @@ struct Harness
     uint64_t lastShotFrame = UINT64_MAX;
     uint64_t prevTickFrame = UINT64_MAX;
     uint64_t lastDumpFrame = UINT64_MAX;
+    uint64_t liveDumpAt = 0; // live "gsdump": dump at this frame (0: none)
     uint64_t lastGpuFrame = UINT64_MAX;
     uint64_t lastEeDumpFrame = UINT64_MAX;
     uint64_t lastStackDumpFrame = UINT64_MAX;
@@ -982,6 +983,8 @@ void dumpGs(Harness &h, uint64_t frame)
 //   warp WORLD ROOM [BTL EVT]                  (decimal, as --warp-test)
 //   tp X Y Z                                   put the player there
 //   dump                                       all 32 MB of RAM to SHOTS/ram_N.bin
+//   gifcap                                     the next frame of GIF packets (as --gif-capture)
+//   gsdump                                     GS registers, draws and memory (as --gs-dump) 3 frames on
 //   echo TEXT                                  "[control] echo TEXT" (a marker to wait for)
 //   partner on|off                             the Echo test partner (as --partner-test)
 //   freeze ADDR HEXBYTES | unfreeze ADDR       write those bytes every frame (e.g. full HP)
@@ -1101,6 +1104,25 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             char name[64];
             std::snprintf(name, sizeof(name), "frame_%06llu.png", (unsigned long long)frame);
             say(std::string("shot ") + name);
+        }
+        else if (cmd == "gifcap")
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(o.shotDir, ec);
+            char name[64];
+            std::snprintf(name, sizeof(name), "gif_%06llu.bin", (unsigned long long)frame);
+            kh2pgs::requestGifCapture((std::filesystem::path(o.shotDir) / name).string());
+            say(std::string("gifcap ") + name);
+        }
+        else if (cmd == "gsdump")
+        {
+            // GS registers, the last frame's draws and all of GS memory, a
+            // few frames on (the history records from now)
+            std::error_code ec;
+            std::filesystem::create_directories(o.shotDir, ec);
+            h.runtime->gs().setDebugHistoryPaused(false);
+            h.liveDumpAt = frame + 3;
+            say("gsdump at f" + std::to_string(frame + 3));
         }
         else if (cmd == "state")
         {
@@ -1402,6 +1424,14 @@ bool harnessTick(Harness &h, uint64_t frame)
     {
         h.lastDumpFrame = frame;
         dumpGs(h, frame);
+    }
+    else if (h.liveDumpAt && frame >= h.liveDumpAt)
+    {
+        h.liveDumpAt = 0;
+        h.lastDumpFrame = frame;
+        dumpGs(h, frame);
+        if (o.gsDumpAt.empty())
+            h.runtime->gs().setDebugHistoryPaused(true);
     }
     if (o.arrangeAt && due(o.arrangeAt))
         std::printf("[local] arranged %d windows\n", kh2local::arrangeWindows());

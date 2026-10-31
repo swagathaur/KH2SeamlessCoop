@@ -1,0 +1,15 @@
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -749,6 +749,12 @@
+         mem.writeIORegister(GIF_CHANNEL + 0x20u, 5u);
+         mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+         mem.processPendingTransfers();
++        // The kick above may have gone to the DMA worker (PS2X_ASYNC_DMA 2/3
++        // hand any GIF kick over), behind the uploads queued before it: the
++        // read back happens there, in order. Wait for it, or the guest gets
++        // what an earlier read left (KH2's radar map, read back from the
++        // 4-bit picture it has just uploaded, came out as an old screen).
++        mem.waitDmaIdle(PS2Memory::WaitGsStub, getRegU32(ctx, 31));
+ 
+         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
+         if (std::getenv("PS2_STOREIMAGE_LOG"))

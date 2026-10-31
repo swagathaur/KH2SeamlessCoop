@@ -212,17 +212,41 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             std::printf("[avatars] %08X wore our look: its motion's shared parts left alone\n", obj);
             std::fflush(stdout);
+            // Only what our player's motion really uses too is left alone:
+            // the rest is the avatar's own (an instance left out of the
+            // teardown stayed linked in the game's list of them, 0x00347930,
+            // after its memory went with the room: the next room change
+            // walked that list forever at 0x0011C470).
             const uint32_t motion = (obj + 0x140) & 0x01FFFFFFu;
+            const uint32_t oursMotion = (g_ourPlayerShared.load(std::memory_order_relaxed) + 0x140) & 0x01FFFFFFu;
             const uint32_t zero = 0;
-            for (uint32_t i = 0; i < 8; ++i)
-                std::memcpy(rdram + motion + 0x108 + i * 8, &zero, 4);
-            std::memcpy(rdram + motion + 0x148, &zero, 4);
-            std::memcpy(rdram + motion + 0x194, &zero, 4);
+            auto shared = [&](uint32_t off, uint32_t count, uint32_t stride) {
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    uint32_t mine = 0;
+                    std::memcpy(&mine, rdram + motion + off + i * stride, 4);
+                    if (!mine)
+                        continue;
+                    for (uint32_t j = 0; j < count; ++j)
+                    {
+                        uint32_t theirs = 0;
+                        std::memcpy(&theirs, rdram + oursMotion + off + j * stride, 4);
+                        if (theirs == mine)
+                        {
+                            std::memcpy(rdram + motion + off + i * stride, &zero, 4);
+                            break;
+                        }
+                    }
+                }
+            };
+            shared(0x108, 8, 8);
+            shared(0x148, 1, 4);
+            shared(0x194, 1, 4);
             // (and the chain FUN_00180EF0 marks, +0x18C/+0x190: its entries
             // are in the motion file, which a cutscene starting has just
             // filled anew for our player)
-            std::memcpy(rdram + motion + 0x18C, &zero, 4);
-            std::memcpy(rdram + motion + 0x190, &zero, 4);
+            shared(0x18C, 1, 4);
+            shared(0x190, 1, 4);
         }
         g_avatarTornAt = nowMs();
         ctx->pc = kObjTeardown; // (a0 and ra as they are: a tail call)
@@ -645,6 +669,32 @@ void formTaskHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_formTaskBody, rdram, ctx, runtime);
 }
 
+// An angle wrapped into (-pi, pi] (FUN_0011C050: adds or takes 2 pi until it
+// is): an angle of 1e30 from garbage (a model drawn from data not its own)
+// never got there, and the game's main thread spun in it for good. Large or
+// not-a-number angles are wrapped at once (0 for not-a-number).
+constexpr uint32_t kWrapAngle = 0x0011C050;
+PS2Runtime::RecompiledFunction g_wrapAngle = nullptr;
+void wrapAngleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const float x = ctx->f[12];
+    if (ctx->pc == kWrapAngle && !(x > -64.0f && x < 64.0f))
+    {
+        constexpr double kTwoPi = 6.283185307179586;
+        double v = std::isfinite(x) ? std::remainder(double(x), kTwoPi) : 0.0;
+        ctx->f[0] = float(v);
+        static int logged = 0;
+        if (logged++ < 10)
+        {
+            std::printf("[avatars] an angle of %g wrapped at once (from %08X)\n", double(x), getRegU32(ctx, 31));
+            std::fflush(stdout);
+        }
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_wrapAngle, rdram, ctx, runtime);
+}
+
 // (Diagnostics: an animation step (FUN_00128480(a0, a1)) through a1+0x14
 // whose vtable slot +0x20 is empty: whose, and what the avatars are.)
 constexpr uint32_t kAnimStep = 0x00128480;
@@ -760,6 +810,9 @@ void longJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_wrapAngle = runtime.lookupFunction(kWrapAngle);
+    if (!g_wrapAngle || !runtime.replaceFunction(kWrapAngle, &wrapAngleHook))
+        g_wrapAngle = nullptr;
     g_animStep = runtime.lookupFunction(kAnimStep);
     if (!g_animStep || !runtime.replaceFunction(kAnimStep, &animStepHook))
         g_animStep = nullptr;
@@ -977,6 +1030,69 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         const uint32_t rec = rd<uint32_t>(rdram, g_ourPlayer + kh2state::addr::ObjEntry);
         ourInForm = inRam(rec) && kh2partner::formBaseLook(rdram, uint16_t(rd<uint32_t>(rdram, rec) & 0xFFFF)) != 0;
     }
+    // (Diagnostics, KH2_FORM_WATCH=1: our form player's motion (+0x140,
+    // 0x1A0 bytes), its helper's vtable and its animation instances' handlers,
+    // each frame; what changed when they go bad.)
+    {
+        static const bool watch = [] {
+            const char *e = std::getenv("KH2_FORM_WATCH");
+            return e && *e == '1';
+        }();
+        static uint32_t watched = 0;
+        static std::vector<uint32_t> last;
+        static int reports = 0;
+        if (watch && ourInForm && g_ourPlayer && reports < 6)
+        {
+            auto rd64 = [&](uint32_t x) {
+                uint32_t v = 0;
+                std::memcpy(&v, rdram + (x & 0x03FFFFFFu), 4);
+                return v;
+            };
+            auto ok = [](uint32_t x) { return x >= 0x00100000u && x < 0x04000000u; };
+            const uint32_t mo = g_ourPlayer + 0x140;
+            std::vector<uint32_t> now;
+            for (uint32_t o = 0; o < 0x1A0; o += 4)
+                now.push_back(rd64(mo + o));
+            const uint32_t helper = rd64(mo + 0xC);
+            now.push_back(ok(helper) ? rd64(helper) : 0); // helper vtable
+            for (uint32_t i = 0; i < 8; ++i)
+            {
+                const uint32_t inst = rd64(mo + 0x108 + i * 8);
+                const uint32_t h = ok(inst) ? rd64(inst + 0x14) : 0;
+                now.push_back(ok(inst) ? rd64(inst) : 0);
+                now.push_back(ok(h) ? rd64(h) : 0); // handler vtable
+            }
+            if (watched == g_ourPlayer && last.size() == now.size())
+            {
+                std::string d;
+                bool deep = false;
+                for (size_t k = 0x68; k < now.size(); ++k)
+                    deep = deep || now[k] != last[k];
+                for (size_t k = 0; k < now.size() && deep; ++k)
+                    if (now[k] != last[k])
+                    {
+                        char b[48];
+                        std::snprintf(b, sizeof b, " %s%zX:%08X->%08X", k < 0x68 ? "+" : "x", k < 0x68 ? k * 4 : k - 0x68,
+                                      last[k], now[k]);
+                        d += b;
+                    }
+                bool bad = !ok(now[0x68]) || now[0x68] == 0x00347B88u;
+                for (uint32_t i = 0; i < 8; ++i)
+                    if (now[0x69 + i * 2] && !now[0x6A + i * 2])
+                        bad = true;
+                if (!d.empty() && d.size() < 1500)
+                {
+                    static int lines = 0;
+                    if (lines++ < 400)
+                        std::printf("[watch] our form player %08X motion changed:%s%s\n", g_ourPlayer, d.c_str(), bad ? "  BAD" : "");
+                }
+                if (bad)
+                    ++reports;
+            }
+            watched = g_ourPlayer;
+            last = now;
+        }
+    }
     uint32_t sheetIndex = 0;
     for (const kh2partner::Remote &r : remotes)
     {
@@ -1054,15 +1170,10 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // null call in our motion), its making let go of our form's.
         if (s.baseKept && !live(rdram, s.baseKept))
             s.baseKept = 0;
-        // While we are in a form their look stays as it is: their avatar is
-        // not made, put aside or torn down, and no look of theirs is read
-        // (each of those let go of, or read over, our form player's motion
-        // data: pure virtual and null calls in our motion). Their new look
-        // comes once we have reverted.
-        if (here && !cutscene && ourInForm && (s.object || s.pending) && s.entry != want)
-            continue;
-        if (here && !cutscene && ourInForm && !s.object && !s.pending && kh2partner::formBaseLook(rdram, want) != 0)
-            continue;
+        // (Their look changes while we are in a form too: their form
+        // files are read into kh2formcache's batches, out of our form
+        // files' way, and their old avatar's teardown leaves alone only what
+        // our player's motion really shares.)
         if (here && !cutscene && s.object && s.entry != want)
         {
             const bool oldBase = kh2partner::formBaseLook(rdram, s.entry) == 0;

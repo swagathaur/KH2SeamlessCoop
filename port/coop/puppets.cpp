@@ -271,6 +271,24 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
                             std::printf("[puppets] making %04X: %08X %08X -> %08X\n", entry, base + o, was, now);
                         }
                     }
+                    // (The player's own block at 0x01C5FFE0-0x01C60040, beside
+                    // the player pointers 0x01C60018/0x01C60024: the objects
+                    // that go with the player (its weapons, its motion's), set
+                    // to the new object's. Our next drive took the avatar's:
+                    // our form player's first frames called through nothing.)
+                    if (base + o >= 0x01C5FFE0u && base + o < 0x01C60040u && was != now && now >= 0x01A00000u &&
+                        now < 0x01C00000u && now != st->obj)
+                    {
+                        std::memcpy(env.host(base + o), &was, 4);
+                        static int told = 0;
+                        if (told++ < 40)
+                        {
+                            std::printf("[puppets] making %04X set the player's %08X (%08X -> %08X): back\n", entry,
+                                        base + o, was, now);
+                            std::fflush(stdout);
+                        }
+                        continue;
+                    }
                     if (was == st->player && now == st->obj)
                     {
                         std::memcpy(env.host(base + o), &st->player, 4);

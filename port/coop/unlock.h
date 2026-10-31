@@ -17,11 +17,11 @@ struct Entry
 };
 // What the save has now (empty before the game's tables are loaded).
 std::vector<Entry> spells(const uint8_t *rdram); // Fire, Blizzard, Thunder, Cure, Magnet, Reflect
-std::vector<Entry> forms(const uint8_t *rdram);  // Valor, Wisdom, Limit, Master, Final
+std::vector<Entry> forms(const uint8_t *rdram);  // Valor, Wisdom, Limit, Master, Final, Anti
 
 // Requests (any thread; done on the game's thread by tick()).
 void giveSpell(int slot); // one more of its element item: the next level
-void giveForm(int index); // 0..4 as forms()
+void giveForm(int index); // 0..5 as forms()
 void giveAll();           // every spell at level 3, every form, drive 9/9
 void fillDrive();         // drive gauge 9/9
 

@@ -28,7 +28,10 @@ constexpr uint32_t kFormItems = 0x0036D458;
 constexpr uint32_t kSlot1 = 0x01C6C750;
 
 const char *const kSpellNames[6] = {"Fire", "Blizzard", "Thunder", "Cure", "Magnet", "Reflect"};
-const char *const kFormNames[5] = {"Valor Form", "Wisdom Form", "Limit Form", "Master Form", "Final Form"};
+// (Anti Form too: its item (0x1E) is in the table after Final Form, and once
+// owned the Drive menu offers it like the others.)
+constexpr int kForms = 6;
+const char *const kFormNames[kForms] = {"Valor Form", "Wisdom Form", "Limit Form", "Master Form", "Final Form", "Anti Form"};
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
 {
@@ -130,7 +133,7 @@ std::vector<Entry> spells(const uint8_t *ram)
 std::vector<Entry> forms(const uint8_t *ram)
 {
     std::vector<Entry> out;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < kForms; ++i)
     {
         const int have = owned(ram, formItem(ram, i));
         if (have < 0)
@@ -159,7 +162,7 @@ std::string apply(uint8_t *ram)
     for (int slot = 0; slot < 6; ++slot)
         if (const uint16_t item = spellItem(ram, slot))
             spellsDone += give(ram, item, 3) ? 1 : 0;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < kForms; ++i)
         formsDone += give(ram, formItem(ram, i), 1) ? 1 : 0;
     if (!spellsDone && !formsDone)
         return {};
@@ -186,7 +189,7 @@ void tick(uint8_t *ram, uint64_t guestFrame)
                     say(std::string(kSpellNames[slot]) + " is now level " + std::to_string(have + 1));
             }
     for (int i : formReq)
-        if (i >= 0 && i < 5 && give(ram, formItem(ram, i), 1))
+        if (i >= 0 && i < kForms && give(ram, formItem(ram, i), 1))
             say(std::string(kFormNames[i]) + " learned");
     if (g_driveRequested.exchange(false))
     {

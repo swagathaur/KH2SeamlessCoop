@@ -1054,6 +1054,15 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // null call in our motion), its making let go of our form's.
         if (s.baseKept && !live(rdram, s.baseKept))
             s.baseKept = 0;
+        // While we are in a form their look stays as it is: their avatar is
+        // not made, put aside or torn down, and no look of theirs is read
+        // (each of those let go of, or read over, our form player's motion
+        // data: pure virtual and null calls in our motion). Their new look
+        // comes once we have reverted.
+        if (here && !cutscene && ourInForm && (s.object || s.pending) && s.entry != want)
+            continue;
+        if (here && !cutscene && ourInForm && !s.object && !s.pending && kh2partner::formBaseLook(rdram, want) != 0)
+            continue;
         if (here && !cutscene && s.object && s.entry != want)
         {
             const bool oldBase = kh2partner::formBaseLook(rdram, s.entry) == 0;

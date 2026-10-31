@@ -262,6 +262,15 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
                     uint32_t was = 0, now = 0;
                     std::memcpy(&was, st->globals[i].data() + o, 4);
                     std::memcpy(&now, env.host(base + o), 4);
+                    {
+                        static int diffs = 0;
+                        if (was != now && now != 0 && (now & 3) == 0 && now >= 0x00100000u && now < 0x02000000u &&
+                            diffs < 300 && std::getenv("KH2_SPAWN_DIFF"))
+                        {
+                            ++diffs;
+                            std::printf("[puppets] making %04X: %08X %08X -> %08X\n", entry, base + o, was, now);
+                        }
+                    }
                     if (was == st->player && now == st->obj)
                     {
                         std::memcpy(env.host(base + o), &st->player, 4);

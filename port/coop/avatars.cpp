@@ -58,6 +58,9 @@ struct State
     bool plainLook = false;  // their form's look did not load here: their own look instead (a while)
     double plainSince = 0;   // (their form tried again 20 s after)
     bool hiddenForCut = false; // hidden while a cutscene plays
+    uint32_t parked = 0;       // its old avatar, hidden, torn down once we revert (we were in a form)
+    uint32_t baseKept = 0;     // their base-look avatar, hidden while they wear a form
+    uint16_t baseEntry = 0;
     int64_t spawnAskedMs = -100000; // when its making was asked (ms)
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
@@ -67,7 +70,8 @@ uint16_t g_room = 0xFFFF;
 double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
 std::atomic<uint32_t> g_ourPlayerShared{0};
-std::atomic<uint32_t> g_avatarObjs[kMaxAvatars] = {}; // for the EE-side hooks
+constexpr uint32_t kAvatarObjSlots = 12;
+std::atomic<uint32_t> g_avatarObjs[kAvatarObjSlots] = {}; // for the EE-side hooks (also those put aside)
 std::atomic<int64_t> g_avatarMadeAt{-100000}; // an avatar was being made (ms)
 bool g_heldDrive = false;                      // our Drive greyed for it
 std::atomic<bool> g_avatarPending{false}; // an avatar's spawn job is under way
@@ -195,7 +199,19 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         // motion uses when the avatar wears our look; the motion teardown
         // (FUN_00180CE0) released them and our player's animation was gone
         // (a crash at 0x0017FE84). A few bytes are left behind instead.
+        // (Only when it does wear our look: its motion set's data is our
+        // player's. A form look of its own (kh2formcache) shares nothing:
+        // left behind, its animation instances went on being stepped after
+        // its files were let go, from another file's data.)
+        uint32_t ourSet = 0;
+        if (const uint32_t ours = g_ourPlayerShared.load(std::memory_order_relaxed))
+            std::memcpy(&ourSet, rdram + ((ours + 0x140) & 0x01FFFFFFu), 4);
+        uint32_t itsSet = 0;
+        std::memcpy(&itsSet, rdram + ((obj + 0x140) & 0x01FFFFFFu), 4);
+        if (itsSet && itsSet == ourSet)
         {
+            std::printf("[avatars] %08X wore our look: its motion's shared parts left alone\n", obj);
+            std::fflush(stdout);
             const uint32_t motion = (obj + 0x140) & 0x01FFFFFFu;
             const uint32_t zero = 0;
             for (uint32_t i = 0; i < 8; ++i)
@@ -629,6 +645,59 @@ void formTaskHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_formTaskBody, rdram, ctx, runtime);
 }
 
+// (Diagnostics: an animation step (FUN_00128480(a0, a1)) through a1+0x14
+// whose vtable slot +0x20 is empty: whose, and what the avatars are.)
+constexpr uint32_t kAnimStep = 0x00128480;
+PS2Runtime::RecompiledFunction g_animStep = nullptr;
+void animStepHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kAnimStep)
+    {
+        const uint32_t a0 = getRegU32(ctx, 4), a1 = getRegU32(ctx, 5);
+        auto rd64 = [&](uint32_t x) {
+            uint32_t v = 0;
+            std::memcpy(&v, rdram + (x & 0x03FFFFFFu), 4);
+            return v;
+        };
+        auto ok = [](uint32_t x) { return x >= 0x00100000u && x < 0x04000000u; };
+        const uint32_t h = ok(a1) ? rd64(a1 + 0x14) : 0;
+        const uint32_t vt = ok(h) ? rd64(h) : 0;
+        const uint32_t fn = ok(vt) ? rd64(vt + 0x20) : 0;
+        if (!fn)
+        {
+            static int logged = 0;
+            if (logged++ < 6)
+            {
+                std::string av;
+                for (const auto &o : g_avatarObjs)
+                    if (const uint32_t v = o.load())
+                    {
+                        char b[12];
+                        std::snprintf(b, sizeof b, " %08X", v);
+                        av += b;
+                    }
+                const uint32_t sp = getRegU32(ctx, 29);
+                std::string trail;
+                for (uint32_t o = 0; o < 0x200 && inRam(sp + o); o += 4)
+                {
+                    const uint32_t v = rd<uint32_t>(rdram, sp + o);
+                    if (v >= 0x00100000u && v < 0x00380000u && (v & 3) == 0)
+                    {
+                        char b[12];
+                        std::snprintf(b, sizeof b, " %08X", v);
+                        trail += b;
+                    }
+                }
+                std::printf("[avatars] animation step with no handler: a0 %08X a1 %08X (+0x14 %08X vt %08X) ra %08X s0 %08X s1 %08X s2 %08X s3 %08X; our player %08X; avatars%s; stack%s\n",
+                            a0, a1, h, vt, getRegU32(ctx, 31), getRegU32(ctx, 16), getRegU32(ctx, 17), getRegU32(ctx, 18),
+                            getRegU32(ctx, 19), g_ourPlayerShared.load(), av.c_str(), trail.c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
+    kh2::callOriginal(g_animStep, rdram, ctx, runtime);
+}
+
 // (Diagnostics: a pure virtual call (0x003155C0) ends the game's main
 // thread: where it came from, and the code addresses on the stack.)
 constexpr uint32_t kPureVirtual = 0x003155C0;
@@ -691,6 +760,9 @@ void longJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_animStep = runtime.lookupFunction(kAnimStep);
+    if (!g_animStep || !runtime.replaceFunction(kAnimStep, &animStepHook))
+        g_animStep = nullptr;
     g_formTaskBody = runtime.lookupFunction(kFormTaskBody);
     if (!g_formTaskBody || !runtime.replaceFunction(kFormTaskBody, &formTaskHook))
         g_formTaskBody = nullptr;
@@ -975,16 +1047,81 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // model: invisible, drawn from null.)
         if (here && !cutscene && s.object && s.entry != want && ourDriveBusy)
             continue;
+        // Their base-look avatar is kept for the room: put aside (hidden)
+        // while they wear a form, shown again when they revert. Made and torn
+        // down with every drive, a base player object shares our own
+        // player's motion data: its teardown let go of our animation (a
+        // null call in our motion), its making let go of our form's.
+        if (s.baseKept && !live(rdram, s.baseKept))
+            s.baseKept = 0;
+        if (here && !cutscene && s.object && s.entry != want)
+        {
+            const bool oldBase = kh2partner::formBaseLook(rdram, s.entry) == 0;
+            const bool newBase = kh2partner::formBaseLook(rdram, want) == 0;
+            if (oldBase && !newBase && !s.baseKept)
+            {
+                std::printf("[avatars] player %u's base avatar %08X kept aside (hidden) while they are in a form\n",
+                            r.playerId + 1, s.object);
+                std::fflush(stdout);
+                hide(rdram, s.object, t);
+                s.baseKept = s.object;
+                s.baseEntry = s.entry;
+                s.object = 0;
+                s.prepared = false;
+                s.motion = 0xFFFF;
+            }
+            else if (!oldBase && newBase && s.baseKept && s.baseEntry == want && (!ourInForm || !s.parked))
+            {
+                if (ourInForm)
+                {
+                    hide(rdram, s.object, t);
+                    s.parked = s.object; // (torn down once we revert)
+                }
+                else
+                    removeAvatar(rdram, s.object);
+                std::printf("[avatars] player %u's base avatar %08X back (they reverted)\n", r.playerId + 1, s.baseKept);
+                std::fflush(stdout);
+                show(rdram, s.baseKept);
+                s.object = s.baseKept;
+                s.entry = want;
+                s.baseKept = 0;
+                s.prepared = false;
+                s.motion = 0xFFFF;
+                s.quietUntil = t + 0.5;
+                continue;
+            }
+        }
         // (Nor is a base look made while we are in a form: a base player
         // object made then let go of our form player's motion (its helper
         // called through nothing). The old look stays until we revert.)
-        if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 &&
-            (!s.object || s.entry != want))
+        if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 && !s.object && !s.pending)
+            continue;
+        // Nor is one torn down while we are in a form: its teardown let go of
+        // motion data our form player still used (a pure virtual call in our
+        // motion). For a new form look the old avatar is put aside, hidden,
+        // and torn down once we have reverted; a base look waits for that.
+        if (here && !cutscene && ourInForm && s.object && s.entry != want)
         {
-            if (s.object)
+            if (kh2partner::formBaseLook(rdram, want) == 0 || s.parked)
                 continue;
-            if (!s.pending)
-                continue;
+            std::printf("[avatars] player %u's avatar %08X put aside (hidden) until we revert: a new look meanwhile\n",
+                        r.playerId + 1, s.object);
+            std::fflush(stdout);
+            hide(rdram, s.object, t);
+            s.parked = s.object;
+            s.object = 0;
+            s.prepared = false;
+            s.motion = 0xFFFF;
+        }
+        if (s.parked && (!live(rdram, s.parked) || (!ourInForm && !ourDriveBusy)))
+        {
+            if (live(rdram, s.parked))
+            {
+                std::printf("[avatars] player %u's avatar %08X put aside goes (we reverted)\n", r.playerId + 1, s.parked);
+                std::fflush(stdout);
+                removeAvatar(rdram, s.parked);
+            }
+            s.parked = 0;
         }
         if (!here || cutscene || (s.object && s.entry != want))
         {
@@ -1223,6 +1360,10 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         {
             if (it->second.object)
                 removeAvatar(rdram, it->second.object);
+            if (it->second.parked && live(rdram, it->second.parked))
+                removeAvatar(rdram, it->second.parked);
+            if (it->second.baseKept && live(rdram, it->second.baseKept))
+                removeAvatar(rdram, it->second.baseKept);
             if (it->second.proxy && live(rdram, it->second.proxy))
                 show(rdram, it->second.proxy);
             it = g_states.erase(it);
@@ -1290,9 +1431,13 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     {
         uint32_t i = 0;
         for (auto &[id, st2] : g_states)
-            if (st2.object && i < kMaxAvatars)
+            if (st2.object && i < kAvatarObjSlots)
                 g_avatarObjs[i++].store(st2.object);
-        for (; i < kMaxAvatars; ++i)
+        for (auto &[id, st2] : g_states) // (and those put aside)
+            for (uint32_t o : {st2.parked, st2.baseKept})
+                if (o && i < kAvatarObjSlots)
+                    g_avatarObjs[i++].store(o);
+        for (; i < kAvatarObjSlots; ++i)
             g_avatarObjs[i].store(0);
     }
     kh2puppets::setOverrides(overrides, 2);
@@ -1338,6 +1483,10 @@ void reset(uint8_t *rdram)
     {
         if (s.object)
             removeAvatar(rdram, s.object);
+        if (s.parked && live(rdram, s.parked))
+            removeAvatar(rdram, s.parked);
+        if (s.baseKept && live(rdram, s.baseKept))
+            removeAvatar(rdram, s.baseKept);
         if (s.proxy && live(rdram, s.proxy))
             show(rdram, s.proxy); // the party member is theirs again
     }

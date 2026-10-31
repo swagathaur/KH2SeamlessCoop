@@ -722,7 +722,7 @@ void boneMatrixHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t inner = 0;
     if (model && model < 0x02000000u)
         std::memcpy(&inner, rdram + model + 0x14, 4);
-    if (inner)
+    if (inner || ctx->pc != kBoneMatrix) // (or going on with a paused call)
     {
         kh2::callOriginal(g_boneMatrix, rdram, ctx, runtime);
         return;
@@ -1065,18 +1065,22 @@ void update(const uint8_t *rdram, const std::vector<Target> &targets)
 
 void requestPreload(uint32_t entryId) { preload(entryId, {}); }
 
-void requestFormLoad(uint32_t entryId)
+void requestFormLoad(uint32_t entryId, uint32_t kGroup)
 {
     // As the drive itself does for Sora (FUN_001B65E0): the form's entry is
-    // read into a cache group of its own (0x1388 for Sora; 0x1389 here),
+    // read into a cache group of its own (0x1388 for Sora; 0x1387 here),
     // FUN_0016EB48(entry, group, 4, 7), then CACHE_BUFF::Flush. Read into the
     // room's general group (-1, as requestPreload does) a form's files took
     // the place of things the room's objects still used, and they crashed.
     constexpr uint32_t kReadRequest = 0x0016EB48;
     constexpr uint32_t kCacheFlush = 0x00170888;
-    constexpr uint32_t kGroup = 0x1389;
+    // (0x1387: just under the form groups. In 0x1389 a drive starting here
+    // (CACHE_BUFF::Clear(0x1388): all form groups made old) between the
+    // read and the avatar being made let our own form's reads take the
+    // room of those files: the avatar was made without its model and was
+    // drawn from garbage.)
     auto step = std::make_shared<int>(0);
-    kh2guest::post([entryId, step](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
+    kh2guest::post([entryId, kGroup, step](const kh2guest::Env &env, uint32_t, bool) -> std::optional<kh2guest::Call> {
         if (*step == 0)
             ensurePrivateTable(env.rdram);
         switch ((*step)++)

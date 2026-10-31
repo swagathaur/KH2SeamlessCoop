@@ -64,7 +64,8 @@ void shutHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t world = getRegU32(ctx, 4) & 0xFF, room = getRegU32(ctx, 5) & 0xFF;
     const uint32_t ra = getRegU32(ctx, 31);
     const uint32_t obj = getRegU32(ctx, 17); // the exit trigger's s1: the one walking out
-    kh2::callOriginal(g_shut, rdram, ctx, runtime);
+    if (!kh2::callOriginalReturned(g_shut, rdram, ctx, runtime, kRoomShut))
+        return;
     if (getRegU32(ctx, 2) != 0 || ra != kExitAsks || !(g_on.load() || testAll()))
         return;
     const uint16_t key = uint16_t(world << 8 | room);

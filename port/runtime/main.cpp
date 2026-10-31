@@ -51,6 +51,7 @@
 #include "game_state.h"
 #include "coop.h"
 #include "unlock.h"
+#include "formcache.h"
 #include "guest_call.h"
 #include "puppets.h"
 #include "partners.h"
@@ -1143,6 +1144,62 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "threads")
+        {
+            // The EE threads (scheduler snapshot; refreshed on request, so
+            // a second "threads" shows the newer state).
+            const EeKernelSnapshot k = h.runtime->eeScheduler().snapshot();
+            std::ostringstream out;
+            out << line << ": running " << k.runningThreadId;
+            for (const EeThreadSnapshot &t : k.threads)
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), " | #%d pc %08X ra %08X sp %08X entry %08X pri %d status %d wait %d/%d",
+                              t.id, t.pc, t.ra, t.sp, t.entry, t.currentPriority, int(t.status), int(t.waitReason),
+                              t.waitId);
+                out << buf;
+            }
+            for (const EeSemaphoreSnapshot &sm : k.semaphores)
+                if (sm.waiters)
+                    out << " | sema " << sm.id << " count " << sm.count << " waiters " << sm.waiters;
+            say(out.str());
+        }
+        else if (cmd == "count")
+        {
+            // count on | count off NAME: guest function calls counted between
+            // the two (patch 0048), written to <shots>/calls_NAME.txt.
+            static std::vector<uint32_t> counts;
+            std::string what, name;
+            ls >> what >> name;
+            if (what == "on")
+            {
+                g_ps2CallCountOn.store(false);
+                counts.assign(0x02000000u / 4u, 0u);
+                g_ps2CallCounts = counts.data();
+                g_ps2CallCountOn.store(true);
+                say(line);
+            }
+            else if (!counts.empty())
+            {
+                g_ps2CallCountOn.store(false);
+                std::error_code ec;
+                std::filesystem::create_directories(o.shotDir, ec);
+                const std::filesystem::path path =
+                    std::filesystem::path(o.shotDir) / ("calls_" + (name.empty() ? std::string("x") : name) + ".txt");
+                size_t n = 0;
+                if (FILE *f = std::fopen(path.string().c_str(), "w"))
+                {
+                    for (size_t i = 0; i < counts.size(); ++i)
+                        if (counts[i])
+                        {
+                            std::fprintf(f, "%08X %u\n", unsigned(i * 4u), counts[i]);
+                            ++n;
+                        }
+                    std::fclose(f);
+                }
+                say(line + ": " + std::to_string(n) + " functions in " + path.string());
+            }
+        }
         else if (cmd == "unlock")
         {
             const std::string did = kh2unlock::apply(ram);
@@ -1748,6 +1805,7 @@ bool headlessPump(void *userData)
     }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     kh2unlock::tick(h.runtime->memory().getRDRAM(), frame);
+    kh2formcache::tick(h.runtime->memory().getRDRAM());
     if (kh2pgs::active() && frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;
@@ -1793,6 +1851,7 @@ bool playPump(void *userData)
     }
     kh2coop::tick(h.runtime->memory().getRDRAM(), frame);
     kh2unlock::tick(h.runtime->memory().getRDRAM(), frame);
+    kh2formcache::tick(h.runtime->memory().getRDRAM());
     if (frame != h.lastGpuFrame)
     {
         h.lastGpuFrame = frame;

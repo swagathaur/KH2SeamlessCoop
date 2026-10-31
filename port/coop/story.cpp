@@ -154,7 +154,7 @@ std::vector<std::vector<uint8_t>> pack(const std::vector<uint8_t> &block, const 
 void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t n = getRegU32(ctx, 6);
-    if (n == kSaveSize)
+    if (n == kSaveSize && ctx->pc == kMemcpy) // (not a paused copy going on)
     {
         const uint32_t dst = getRegU32(ctx, 4), src = getRegU32(ctx, 5);
         const bool saving = (src & 0x1FFFFFFFu) == kSave, loading = (dst & 0x1FFFFFFFu) == kSave;
@@ -163,7 +163,12 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const auto overrides = g_saveOverrides;
             lock.unlock();
-            kh2::callOriginal(g_memcpy, rdram, ctx, runtime);
+            if (!kh2::callOriginalReturned(g_memcpy, rdram, ctx, runtime, kMemcpy))
+            {
+                // (Paused part way: the copy finishes later, the overrides
+                // are written on the next save.)
+                return;
+            }
             for (const auto &[off, v] : overrides)
                 if (off < kSaveSize)
                     *at(rdram, dst + off) = v;

@@ -1,0 +1,27 @@
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -371,6 +371,24 @@
+                 }
+                 continue;
+             }
++            if (running->id > 0)
++            {
++                // The thread returned to address 0 (a corrupt return
++                // address, or a jump through a null pointer): what is left
++                // on its stack below sp (the frames just gone), for the trail.
++                const uint32_t sp = getRegU32(&context, 29);
++                std::printf("[ee] thread %d returned to 0 (ra 0x%08X, sp 0x%08X); code addresses below sp:", running->id,
++                            getRegU32(&context, 31), sp);
++                for (uint32_t o = 0; o < 0x1000u; o += 4u)
++                {
++                    const uint32_t a = (sp - 0x1000u + o) & 0x01FFFFFCu;
++                    const uint32_t v = *reinterpret_cast<const uint32_t *>(m_rdram + a);
++                    if (v >= 0x00100000u && v < 0x00380000u && (v & 3u) == 0u)
++                        std::printf(" %X:%08X", sp - 0x1000u + o, v);
++                }
++                std::printf("\n");
++                std::fflush(stdout);
++            }
+             makeDormant(*running);
+             m_currentThreadId = 0;
+             continue;

@@ -1,0 +1,56 @@
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -71,6 +71,22 @@
+ // header, included by all generated code, stays as it is.)
+ static std::atomic<bool> g_nullCallsReturnZero{false};
+ void ps2SetNullCallsReturnZero(bool on) { g_nullCallsReturnZero.store(on, std::memory_order_relaxed); }
++// The last guest branches (calls and jumps between functions), for a crash's
++// trail (ps2DumpBranchRing: printed when a thread returns to address 0).
++static uint32_t g_branchRing[256][3];
++static std::atomic<uint32_t> g_branchRingNext{0};
++void ps2DumpBranchRing()
++{
++    const uint32_t end = g_branchRingNext.load(std::memory_order_relaxed);
++    std::printf("[ee] the last guest branches (from -> to, sp):");
++    for (uint32_t i = end >= 256u ? end - 256u : 0u; i < end; ++i)
++    {
++        const uint32_t *e = g_branchRing[i & 255u];
++        std::printf(" %X->%X/%X", e[0], e[1], e[2]);
++    }
++    std::printf("\n");
++    std::fflush(stdout);
++}
+ 
+ namespace ps2_stubs
+ {
+@@ -1510,6 +1526,12 @@
+                                      const char *debugName)
+ {
+     ctx->pc = targetPc;
++    {
++        uint32_t *e = g_branchRing[g_branchRingNext.fetch_add(1, std::memory_order_relaxed) & 255u];
++        e[0] = sourcePc;
++        e[1] = targetPc;
++        e[2] = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
++    }
+     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+ 
+     // Every inter-function transfer is also a deterministic EE safe point.
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
++void ps2DumpBranchRing(); // ps2_runtime.cpp
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -388,6 +389,7 @@
+                 }
+                 std::printf("\n");
+                 std::fflush(stdout);
++                ps2DumpBranchRing();
+             }
+             makeDormant(*running);
+             m_currentThreadId = 0;

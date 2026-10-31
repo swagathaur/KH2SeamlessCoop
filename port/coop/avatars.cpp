@@ -1,5 +1,6 @@
 #include "avatars.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <chrono>
 
+#include "formcache.h"
 #include "game_state.h"
 #include "puppets.h"
 #include "guest_call.h"
@@ -45,16 +47,16 @@ struct State
     uint32_t sheet = 0;
     uint16_t motion = 0xFFFF;
     int sinceMotion = 0;
-    double lookAsked = -1;   // its look's files were asked for (requestFormLoad)
-    uint16_t lookFor = 0;
     uint32_t gen = 0;
     double castUntil = 0;
     uint32_t proxy = 0;      // the party member holding their place (hidden)
     int32_t writtenHp = -1, writtenMp = -1; // what we last put in the sheet
     double quietUntil = 0;   // no heals read until then (an avatar made or gone: the slot is set anew)
     double madeAt = 0;       // when it was made (prepared)
-    bool plainLook = false;  // their form's look did not load here: their own look instead (this room)
+    bool plainLook = false;  // their form's look did not load here: their own look instead (a while)
+    double plainSince = 0;   // (their form tried again 20 s after)
     bool hiddenForCut = false; // hidden while a cutscene plays
+    int64_t spawnAskedMs = -100000; // when its making was asked (ms)
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -262,7 +264,30 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // this thread): the avatar wears a look whose files our player (or the
     // room) had already; it holds no references of its own to give back.
     const int64_t sinceTeardown = nowMs() - g_avatarTornAt.load(std::memory_order_relaxed);
+    // (Not a file read for the avatar itself: its form look's own copies,
+    // kh2formcache's groups 4980-4995. Those references are its own.)
+    bool ownCopy = false;
     if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 20)
+    {
+        const uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t hh = 0;
+        std::memcpy(&hh, rdram + kCacheHeaders, 4);
+        for (int i = 0; i < 2048 && hh >= 0x00100000u && hh < 0x02000000u; ++i)
+        {
+            uint32_t data = 0, next = 0;
+            int32_t g = 0;
+            std::memcpy(&data, rdram + hh + 0x30, 4);
+            std::memcpy(&next, rdram + hh + 0x3C, 4);
+            std::memcpy(&g, rdram + hh + 0x28, 4);
+            if (hh == a0 || data == a0)
+            {
+                ownCopy = g >= 4980 && g < 4996;
+                break;
+            }
+            hh = next;
+        }
+    }
+    if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 20 && !ownCopy)
     {
         static int logged = 0;
         if (logged++ < 20)
@@ -442,6 +467,29 @@ template <typename T> T rd(const uint8_t *ram, uint32_t a)
 template <typename T> void wr(uint8_t *ram, uint32_t a, T v) { std::memcpy(ram + (a & 0x01FFFFFFu), &v, sizeof(T)); }
 bool inRam(uint32_t a) { return a >= 0x00100000u && a < 0x02000000u; }
 
+// YS::CACHE_BUFF::Clear(group) (0x00170320): when our own drive or revert
+// (YS::CHANGEFORM's task, FUN_001B65E0) clears the form groups (no form look
+// is read for an avatar for a while after).
+constexpr uint32_t kCacheClear = 0x00170320;
+PS2Runtime::RecompiledFunction g_cacheClear = nullptr;
+std::atomic<int64_t> g_ourDriveClearAt{-100000};
+void cacheClearHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t ra = getRegU32(ctx, 31);
+    {
+        static int logged = 0;
+        if (ctx->pc == kCacheClear && logged++ < 20)
+        {
+            std::printf("[avatars] cache clear %d (from %08X)\n", int32_t(getRegU32(ctx, 4)), ra);
+            std::fflush(stdout);
+        }
+    }
+    if (ctx->pc == kCacheClear && ra >= 0x001B65E0u && ra < 0x001B6CA8u)
+        g_ourDriveClearAt = nowMs();
+    kh2::callOriginal(g_cacheClear, rdram, ctx, runtime);
+}
+
+
 double nowSec()
 {
     using namespace std::chrono;
@@ -475,6 +523,26 @@ bool lookHere(const uint8_t *rdram, uint16_t entry)
         const uint32_t r = rd<uint32_t>(rdram, a.address + kh2state::addr::ObjEntry);
         if (inRam(r) && std::strncmp(reinterpret_cast<const char *>(rdram + ((r + kEntryLook) & 0x01FFFFFFu)), name, 32) == 0)
             return true;
+    }
+    return false;
+}
+
+// This entry's model file is in the cache (read in, not an old one).
+bool lookFilesIn(const uint8_t *rdram, uint16_t entry)
+{
+    const uint32_t rec = entryRecord(rdram, entry);
+    if (!rec)
+        return false;
+    char look[33] = {};
+    std::memcpy(look, rdram + ((rec + kEntryLook) & 0x01FFFFFFu), 32);
+    const std::string file = std::string("obj/") + look + ".mdlx";
+    uint32_t h = rd<uint32_t>(rdram, kCacheHeaders);
+    for (int i = 0; i < 2048 && inRam(h); ++i)
+    {
+        if (rd<int32_t>(rdram, h + 0x28) < 10000 && rdram[h + 1] == 3 &&
+            std::strncmp(reinterpret_cast<const char *>(rdram + h + 4), file.c_str(), 36) == 0)
+            return true;
+        h = rd<uint32_t>(rdram, h + 0x3C);
     }
     return false;
 }
@@ -515,10 +583,74 @@ bool live(const uint8_t *rdram, uint32_t obj)
             return true;
     return false;
 }
+// (Diagnostics: a pure virtual call (0x003155C0) ends the game's main
+// thread: where it came from, and the code addresses on the stack.)
+constexpr uint32_t kPureVirtual = 0x003155C0;
+PS2Runtime::RecompiledFunction g_pureVirtual = nullptr;
+void pureVirtualHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kPureVirtual)
+    {
+        const uint32_t sp = getRegU32(ctx, 29);
+        std::string trail;
+        for (uint32_t o = 0; o < 0x400 && inRam(sp + o); o += 4)
+        {
+            const uint32_t v = rd<uint32_t>(rdram, sp + o);
+            if (v >= 0x00100000u && v < 0x00380000u && (v & 3) == 0)
+            {
+                char b[16];
+                std::snprintf(b, sizeof b, " %08X", v);
+                trail += b;
+            }
+        }
+        std::printf("[avatars] pure virtual call from %08X (a0 %08X, s0 %08X, s1 %08X); stack:%s\n", getRegU32(ctx, 31),
+                    getRegU32(ctx, 4), getRegU32(ctx, 16), getRegU32(ctx, 17), trail.c_str());
+        std::fflush(stdout);
+    }
+    kh2::callOriginal(g_pureVirtual, rdram, ctx, runtime);
+}
+// (Diagnostics: a task switch (longjmp, 0x001055B8) into a context with no
+// stack or return address: whose, and from where.)
+constexpr uint32_t kLongJump = 0x001055B8;
+PS2Runtime::RecompiledFunction g_longJump = nullptr;
+void longJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kLongJump)
+    {
+        const uint32_t buf = getRegU32(ctx, 4);
+        const uint32_t sp = inRam(buf) ? rd<uint32_t>(rdram, buf + 0x10) : 0, ra = inRam(buf) ? rd<uint32_t>(rdram, buf + 0x30) : 0;
+        if (!sp || !ra)
+        {
+            const uint32_t mySp = getRegU32(ctx, 29);
+            std::string trail;
+            for (uint32_t o = 0; o < 0x300 && inRam(mySp + o); o += 4)
+            {
+                const uint32_t v = rd<uint32_t>(rdram, mySp + o);
+                if (v >= 0x00100000u && v < 0x00380000u && (v & 3) == 0)
+                {
+                    char b[24];
+                    std::snprintf(b, sizeof b, " +%X:%08X", o, v);
+                    trail += b;
+                }
+            }
+            std::printf("[avatars] a task switch into context %08X (sp %08X, ra %08X) from %08X (s0 %08X s1 %08X s2 %08X); stack:%s\n",
+                        buf, sp, ra, getRegU32(ctx, 31), getRegU32(ctx, 16), getRegU32(ctx, 17), getRegU32(ctx, 18),
+                        trail.c_str());
+            std::fflush(stdout);
+        }
+    }
+    kh2::callOriginal(g_longJump, rdram, ctx, runtime);
+}
 } // namespace
 
 bool install(PS2Runtime &runtime)
 {
+    g_longJump = runtime.lookupFunction(kLongJump);
+    if (!g_longJump || !runtime.replaceFunction(kLongJump, &longJumpHook))
+        g_longJump = nullptr;
+    g_pureVirtual = runtime.lookupFunction(kPureVirtual);
+    if (!g_pureVirtual || !runtime.replaceFunction(kPureVirtual, &pureVirtualHook))
+        g_pureVirtual = nullptr;
     g_control = runtime.lookupFunction(kPlayerControl);
     if (!g_control || !runtime.replaceFunction(kPlayerControl, &controlHook))
     {
@@ -540,6 +672,10 @@ bool install(PS2Runtime &runtime)
     g_friendGaugeSet = runtime.lookupFunction(kFriendGaugeSet);
     if (!g_friendGaugeSet || !runtime.replaceFunction(kFriendGaugeSet, &friendGaugeSetHook))
         g_friendGaugeSet = nullptr;
+    kh2formcache::install(runtime);
+    g_cacheClear = runtime.lookupFunction(kCacheClear);
+    if (!g_cacheClear || !runtime.replaceFunction(kCacheClear, &cacheClearHook))
+        g_cacheClear = nullptr;
     g_teardown = runtime.lookupFunction(kPlayerTeardown);
     if (!g_teardown || !runtime.replaceFunction(kPlayerTeardown, &teardownHook))
         g_teardown = nullptr;
@@ -635,8 +771,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     for (auto &[id, s] : g_states)
         ourKnown = ourKnown || (s.object && player == s.object) || s.pending;
     ourKnown = ourKnown || justLeft(player);
-    if (player && !ourKnown && live(rdram, player))
+    if (player && !ourKnown && live(rdram, player) && g_ourPlayer != player)
+    {
+        std::printf("[avatars] our player is %08X (was %08X)\n", player, g_ourPlayer);
+        std::fflush(stdout);
         g_ourPlayer = player;
+    }
     g_ourPlayerShared = g_ourPlayer;
     {
         bool pending = false;
@@ -674,6 +814,16 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         }
     }
     const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
+    // Our own drive or revert under way (YS::CHANGEFORM's task, or its clear
+    // of the form groups in the last 3 s): no form look is read or made for
+    // an avatar meanwhile (our new form's reads first).
+    uint32_t driveTask = 0;
+    std::memcpy(&driveTask, rdram + 0x00351184u, 4);
+    const int64_t driveClearAt = g_ourDriveClearAt.load();
+    static int64_t lastTaskMs = -100000; // (and a moment after: the new player's first frames)
+    if (driveTask)
+        lastTaskMs = nowMs();
+    const bool ourDriveBusy = driveTask || nowMs() - lastTaskMs < 1500 || nowMs() - driveClearAt < 3000;
     const bool cutscene = st.control == 3;
     uint32_t sheetIndex = 0;
     for (const kh2partner::Remote &r : remotes)
@@ -705,14 +855,16 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // avatar were half there in a crowded room (a mission) when it was
         // made, and its motion crashed; and the form's files our player has
         // (if we are in it too) go when we revert, under the avatar.
-        // Off unless KH2_AVATAR_FORMS=1: an avatar made in a drive form's look
-        // is a form player of this game, and our own transformation then
-        // never finished (YS::CHANGEFORM's task waited on with the avatar in
-        // any form), besides the "drive form on" flag (cleared, see update).
+        // (KH2_AVATAR_FORMS=0: their base look instead. A form's files are
+        // read into the cache for it, see kh2formcache.)
         static const bool forms = [] {
             const char *e = std::getenv("KH2_AVATAR_FORMS");
-            return e && *e == '1';
+            return !(e && *e == '0');
         }();
+        // (Their form's look again a while after it could not be had: the
+        // room for it comes back once an old one is let go.)
+        if (s.plainLook && t - s.plainSince > 20.0)
+            s.plainLook = false;
         if (const uint16_t base = kh2partner::formBaseLook(rdram, want))
             if (s.plainLook || !forms)
                 want = base;
@@ -737,6 +889,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             show(rdram, s.object);
         }
         // Not here, or not made yet in a cutscene: away.
+        // (A new look waits for our own drive or revert to be done: a
+        // player-class object made or torn down while ours is being
+        // remade took over our new player's making, which came out with no
+        // model: invisible, drawn from null.)
+        if (here && !cutscene && s.object && s.entry != want && ourDriveBusy)
+            continue;
         if (!here || cutscene || (s.object && s.entry != want))
         {
             if (s.object)
@@ -756,21 +914,29 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         {
             if (s.pending || !settled)
                 continue;
-            // Their look's files: in use here already, or read for it.
-            if (!lookHere(rdram, want))
+            if (ourDriveBusy)
+                continue; // (after our drive or revert, see above)
+            // Their look's files: a form's (or one not here) read for them
+            // into the cache where nothing moves them (kh2formcache); never
+            // our own form's, which go when we revert.
+            if (kh2partner::formBaseLook(rdram, want) != 0 || (!lookHere(rdram, want) && !lookFilesIn(rdram, want)))
             {
-                if (s.lookFor != want)
+                const kh2formcache::Look look = kh2formcache::want(rdram, want);
+                if (look == kh2formcache::Look::NoRoom && kh2partner::formBaseLook(rdram, want) != 0)
                 {
-                    s.lookFor = want;
-                    s.lookAsked = t;
-                    kh2puppets::requestFormLoad(want);
+                    std::printf("[avatars] no room for player %u's form look %04X here: their own look\n",
+                                r.playerId + 1, want);
+                    std::fflush(stdout);
+                    s.plainLook = true;
+                    s.plainSince = t;
                     continue;
                 }
-                if (t - s.lookAsked < 1.5)
+                if (look == kh2formcache::Look::Loading)
                     continue;
             }
             s.pending = true;
             s.entry = want;
+            s.spawnAskedMs = nowMs();
             const uint32_t gen = g_gen;
             const uint8_t id = r.playerId;
             std::printf("[avatars] making player %u's avatar (entry %04X)\n", r.playerId + 1, want);
@@ -796,6 +962,8 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             continue;
         }
         const uint32_t obj = s.object;
+        if (kh2partner::formBaseLook(rdram, s.entry) != 0)
+            kh2formcache::want(rdram, s.entry); // (its files stay while it wears them)
         if (!s.prepared)
         {
             s.prepared = true;
@@ -820,6 +988,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                         r.playerId + 1, s.entry);
             std::fflush(stdout);
             s.plainLook = true;
+            s.plainSince = t;
         }
         // Their name for the character in their party place (the party
         // gauge, item targets, menus: names.h).
@@ -975,7 +1144,16 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             if (s.object)
                 for (uint32_t a : kPlayerRefs)
                     if (rd<uint32_t>(rdram, a) == s.object)
+                    {
+                        static int logged = 0;
+                        if (logged++ < 40)
+                        {
+                            std::printf("[avatars] player pointer %08X showed avatar %08X: back to our player %08X%s\n", a,
+                                        s.object, g_ourPlayer, live(rdram, g_ourPlayer) ? "" : " (not live!)");
+                            std::fflush(stdout);
+                        }
                         wr<uint32_t>(rdram, a, g_ourPlayer);
+                    }
     // The command/drive HUD (*0x003485EC) keeps the player it shows at +0x34,
     // picked up again while an avatar is being made: without this the drive
     // gauge loses its label and follows the avatar.
@@ -1072,6 +1250,7 @@ void reset(uint8_t *rdram)
             show(rdram, s.proxy); // the party member is theirs again
     }
     g_states.clear();
+    kh2formcache::reset(rdram);
     for (auto &a : g_avatarObjs)
         a.store(0);
     kh2puppets::setOverrides({}, 2);

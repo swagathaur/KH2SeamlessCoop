@@ -794,7 +794,8 @@ float faceScale()
 void makeFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t face = getRegU32(ctx, 4), obj = getRegU32(ctx, 5), kind = getRegU32(ctx, 6);
-    kh2::callOriginal(g_makeFace, rdram, ctx, runtime);
+    if (!kh2::callOriginalReturned(g_makeFace, rdram, ctx, runtime, kMakeFace))
+        return;
     // A party member (objentry type 1) in Sora's or Roxas's look (P_EX1xx):
     // a stand-in, also before update() has seen it (gauges are made with the room).
     const uint32_t rec = obj && obj < 0x02000000u ? rd<uint32_t>(rdram, obj + kh2state::addr::ObjEntry) : 0;

@@ -61,8 +61,7 @@ uint32_t firstRecord(const uint8_t *rdram, uint32_t slot)
 void spellRecordHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t slot = getRegU32(ctx, 4);
-    kh2::callOriginal(g_spellRecord, rdram, ctx, runtime);
-    if (slot >= kMagicSlots)
+    if (!kh2::callOriginalReturned(g_spellRecord, rdram, ctx, runtime, kSpellRecord) || slot >= kMagicSlots)
         return;
     const uint32_t rec = getRegU32(ctx, 2);
     g_localLevels[slot] = rec ? uint8_t(rdram[rec + 1] + 1) : 0;

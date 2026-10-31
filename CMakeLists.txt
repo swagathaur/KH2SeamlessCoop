@@ -311,6 +311,7 @@ target_sources(kh2recomp PRIVATE
     port/coop/spells.cpp
     port/coop/unlock.cpp
     port/coop/avatars.cpp
+    port/coop/formcache.cpp
     port/coop/story.cpp
     port/coop/names.cpp
     port/coop/roomlock.cpp

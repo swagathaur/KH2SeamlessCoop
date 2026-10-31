@@ -35,6 +35,10 @@ enum class Look
 // is not here; how it is. (Game thread.)
 Look want(uint8_t *rdram, uint16_t entry);
 
+// Our own drive or revert starts (game thread): our files out of sight of the
+// game's lookups by name until it is over.
+void hideForDrive(uint8_t *rdram);
+
 // Each frame (game thread): batches no one wants or uses any more go.
 void tick(uint8_t *rdram);
 // The session is over: all batches go.

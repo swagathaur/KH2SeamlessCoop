@@ -1,0 +1,217 @@
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -26,8 +26,13 @@
+ 
+ class GS;
+ 
+-constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
+-constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
++// The host keeps 64MB behind the guest's RAM: the game is told of 32MB (its
++// stacks, heaps and reported size: PS2_GUEST_RAM_SIZE) and never touches the
++// rest, which the port keeps its own data in (kh2: avatars' form looks).
++// Addresses there are plain RAM, not a mirror of the first 32MB.
++constexpr uint32_t PS2_GUEST_RAM_SIZE = 32u * 1024u * 1024u; // 32MB, as the game knows it
++constexpr uint32_t PS2_RAM_SIZE = 64u * 1024u * 1024u;       // 64MB backing
++constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for the backing RAM
+ constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
+ constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
+ constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -418,7 +418,7 @@
+     void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
+     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
+     void clearLLBit(R5900Context *ctx);
+-    void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
++    void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_GUEST_RAM_SIZE);
+     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
+@@ -567,12 +567,12 @@
+     std::vector<GuestHeapBlock> m_guestHeapBlocks;
+     uint32_t m_guestHeapBase = 0x00100000u;
+     uint32_t m_guestHeapEnd = 0x00100000u;
+-    uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
++    uint32_t m_guestHeapLimit = PS2_GUEST_RAM_SIZE;
+     uint32_t m_guestHeapCeiling = 0u;
+     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
+     bool m_guestHeapConfigured = false;
+     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
++    uint32_t m_asyncCallbackStackTop = PS2_GUEST_RAM_SIZE;
+ 
+     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+     std::atomic<bool> m_missingFunctionReported{false};
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -102,7 +102,7 @@
+ static constexpr int FB_HEIGHT = 512;
+ static constexpr int DEFAULT_DISPLAY_HEIGHT = 448;
+ static constexpr uint32_t DEFAULT_FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
+-static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x10000u);
++static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_GUEST_RAM_SIZE - DEFAULT_FB_SIZE - 0x10000u);
+ static std::atomic<uint64_t> s_syscallOverrideGeneration{1u};
+ #if defined(PLATFORM_VITA)
+ static constexpr int HOST_WINDOW_WIDTH = 960;
+@@ -608,11 +608,11 @@
+     m_guestHeapBlocks.clear();
+     m_guestHeapBase = kGuestHeapDefaultBase;
+     m_guestHeapEnd = kGuestHeapDefaultBase;
+-    m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
++    m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
+     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
+     m_guestHeapConfigured = false;
+-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
++    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
++    m_asyncCallbackStackTop = PS2_GUEST_RAM_SIZE;
+ }
+ 
+ void PS2Runtime::setExternalPresenter(FramePumpCallback pump, void *userData)
+@@ -1009,7 +1009,7 @@
+             return false;
+         }
+         const uint64_t regionSize = scratch ? static_cast<uint64_t>(PS2_SCRATCHPAD_SIZE)
+-                                            : static_cast<uint64_t>(PS2_RAM_SIZE);
++                                            : static_cast<uint64_t>(PS2_GUEST_RAM_SIZE);
+         const uint64_t segmentMemEnd = static_cast<uint64_t>(physAddr) + static_cast<uint64_t>(ph.memsz);
+         if (segmentMemEnd > regionSize)
+         {
+@@ -1079,20 +1079,20 @@
+         return false;
+     }
+ 
+-    if (maxLoadedRdramEnd > PS2_RAM_SIZE)
++    if (maxLoadedRdramEnd > PS2_GUEST_RAM_SIZE)
+     {
+-        maxLoadedRdramEnd = PS2_RAM_SIZE;
++        maxLoadedRdramEnd = PS2_GUEST_RAM_SIZE;
+     }
+ 
+-    const uint32_t paddedEnd = (maxLoadedRdramEnd > (PS2_RAM_SIZE - kGuestHeapSafetyPad))
+-                                   ? PS2_RAM_SIZE
++    const uint32_t paddedEnd = (maxLoadedRdramEnd > (PS2_GUEST_RAM_SIZE - kGuestHeapSafetyPad))
++                                   ? PS2_GUEST_RAM_SIZE
+                                    : (maxLoadedRdramEnd + kGuestHeapSafetyPad);
+     const uint32_t suggestedHeapBase = alignGuestHeapValue(paddedEnd, kGuestHeapDefaultAlignment);
+     {
+         std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+         if (!m_guestHeapConfigured)
+         {
+-            const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
++            const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
+             m_guestHeapSuggestedBase = std::min(suggestedHeapBase, hardLimit);
+             m_guestHeapBase = m_guestHeapSuggestedBase;
+             m_guestHeapEnd = m_guestHeapSuggestedBase;
+@@ -1101,9 +1101,9 @@
+     }
+     {
+         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
++        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
++        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_GUEST_RAM_SIZE);
++        m_asyncCallbackStackTop = PS2_GUEST_RAM_SIZE;
+     }
+ 
+     LoadedModule module;
+@@ -1818,17 +1818,17 @@
+ uint32_t PS2Runtime::clampGuestHeapBase(uint32_t guestBase) const
+ {
+     uint32_t normalized = guestBase;
+-    if (normalized >= PS2_RAM_SIZE)
++    if (normalized >= PS2_GUEST_RAM_SIZE)
+     {
+         normalized &= PS2_RAM_MASK;
+     }
+-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
++    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
+     return std::min(normalized, hardLimit);
+ }
+ 
+ uint32_t PS2Runtime::clampGuestHeapLimit(uint32_t guestLimit) const
+ {
+-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
++    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
+     if (guestLimit == 0u || guestLimit > hardLimit)
+     {
+         return hardLimit;
+@@ -2189,7 +2189,7 @@
+ 
+ uint32_t PS2Runtime::guestHeapHardLimit() const
+ {
+-    return std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
++    return std::min(kGuestHeapHardLimit, PS2_GUEST_RAM_SIZE);
+ }
+ 
+ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
+@@ -2208,9 +2208,9 @@
+ 
+     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+     uint32_t top = m_asyncCallbackStackTop;
+-    if (top > PS2_RAM_SIZE)
++    if (top > PS2_GUEST_RAM_SIZE)
+     {
+-        top = PS2_RAM_SIZE;
++        top = PS2_GUEST_RAM_SIZE;
+     }
+     top &= ~(kGuestHeapDefaultAlignment - 1u);
+ 
+@@ -2233,8 +2233,8 @@
+ void PS2Runtime::setAsyncCallbackStackRange(uint32_t floor, uint32_t top)
+ {
+     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+-    m_asyncCallbackStackFloor = std::min(floor, PS2_RAM_SIZE);
+-    m_asyncCallbackStackTop = std::min(top, PS2_RAM_SIZE);
++    m_asyncCallbackStackFloor = std::min(floor, PS2_GUEST_RAM_SIZE);
++    m_asyncCallbackStackTop = std::min(top, PS2_GUEST_RAM_SIZE);
+ }
+ 
+ uint32_t PS2Runtime::asyncCallbackStackTop() const
+@@ -2683,7 +2683,7 @@
+     initializeEeKernelState(m_memory.getRDRAM());
+     m_cpuContext.r[4] = _mm_setzero_si128();
+     m_cpuContext.r[5] = _mm_setzero_si128();
+-    m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));
++    m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_GUEST_RAM_SIZE - 0x10u));
+     m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
+     m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)), std::memory_order_relaxed);
+     m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0)), std::memory_order_relaxed);
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -510,13 +510,13 @@
+                                        : 0u;
+         if (stack == 0xFFFFFFFFu)
+         {
+-            if (stackSizeSigned > 0 && static_cast<uint32_t>(stackSizeSigned) < PS2_RAM_SIZE)
++            if (stackSizeSigned > 0 && static_cast<uint32_t>(stackSizeSigned) < PS2_GUEST_RAM_SIZE)
+             {
+-                initialStack = PS2_RAM_SIZE - static_cast<uint32_t>(stackSizeSigned);
++                initialStack = PS2_GUEST_RAM_SIZE - static_cast<uint32_t>(stackSizeSigned);
+             }
+             else
+             {
+-                initialStack = PS2_RAM_SIZE;
++                initialStack = PS2_GUEST_RAM_SIZE;
+             }
+             sp = initialStack;
+         }
+@@ -551,7 +551,7 @@
+         // starting at its bottom, as before, still keep out of the pool.
+         if (stack == 0xFFFFFFFFu && runtime->asyncCallbackStackTop() <= initialStack)
+         {
+-            sp = PS2_RAM_SIZE;
++            sp = PS2_GUEST_RAM_SIZE;
+         }
+         setReturnU32(ctx, sp);
+     }
+@@ -630,7 +630,7 @@
+     {
+         (void)rdram;
+         (void)runtime;
+-        setReturnU32(ctx, PS2_RAM_SIZE);
++        setReturnU32(ctx, PS2_GUEST_RAM_SIZE);
+     }
+ 
+     void InitTLB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

@@ -109,8 +109,17 @@ uint32_t freeSpawnSlot(const uint8_t *rdram)
 // Our own player's data a spawned object can write (kept and put back): the
 // party slot's form part (Slot1 +0x188-0x268: form, its level, abilities;
 // not HP or MP) and the player's motion set names (0x01C60880-0x01C608C0).
+// The game's globals that hold "the player" (its data and the party
+// system's): a player-class object being made takes them over, more than the
+// ones update() gives back each frame; any that held our player before and
+// hold the new object after go back to our player.
+const std::pair<uint32_t, uint32_t> kPlayerGlobals[3] = {{0x00340000u, 0x40000u},
+                                                         {0x01C5F000u, 0x11000u},
+                                                         {0x01F00000u, 0x20000u}};
 const std::pair<uint32_t, uint32_t> kKeptOnSpawn[2] = {{kh2state::addr::Slot1 + 0x188, 0x268 - 0x188},
                                                        {0x01C60880u, 0x40}};
+
+uint32_t entryRecord(const uint8_t *rdram, uint32_t id);
 
 void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void(uint32_t obj)> done,
                std::function<bool(const uint8_t *)> wanted = {}, int32_t serial = -1)
@@ -122,6 +131,7 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
         int step = 0;
         uint32_t unit = 0, group = 0, obj = 0, player = 0;
         std::vector<uint8_t> kept[2]; // kKeptOnSpawn as it was before the object was made
+        std::vector<uint8_t> globals[3]; // kPlayerGlobals as they were
         float pos[3];
         float yaw;
     };
@@ -175,11 +185,28 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
                 const int16_t ser = int16_t(serial);
                 std::memcpy(env.host(st->unit + 0x1E), &ser, 2);
             }
+            // A player-class object (Sora's looks) is not made while our own
+            // drive or revert is under way: both write our player's form data
+            // and motion set names (asked again later).
+            {
+                uint32_t formTask = 0;
+                std::memcpy(&formTask, env.host(0x00351184u), 4);
+                const uint32_t rec = entryRecord(env.rdram, entry);
+                if (formTask && rec && std::memcmp(env.host(rec + 8), "P_EX1", 5) == 0)
+                {
+                    std::printf("[puppets] making %04X waits: our drive or revert is under way\n", entry);
+                    std::fflush(stdout);
+                    break;
+                }
+            }
             const float p[4] = {st->pos[0], st->pos[1], st->pos[2], 1.0f};
             std::memcpy(env.host(env.scratch), p, 16);
             std::memcpy(&st->player, env.host(kh2state::addr::PlayerPtr), 4);
             for (int i = 0; i < 2; ++i)
                 st->kept[i].assign(env.host(kKeptOnSpawn[i].first), env.host(kKeptOnSpawn[i].first) + kKeptOnSpawn[i].second);
+            for (int i = 0; i < 3; ++i)
+                st->globals[i].assign(env.host(kPlayerGlobals[i].first),
+                                      env.host(kPlayerGlobals[i].first) + kPlayerGlobals[i].second);
             return kh2guest::Call{kObjFactory, {entry, env.scratch}, {st->yaw}};
         }
         case 3:
@@ -213,8 +240,42 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
         }
         // What making it changed of our own player's (a drive form's
         // player-class object writes its form into "Sora's" sheet and his
-        // motion set's name): back as it was.
-        for (int i = 0; i < 2; ++i)
+        // motion set's name): back as it was. Not when our own drive or
+        // revert started meanwhile (YS::CHANGEFORM's task, or our player is
+        // another object now): what is there now is our new form's, and
+        // putting the old back gave our form player the base motion set (a
+        // stream of null calls, our main thread stuck).
+        uint32_t formTask = 0, playerNow = 0;
+        std::memcpy(&formTask, env.host(0x00351184u), 4);
+        std::memcpy(&playerNow, env.host(kh2state::addr::PlayerPtr), 4);
+        const bool ourDrive = formTask != 0 || (st->player && playerNow != st->player && playerNow != st->obj);
+        const uint32_t made = entryRecord(env.rdram, entry);
+        const bool soraLook = made && std::memcmp(env.host(made + 8), "P_EX1", 5) == 0;
+        if (soraLook && st->obj && st->player && st->obj != st->player)
+            for (int i = 0; i < 3; ++i)
+            {
+                const auto &[base, size] = kPlayerGlobals[i];
+                if (st->globals[i].size() != size)
+                    continue;
+                for (uint32_t o = 0; o + 4 <= size; o += 4)
+                {
+                    uint32_t was = 0, now = 0;
+                    std::memcpy(&was, st->globals[i].data() + o, 4);
+                    std::memcpy(&now, env.host(base + o), 4);
+                    if (was == st->player && now == st->obj)
+                    {
+                        std::memcpy(env.host(base + o), &st->player, 4);
+                        static int logged = 0;
+                        if (logged++ < 40)
+                        {
+                            std::printf("[puppets] making %04X took the player pointer at %08X: back to %08X\n", entry,
+                                        base + o, st->player);
+                            std::fflush(stdout);
+                        }
+                    }
+                }
+            }
+        for (int i = 0; i < 2 && !ourDrive; ++i)
             if (st->kept[i].size() == kKeptOnSpawn[i].second &&
                 std::memcmp(env.host(kKeptOnSpawn[i].first), st->kept[i].data(), st->kept[i].size()) != 0)
             {

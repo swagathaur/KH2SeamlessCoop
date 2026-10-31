@@ -31,8 +31,10 @@ constexpr uint32_t kFriendTable = 0x01C60528; // YS::FRIEND::Get(i): the party m
 constexpr uint32_t kObjModelData = 0x7AC; // 0 until the model's files are in
 constexpr uint32_t kObjModel = 0x670, kModelParts = 0x104, kWeaponOwner = 0x570;
 // The game's pointers to its player that a new player object takes over.
-constexpr uint32_t kPlayerRefs[] = {0x00348638, 0x00348754, 0x0034ED04, 0x00352400, 0x01C5FF10,
-                                    0x01C60018, 0x01C60024, 0x01C6C9AC, kh2state::addr::PlayerPtr};
+// (0x00341708 and 0x01C5FF8C too: a new avatar took them over, nothing gave
+// them back, and our next drive changed the avatar's form data instead.)
+constexpr uint32_t kPlayerRefs[] = {0x00341708, 0x00348638, 0x00348754, 0x0034ED04, 0x00352400, 0x01C5FF10,
+                                    0x01C5FF8C, 0x01C60018, 0x01C60024, 0x01C6C9AC, kh2state::addr::PlayerPtr};
 
 constexpr uint32_t kHud = 0x003485EC;
 
@@ -66,6 +68,8 @@ double g_roomSince = 0;
 uint32_t g_ourPlayer = 0;
 std::atomic<uint32_t> g_ourPlayerShared{0};
 std::atomic<uint32_t> g_avatarObjs[kMaxAvatars] = {}; // for the EE-side hooks
+std::atomic<int64_t> g_avatarMadeAt{-100000}; // an avatar was being made (ms)
+bool g_heldDrive = false;                      // our Drive greyed for it
 std::atomic<bool> g_avatarPending{false}; // an avatar's spawn job is under way
 
 // YS::PLAYER::_OVR_control (0x00178888): a player's per-frame command menu
@@ -170,6 +174,11 @@ void teardownHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         avatar = avatar || (obj && a.load(std::memory_order_relaxed) == obj);
     for (int i = 0; i < 4; ++i)
         avatar = avatar || (obj && g_leaving[i].load() == obj && nowMs() - g_leavingAt[i].load() < 5000);
+    // (Never our own player: a new object at an avatar's old address is not
+    // the avatar. Our drive tearing down our player that way skipped its
+    // own teardown, and our form player's motion called through nothing.)
+    if (obj && obj == g_ourPlayerShared.load(std::memory_order_relaxed))
+        avatar = false;
     if (avatar && ctx->pc == kPlayerTeardown)
     {
         {
@@ -583,6 +592,43 @@ bool live(const uint8_t *rdram, uint32_t obj)
             return true;
     return false;
 }
+// Our own drive or revert starting (YS::CHANGEFORM's task, FUN_001B65E0):
+// it takes "the player" from the game's player pointers. A new avatar points
+// them at itself for its first frames (update() puts them back, a frame
+// later): a drive starting then changed the avatar instead of our player
+// (our player's motion then called through nothing, the main thread stuck).
+// They are ours as it starts.
+constexpr uint32_t kFormTaskBody = 0x001B65E0;
+PS2Runtime::RecompiledFunction g_formTaskBody = nullptr;
+void formTaskHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kFormTaskBody)
+        kh2formcache::hideForDrive(rdram);
+    if (ctx->pc == kFormTaskBody)
+        if (const uint32_t ours = g_ourPlayerShared.load())
+        {
+            // (Also an avatar just made, not known to us yet.)
+            const uint32_t p = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+            if (p && p != ours && !g_states.empty())
+            {
+                std::printf("[avatars] our drive starts with the player pointer at %08X: our player %08X\n", p, ours);
+                std::fflush(stdout);
+                wr<uint32_t>(rdram, kh2state::addr::PlayerPtr, ours);
+            }
+            for (const auto &av : g_avatarObjs)
+                if (const uint32_t obj = av.load(std::memory_order_relaxed))
+                    for (uint32_t a : kPlayerRefs)
+                        if (rd<uint32_t>(rdram, a) == obj)
+                        {
+                            std::printf("[avatars] our drive starts with %08X showing avatar %08X: our player %08X\n", a,
+                                        obj, ours);
+                            std::fflush(stdout);
+                            wr<uint32_t>(rdram, a, ours);
+                        }
+        }
+    kh2::callOriginal(g_formTaskBody, rdram, ctx, runtime);
+}
+
 // (Diagnostics: a pure virtual call (0x003155C0) ends the game's main
 // thread: where it came from, and the code addresses on the stack.)
 constexpr uint32_t kPureVirtual = 0x003155C0;
@@ -645,6 +691,9 @@ void longJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 bool install(PS2Runtime &runtime)
 {
+    g_formTaskBody = runtime.lookupFunction(kFormTaskBody);
+    if (!g_formTaskBody || !runtime.replaceFunction(kFormTaskBody, &formTaskHook))
+        g_formTaskBody = nullptr;
     g_longJump = runtime.lookupFunction(kLongJump);
     if (!g_longJump || !runtime.replaceFunction(kLongJump, &longJumpHook))
         g_longJump = nullptr;
@@ -801,7 +850,32 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         if (inRam(rec))
             entry = rd<uint32_t>(rdram, rec) & 0xFFFF;
         const bool ourForm = entry && kh2partner::formBaseLook(rdram, uint16_t(entry)) != 0;
-        if ((flag & 1) && !ourForm && !task)
+        // While an avatar is being made, and for 2.5 s after, our Drive
+        // waits (greyed, as the game greys it while a form is on): a drive
+        // started then took the new player-class object's leftovers for our
+        // own (our form player's motion called through nothing).
+        bool pendingNow = false;
+        for (auto &[id, s2] : g_states)
+            pendingNow = pendingNow || s2.pending;
+        if (pendingNow)
+            g_avatarMadeAt = nowMs();
+        const bool hold = !ourForm && !task && nowMs() - g_avatarMadeAt.load() < 2500;
+        if (hold && !(flag & 1))
+        {
+            flag |= 1u;
+            std::memcpy(rdram + kDriveOn, &flag, 4);
+            g_heldDrive = true;
+        }
+        else if (!hold && g_heldDrive)
+        {
+            g_heldDrive = false;
+            if (!ourForm && !task)
+            {
+                flag &= ~1u;
+                std::memcpy(rdram + kDriveOn, &flag, 4);
+            }
+        }
+        if ((flag & 1) && !ourForm && !task && !hold)
         {
             flag &= ~1u;
             std::memcpy(rdram + kDriveOn, &flag, 4);
@@ -825,6 +899,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         lastTaskMs = nowMs();
     const bool ourDriveBusy = driveTask || nowMs() - lastTaskMs < 1500 || nowMs() - driveClearAt < 3000;
     const bool cutscene = st.control == 3;
+    bool ourInForm = false;
+    if (g_ourPlayer && live(rdram, g_ourPlayer))
+    {
+        const uint32_t rec = rd<uint32_t>(rdram, g_ourPlayer + kh2state::addr::ObjEntry);
+        ourInForm = inRam(rec) && kh2partner::formBaseLook(rdram, uint16_t(rd<uint32_t>(rdram, rec) & 0xFFFF)) != 0;
+    }
     uint32_t sheetIndex = 0;
     for (const kh2partner::Remote &r : remotes)
     {
@@ -895,6 +975,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // model: invisible, drawn from null.)
         if (here && !cutscene && s.object && s.entry != want && ourDriveBusy)
             continue;
+        // (Nor is a base look made while we are in a form: a base player
+        // object made then let go of our form player's motion (its helper
+        // called through nothing). The old look stays until we revert.)
+        if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 &&
+            (!s.object || s.entry != want))
+        {
+            if (s.object)
+                continue;
+            if (!s.pending)
+                continue;
+        }
         if (!here || cutscene || (s.object && s.entry != want))
         {
             if (s.object)
@@ -956,6 +1047,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                         t.store(0);
                 s.object = obj;
                 s.prepared = false;
+                g_avatarMadeAt = nowMs();
                 std::printf("[avatars] player %u's avatar is %08X\n", id + 1, obj);
                 std::fflush(stdout);
             });

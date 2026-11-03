@@ -1242,8 +1242,12 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         for (uint32_t o : kh2avatars::objects())
             if (o && o == player)
                 return;
+        // (No player at all: a room without one, a minigame's, say. Our
+        // state still goes out, with no body: holding it back left the
+        // others thinking we were still in the last room, and a client
+        // never followed the host into Timeless River 0D-08.)
         const uint32_t ours = kh2avatars::ourPlayer();
-        if (ours && player != ours)
+        if (ours && player && player != ours)
             return;
     }
     kh2net::PlayerState ps;

@@ -306,6 +306,7 @@ int32_t takeOrbHp(uint32_t sheet)
 // player's motion uses is not given back.
 constexpr uint32_t kCacheFree = 0x00170950, kCacheHeaders = 0x0034DCA0;
 PS2Runtime::RecompiledFunction g_cacheFree = nullptr;
+std::atomic<uint32_t> g_remake[4] = {}; // avatars whose Keyblade's files went (cacheFreeHook -> update())
 std::atomic<uint32_t> g_ourPlayerForFree{0};
 void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
@@ -346,6 +347,71 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         ctx->pc = getRegU32(ctx, 31);
         return;
+    }
+    // A file an avatar's Keyblade uses, let go of for the last time: its
+    // Keyblade shares our files without a reference of its own, and when our
+    // Keyblade changes in the menu the game lets go of ours and reads the new
+    // one over them (the avatar's Keyblade then posed from that: null calls
+    // at 0x0017FE84 every frame, garbage drawn). That avatar is made again
+    // (update()), its Keyblade from its own files.
+    if (ctx->pc == kCacheFree)
+    {
+        const uint32_t a0 = getRegU32(ctx, 4);
+        uint32_t hh = 0, header = 0;
+        std::memcpy(&hh, rdram + kCacheHeaders, 4);
+        for (int i = 0; i < 2048 && hh >= 0x00100000u && hh < 0x02000000u; ++i)
+        {
+            uint32_t data = 0, next = 0;
+            std::memcpy(&data, rdram + hh + 0x30, 4);
+            std::memcpy(&next, rdram + hh + 0x3C, 4);
+            if (hh == a0 || data == a0)
+            {
+                header = hh;
+                break;
+            }
+            hh = next;
+        }
+        uint16_t refs = 0;
+        uint32_t data = 0, size = 0;
+        if (header)
+        {
+            std::memcpy(&refs, rdram + header + 2, 2);
+            std::memcpy(&data, rdram + header + 0x30, 4);
+            std::memcpy(&size, rdram + header + 0x2C, 4);
+        }
+        if (header && refs <= 1 && data >= 0x00100000u && size && size < 0x01000000u)
+            for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+            {
+                if (a.type != 5)
+                    continue;
+                uint32_t owner = 0;
+                std::memcpy(&owner, rdram + ((a.address + kWeaponOwner) & 0x01FFFFFFu), 4);
+                bool avatars = false;
+                for (const auto &o : g_avatarObjs)
+                    avatars = avatars || (owner && o.load(std::memory_order_relaxed) == owner);
+                if (!avatars)
+                    continue;
+                bool uses = false;
+                for (uint32_t off = 0; off < 0xE00 && !uses; off += 4)
+                {
+                    uint32_t v = 0;
+                    std::memcpy(&v, rdram + ((a.address + off) & 0x01FFFFFFu), 4);
+                    uses = v >= data && v < data + size;
+                }
+                if (!uses)
+                    continue;
+                for (auto &slot : g_remake)
+                {
+                    uint32_t expected = 0;
+                    if (slot.load() == owner || slot.compare_exchange_strong(expected, owner))
+                        break;
+                }
+                char name[40] = {};
+                std::memcpy(name, rdram + header + 4, 36);
+                std::printf("[avatars] %s goes, and avatar %08X's Keyblade %08X uses it: the avatar is made again\n",
+                            name, owner, a.address);
+                std::fflush(stdout);
+            }
     }
     // (Diagnostics: the frees for a few seconds after an avatar's teardown.)
     if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 4000)
@@ -696,6 +762,45 @@ void wrapAngleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 // (Diagnostics: an animation step (FUN_00128480(a0, a1)) through a1+0x14
+// (Diagnostics: FUN_0017FE10(out, MOTION*, t) calls the motion's helper
+// (+0xC) through its vtable +0x18; logged when that is empty: whose motion.)
+constexpr uint32_t kMotionPose = 0x0017FE10;
+PS2Runtime::RecompiledFunction g_motionPose = nullptr;
+void motionPoseHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t m = getRegU32(ctx, 5);
+    if (ctx->pc == kMotionPose && inRam(m))
+    {
+        const uint32_t helper = rd<uint32_t>(rdram, m + 0xC);
+        const uint32_t vt = inRam(helper) ? rd<uint32_t>(rdram, helper) : 0;
+        const uint32_t fn = inRam(vt) ? rd<uint32_t>(rdram, vt + 0x18) : 0;
+        static int logged = 0;
+        if (!fn && inRam(helper) && logged < 30 && g_ourPlayerShared.load() != 0)
+        {
+            ++logged;
+            uint32_t owner = 0;
+            const char *name = "?";
+            static char buf[40];
+            for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
+                if (a.address + kh2state::addr::ObjMotion == m)
+                {
+                    owner = a.address;
+                    std::snprintf(buf, sizeof buf, "%.32s", a.name);
+                    name = buf;
+                }
+            std::printf("[avatars] motion %08X (owner %08X %s) helper %08X vt %08X: no pose handler (ra %08X); "
+                        "our player %08X, avatars", m, owner, name, helper, vt, getRegU32(ctx, 31),
+                        g_ourPlayerShared.load());
+            for (const auto &o : g_avatarObjs)
+                if (const uint32_t x = o.load())
+                    std::printf(" %08X", x);
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+    }
+    kh2::callOriginal(g_motionPose, rdram, ctx, runtime);
+}
+
 // whose vtable slot +0x20 is empty: whose, and what the avatars are.)
 constexpr uint32_t kAnimStep = 0x00128480;
 PS2Runtime::RecompiledFunction g_animStep = nullptr;
@@ -813,6 +918,9 @@ bool install(PS2Runtime &runtime)
     g_wrapAngle = runtime.lookupFunction(kWrapAngle);
     if (!g_wrapAngle || !runtime.replaceFunction(kWrapAngle, &wrapAngleHook))
         g_wrapAngle = nullptr;
+    g_motionPose = runtime.lookupFunction(kMotionPose);
+    if (!g_motionPose || !runtime.replaceFunction(kMotionPose, &motionPoseHook))
+        g_motionPose = nullptr;
     g_animStep = runtime.lookupFunction(kAnimStep);
     if (!g_animStep || !runtime.replaceFunction(kAnimStep, &animStepHook))
         g_animStep = nullptr;
@@ -1577,6 +1685,29 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     }
     kh2puppets::setOverrides(overrides, 2);
     kh2puppets::setMotionGuards(guards, 1);
+    // Avatars whose Keyblade's files went (cacheFreeHook): made again.
+    for (auto &slot : g_remake)
+    {
+        const uint32_t obj = slot.exchange(0);
+        if (!obj)
+            continue;
+        for (auto &[id, st2] : g_states)
+            for (uint32_t *o : {&st2.object, &st2.parked, &st2.baseKept})
+                if (*o == obj)
+                {
+                    std::printf("[avatars] player %u's avatar %08X is made again (its Keyblade's files went)\n", id + 1,
+                                obj);
+                    std::fflush(stdout);
+                    if (live(rdram, obj))
+                        removeAvatar(rdram, obj);
+                    *o = 0;
+                    if (o == &st2.object)
+                    {
+                        st2.prepared = false;
+                        st2.motion = 0xFFFF;
+                    }
+                }
+    }
     g_names = names;
     return heals;
 }

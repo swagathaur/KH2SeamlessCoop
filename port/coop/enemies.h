@@ -29,7 +29,7 @@ struct Local
     float pos[3] = {0, 0, 0};
     float yaw = 0;
     uint16_t motion = 0;
-    int32_t hp = 0, maxHp = 0;
+    int32_t hp = 0, maxHp = 0, minHp = 0;
     uint32_t sheet = 0; // YS::SHEET*: hp, max hp, min hp
 };
 

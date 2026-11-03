@@ -399,6 +399,7 @@ std::vector<Local> scan(const uint8_t *rdram)
         e.sheet = sheet;
         e.hp = rd<int32_t>(rdram, sheet);
         e.maxHp = rd<int32_t>(rdram, sheet + 4);
+        e.minHp = rd<int32_t>(rdram, sheet + 8);
         out.push_back(e);
     }
     return out;
@@ -422,6 +423,7 @@ kh2net::EnemyStates snapshot(const uint8_t *rdram, uint8_t world, uint8_t room, 
         es.motion = e.motion;
         es.hp = e.hp;
         es.maxHp = e.maxHp;
+        es.minHp = e.minHp;
         s.enemies.push_back(es);
     }
     if (s.enemies.size() != g_lastSentCount)
@@ -696,6 +698,15 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             // more (scaling.h), and a copy with fewer would die here first.
             if (h->maxHp > 0 && h->maxHp != e.maxHp)
                 std::memcpy(rdram + ((e.sheet + 4) & 0x01FFFFFFu), &h->maxHp, 4);
+            // And its floor: a boss's script on the host raises it before a
+            // move it must live to make; ours does not run (it follows), and
+            // our blow killed our copy while the host's lived on.
+            if (h->minHp >= 0 && h->minHp < h->maxHp && h->minHp != e.minHp)
+            {
+                std::memcpy(rdram + ((e.sheet + 8) & 0x01FFFFFFu), &h->minHp, 4);
+                std::printf("[enemies] %04X #%d: the host's HP floor %d\n", e.entry, e.serial, h->minHp);
+                std::fflush(stdout);
+            }
             if (h->hp != hp)
             {
                 std::memcpy(rdram + (e.sheet & 0x01FFFFFFu), &h->hp, 4);

@@ -52,6 +52,7 @@ void writeEnemyStates(ByteWriter &w, const EnemyStates &s)
         w.u16(e.motion);
         w.i32(e.hp);
         w.i32(e.maxHp);
+        w.i32(e.minHp);
     }
 }
 
@@ -75,6 +76,7 @@ bool readEnemyStates(ByteReader &r, EnemyStates &s)
         e.motion = r.u16();
         e.hp = r.i32();
         e.maxHp = r.i32();
+        e.minHp = r.i32();
     }
     return r.ok();
 }

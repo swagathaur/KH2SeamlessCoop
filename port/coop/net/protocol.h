@@ -25,7 +25,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 8;
+constexpr uint8_t kProtocolVersion = 9;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -113,6 +113,9 @@ struct EnemyState
     float yaw = 0;
     uint16_t motion = 0;
     int32_t hp = 0, maxHp = 0;
+    // The least HP its game lets it go to (the sheet's +8): a boss's script
+    // raises it before a move it must live to make.
+    int32_t minHp = 0;
 };
 struct EnemyStates
 {

@@ -11,7 +11,7 @@
 // virtual call, the game's main thread ended (a hang), or garbage drawn.
 //
 // So an avatar's form look is read into a batch of groups of its own
-// (4980 up) that the walk leaves out: each of its files is placed once, in
+// (4964-4995) that the walk leaves out: each of its files is placed once, in
 // the free room above everything else, and stays put until no object uses it.
 // Such a file is never shared with Sora's own form files (those go when he
 // reverts); Sora's drive may share ours (they stay while he uses them).
@@ -41,6 +41,8 @@ void hideForDrive(uint8_t *rdram);
 
 // Each frame (game thread): batches no one wants or uses any more go.
 void tick(uint8_t *rdram);
+// A cache group of ours (an avatar's or a remote summon's look)?
+bool ourGroup(int32_t group);
 // The session is over: all batches go.
 void reset(uint8_t *rdram);
 } // namespace kh2formcache

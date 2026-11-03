@@ -44,11 +44,15 @@ constexpr uint32_t kDriveTask = 0x00351184;  // YS::CHANGEFORM's task (our own d
 // patch 0052). Nothing of the game's is ever there.
 constexpr uint32_t kOurs = 0x02000000u, kOursEnd = 0x03C00000u; // (the top 4 MB: the effect pool, fxpool.h)
 
-// The batches: 4 of 4 groups (a form entry reads its model into the first,
-// its weapons into the next ones: FUN_0016EB48(entry, group, 4, 7)).
-constexpr int32_t kPoolFirst = 4980, kBatchGroups = 4, kBatches = 4;
+// The batches: 8 of 4 groups (a form entry reads its model into the first,
+// its weapons into the next ones: FUN_0016EB48(entry, group, 4, 7)), below
+// Sora's form groups (5000 up); no file of the game's has a group in 4900s.
+// (8: two players in forms, each with a summon out, and a look on its way
+// out while the next comes in.)
+constexpr int32_t kPoolFirst = 4964, kBatchGroups = 4, kBatches = 8;
 constexpr int32_t kPoolEnd = kPoolFirst + kBatchGroups * kBatches;
 bool isPool(int32_t g) { return g >= kPoolFirst && g < kPoolEnd; }
+static_assert(kPoolEnd <= 5000, "Sora's form groups start at 5000");
 int32_t batchOf(int32_t g) { return kPoolFirst + (g - kPoolFirst) / kBatchGroups * kBatchGroups; }
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
@@ -470,6 +474,8 @@ Look want(uint8_t *rdram, uint16_t entry)
     kh2puppets::requestFormLoad(entry, uint32_t(base));
     return Look::Loading;
 }
+
+bool ourGroup(int32_t group) { return isPool(group); }
 
 void tick(uint8_t *rdram)
 {

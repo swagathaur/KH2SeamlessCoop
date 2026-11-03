@@ -315,7 +315,7 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // room) had already; it holds no references of its own to give back.
     const int64_t sinceTeardown = nowMs() - g_avatarTornAt.load(std::memory_order_relaxed);
     // (Not a file read for the avatar itself: its form look's own copies,
-    // kh2formcache's groups 4980-4995. Those references are its own.)
+    // kh2formcache's groups. Those references are its own.)
     bool ownCopy = false;
     if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 20)
     {
@@ -331,7 +331,7 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             std::memcpy(&g, rdram + hh + 0x28, 4);
             if (hh == a0 || data == a0)
             {
-                ownCopy = g >= 4980 && g < 4996;
+                ownCopy = kh2formcache::ourGroup(g);
                 break;
             }
             hh = next;

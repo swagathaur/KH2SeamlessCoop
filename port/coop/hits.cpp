@@ -146,7 +146,11 @@ void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t player = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
             const uint32_t param = rd<uint32_t>(rdram, dmg + kDmgParam);
-            if (player && rd<uint32_t>(rdram, dmg + kDmgAttacker) == player && isEnemy(rdram, obj) && inRam(param))
+            // (Or our summon: summons.h. Its hits' HP went to the host
+            // already, as any HP our copies lose; now their reactions too.)
+            const uint32_t summon = rd<uint32_t>(rdram, 0x01D49968u) ? rd<uint32_t>(rdram, 0x01D49960u) : 0;
+            const uint32_t by = rd<uint32_t>(rdram, dmg + kDmgAttacker);
+            if (((player && by == player) || (summon && by == summon)) && isEnemy(rdram, obj) && inRam(param))
             {
                 Hit h;
                 h.object = obj;

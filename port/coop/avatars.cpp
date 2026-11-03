@@ -761,98 +761,6 @@ void wrapAngleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_wrapAngle, rdram, ctx, runtime);
 }
 
-// (Diagnostics: an animation step (FUN_00128480(a0, a1)) through a1+0x14
-// (Diagnostics: FUN_0017FE10(out, MOTION*, t) calls the motion's helper
-// (+0xC) through its vtable +0x18; logged when that is empty: whose motion.)
-constexpr uint32_t kMotionPose = 0x0017FE10;
-PS2Runtime::RecompiledFunction g_motionPose = nullptr;
-void motionPoseHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    const uint32_t m = getRegU32(ctx, 5);
-    if (ctx->pc == kMotionPose && inRam(m))
-    {
-        const uint32_t helper = rd<uint32_t>(rdram, m + 0xC);
-        const uint32_t vt = inRam(helper) ? rd<uint32_t>(rdram, helper) : 0;
-        const uint32_t fn = inRam(vt) ? rd<uint32_t>(rdram, vt + 0x18) : 0;
-        static int logged = 0;
-        if (!fn && inRam(helper) && logged < 30 && g_ourPlayerShared.load() != 0)
-        {
-            ++logged;
-            uint32_t owner = 0;
-            const char *name = "?";
-            static char buf[40];
-            for (const kh2state::ActorInfo &a : kh2state::actors(rdram))
-                if (a.address + kh2state::addr::ObjMotion == m)
-                {
-                    owner = a.address;
-                    std::snprintf(buf, sizeof buf, "%.32s", a.name);
-                    name = buf;
-                }
-            std::printf("[avatars] motion %08X (owner %08X %s) helper %08X vt %08X: no pose handler (ra %08X); "
-                        "our player %08X, avatars", m, owner, name, helper, vt, getRegU32(ctx, 31),
-                        g_ourPlayerShared.load());
-            for (const auto &o : g_avatarObjs)
-                if (const uint32_t x = o.load())
-                    std::printf(" %08X", x);
-            std::printf("\n");
-            std::fflush(stdout);
-        }
-    }
-    kh2::callOriginal(g_motionPose, rdram, ctx, runtime);
-}
-
-// whose vtable slot +0x20 is empty: whose, and what the avatars are.)
-constexpr uint32_t kAnimStep = 0x00128480;
-PS2Runtime::RecompiledFunction g_animStep = nullptr;
-void animStepHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    if (ctx->pc == kAnimStep)
-    {
-        const uint32_t a0 = getRegU32(ctx, 4), a1 = getRegU32(ctx, 5);
-        auto rd64 = [&](uint32_t x) {
-            uint32_t v = 0;
-            std::memcpy(&v, rdram + (x & 0x03FFFFFFu), 4);
-            return v;
-        };
-        auto ok = [](uint32_t x) { return x >= 0x00100000u && x < 0x04000000u; };
-        const uint32_t h = ok(a1) ? rd64(a1 + 0x14) : 0;
-        const uint32_t vt = ok(h) ? rd64(h) : 0;
-        const uint32_t fn = ok(vt) ? rd64(vt + 0x20) : 0;
-        if (!fn)
-        {
-            static int logged = 0;
-            if (logged++ < 6)
-            {
-                std::string av;
-                for (const auto &o : g_avatarObjs)
-                    if (const uint32_t v = o.load())
-                    {
-                        char b[12];
-                        std::snprintf(b, sizeof b, " %08X", v);
-                        av += b;
-                    }
-                const uint32_t sp = getRegU32(ctx, 29);
-                std::string trail;
-                for (uint32_t o = 0; o < 0x200 && inRam(sp + o); o += 4)
-                {
-                    const uint32_t v = rd<uint32_t>(rdram, sp + o);
-                    if (v >= 0x00100000u && v < 0x00380000u && (v & 3) == 0)
-                    {
-                        char b[12];
-                        std::snprintf(b, sizeof b, " %08X", v);
-                        trail += b;
-                    }
-                }
-                std::printf("[avatars] animation step with no handler: a0 %08X a1 %08X (+0x14 %08X vt %08X) ra %08X s0 %08X s1 %08X s2 %08X s3 %08X; our player %08X; avatars%s; stack%s\n",
-                            a0, a1, h, vt, getRegU32(ctx, 31), getRegU32(ctx, 16), getRegU32(ctx, 17), getRegU32(ctx, 18),
-                            getRegU32(ctx, 19), g_ourPlayerShared.load(), av.c_str(), trail.c_str());
-                std::fflush(stdout);
-            }
-        }
-    }
-    kh2::callOriginal(g_animStep, rdram, ctx, runtime);
-}
-
 // (Diagnostics: a pure virtual call (0x003155C0) ends the game's main
 // thread: where it came from, and the code addresses on the stack.)
 constexpr uint32_t kPureVirtual = 0x003155C0;
@@ -918,12 +826,6 @@ bool install(PS2Runtime &runtime)
     g_wrapAngle = runtime.lookupFunction(kWrapAngle);
     if (!g_wrapAngle || !runtime.replaceFunction(kWrapAngle, &wrapAngleHook))
         g_wrapAngle = nullptr;
-    g_motionPose = runtime.lookupFunction(kMotionPose);
-    if (!g_motionPose || !runtime.replaceFunction(kMotionPose, &motionPoseHook))
-        g_motionPose = nullptr;
-    g_animStep = runtime.lookupFunction(kAnimStep);
-    if (!g_animStep || !runtime.replaceFunction(kAnimStep, &animStepHook))
-        g_animStep = nullptr;
     g_formTaskBody = runtime.lookupFunction(kFormTaskBody);
     if (!g_formTaskBody || !runtime.replaceFunction(kFormTaskBody, &formTaskHook))
         g_formTaskBody = nullptr;

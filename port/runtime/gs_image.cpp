@@ -17,6 +17,7 @@
 #include "gs_image.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -107,7 +108,7 @@ void execLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // busy VU1 (a quarter of its time in crowded scenes on Android).
     runtime->memory().queueGifPacketPath3(packet.data(), static_cast<uint32_t>(packet.size()));
 
-    static int logged = 0;
+    static int logged = std::getenv("KH2_GS_IMAGE_LOG") ? 0 : 400; // (diagnostics, off by default)
     if (logged < 400)
     {
         ++logged;

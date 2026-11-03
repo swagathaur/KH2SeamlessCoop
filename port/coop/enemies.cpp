@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <random>
 
 #include "game_state.h"
 #include "guest_call.h"
@@ -45,6 +46,7 @@ template <typename T> T rd(const uint8_t *ram, uint32_t a)
     std::memcpy(&v, ram + (a & 0x01FFFFFFu), sizeof(T));
     return v;
 }
+template <typename T> void wr(uint8_t *ram, uint32_t a, T v) { std::memcpy(ram + (a & 0x01FFFFFFu), &v, sizeof(T)); }
 bool inRam(uint32_t a) { return a >= 0x00100000u && a < 0x02000000u; }
 
 std::mutex g_mutex;
@@ -223,8 +225,149 @@ void removeBody(uint32_t obj)
 }
 } // namespace
 
+namespace
+{
+uint32_t hostSpawnSeedImpl(uint8_t world, uint8_t room, bool &fresh);
+// The room spawn script's step, FUN_00181DA0(this, code): code[0] is the
+// op; op 2 (RandomSpawn) registers one of its code[1] groups by the game's
+// random number at 0x003638D0 (x 0x10DCD, then / ((2^32 + n - 1) / n)),
+// op 3 (CasualSpawn) its group when that number / 0x28F5C29 is below its
+// percent (as found on the PC release by the Kingdom-Hearts-II-Coop-
+// Multiplayer project, F430; the same code here). For those two ops the
+// number is set from the room's shared seed and the draw's count, and the
+// game's own put back after.
+constexpr uint32_t kAreaOp = 0x00181DA0, kAreaRandom = 0x003638D0;
+PS2Runtime::RecompiledFunction g_areaOp = nullptr;
+std::atomic<bool> g_seedOn{false}, g_seedHost{false};
+std::mutex g_seedMutex;
+uint16_t g_seedKey = 0xFFFF;     // the room the seed below is for (world << 8 | room)
+uint32_t g_seed = 0;
+uint32_t g_drawSeed = 0;         // the seed the draws below were counted under (game thread)
+uint32_t g_draws = 0;
+
+uint32_t mixSeed(uint32_t seed, uint16_t key, uint32_t draw)
+{
+    uint32_t x = seed ^ (uint32_t(key) * 0x9E3779B1u) ^ (draw * 0x85EBCA77u);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x | 1u;
+}
+
+void areaOpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t code = getRegU32(ctx, 5);
+    const uint16_t op = inRam(code) ? rd<uint16_t>(rdram, code) : 0xFFFF;
+    if (ctx->pc != kAreaOp || (op != 2 && op != 3) || !g_seedOn.load(std::memory_order_relaxed))
+    {
+        kh2::callOriginal(g_areaOp, rdram, ctx, runtime);
+        return;
+    }
+    const kh2state::State st = kh2state::read(rdram);
+    const uint16_t key = uint16_t(st.now.world << 8 | st.now.room);
+    uint32_t seed = 0;
+    bool have = false;
+    if (g_seedHost.load(std::memory_order_relaxed))
+    {
+        bool fresh = false;
+        seed = hostSpawnSeedImpl(st.now.world, st.now.room, fresh);
+        have = true;
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(g_seedMutex);
+        have = g_seedKey == key;
+        seed = g_seed;
+    }
+    if (!have)
+    {
+        static int logged = 0;
+        if (logged++ < 10)
+        {
+            std::printf("[enemies] a random spawn pick in %02X-%02X before the host's seed came: our own\n",
+                        st.now.world, st.now.room);
+            std::fflush(stdout);
+        }
+        kh2::callOriginal(g_areaOp, rdram, ctx, runtime);
+        return;
+    }
+    if (seed != g_drawSeed)
+    {
+        g_drawSeed = seed; // (a new seed with each room entered: its draws count from 0)
+        g_draws = 0;
+    }
+    const uint32_t own = rd<uint32_t>(rdram, kAreaRandom);
+    const uint32_t draw = g_draws++;
+    const uint32_t shared = mixSeed(seed, key, draw);
+    wr<uint32_t>(rdram, kAreaRandom, shared);
+    const uint32_t after = shared * 0x10DCDu; // (what the op's draw leaves there)
+    if (kh2::callOriginalReturned(g_areaOp, rdram, ctx, runtime, kAreaOp) || rd<uint32_t>(rdram, kAreaRandom) == after)
+        wr<uint32_t>(rdram, kAreaRandom, own);
+    static int logged = 0;
+    if (logged++ < 40)
+    {
+        // (What the op picks from it: op 2 group (after / ((2^32 + n - 1) / n)) of n,
+        // op 3 the roll (after / 0x28F5C29) against its percent.)
+        const uint64_t n = uint64_t(uint16_t(rd<int16_t>(rdram, code + 2)));
+        const uint64_t pick = op == 2 && n ? uint64_t(after) / (((1ull << 32) + n - 1) / n) : uint64_t(after) / 0x28F5C29u;
+        std::printf("[enemies] random spawn op %u in %02X-%02X, draw %u: %s %llu (of %llu) from the shared seed\n", op,
+                    st.now.world, st.now.room, draw, op == 2 ? "group" : "roll", (unsigned long long)pick,
+                    (unsigned long long)(op == 2 ? n : 100));
+        std::fflush(stdout);
+    }
+}
+} // namespace
+
+uint32_t hostSpawnSeed(uint8_t world, uint8_t room, bool &fresh) { return hostSpawnSeedImpl(world, room, fresh); }
+
+namespace
+{
+uint32_t hostSpawnSeedImpl(uint8_t world, uint8_t room, bool &fresh)
+{
+    std::lock_guard<std::mutex> lock(g_seedMutex);
+    const uint16_t key = uint16_t(world << 8 | room);
+    fresh = false;
+    if (key != g_seedKey)
+    {
+        static std::mt19937 rng{std::random_device{}()};
+        g_seedKey = key;
+        g_seed = rng() | 1u;
+        fresh = true;
+    }
+    return g_seed;
+}
+} // namespace
+
+void onSpawnSeed(uint8_t world, uint8_t room, uint32_t seed)
+{
+    std::lock_guard<std::mutex> lock(g_seedMutex);
+    g_seedKey = uint16_t(world << 8 | room);
+    g_seed = seed;
+    std::printf("[enemies] the host's spawn seed for %02X-%02X came\n", world, room);
+    std::fflush(stdout);
+}
+
+void setSpawnSeeding(bool on, bool host)
+{
+    g_seedHost = host;
+    g_seedOn = on;
+    if (!on)
+    {
+        std::lock_guard<std::mutex> lock(g_seedMutex);
+        g_seedKey = 0xFFFF;
+    }
+}
+
 bool install(PS2Runtime &runtime)
 {
+    g_areaOp = runtime.lookupFunction(kAreaOp);
+    if (!g_areaOp || !runtime.replaceFunction(kAreaOp, &areaOpHook))
+    {
+        std::fprintf(stderr, "[enemies] could not hook the room spawn script (0x%08X)\n", kAreaOp);
+        g_areaOp = nullptr;
+    }
     g_spawnUnit = runtime.lookupFunction(kSpawnUnit);
     if (!g_spawnUnit || !runtime.replaceFunction(kSpawnUnit, &spawnUnitHook))
     {

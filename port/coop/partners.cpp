@@ -156,15 +156,19 @@ uint16_t baseLook(const uint8_t *rdram, uint16_t model)
         std::memcpy(name, dressed->second.original, 32);
     else
         std::memcpy(name, rdram + ((rec + kEntryLook) & 0x01FFFFFFu), 32);
+    // (Also a costume world's own forms: "P_EX100_NM_BTLF" -> "P_EX100_NM",
+    // Halloween Town's; _XM_ Christmas Town, _TR_ Space Paranoids, _WI_
+    // Timeless River.)
     static const char *const kForms[] = {"_BTLF", "_MAGF", "_TRIF", "_ULTF", "_HTLF", "_KH1F"};
-    if (std::strncmp(name, "P_EX", 4) != 0 || std::strlen(name) < 12)
+    const size_t len = std::strlen(name);
+    if (std::strncmp(name, "P_EX", 4) != 0 || len < 12)
         return 0;
     bool form = false;
     for (const char *f : kForms)
-        form = form || std::strcmp(name + 7, f) == 0;
+        form = form || std::strcmp(name + len - 5, f) == 0;
     if (!form)
         return 0;
-    name[7] = 0;
+    name[len - 5] = 0;
     // The entry whose own look that is (not one of ours dressed in it).
     const uint32_t table = rd<uint32_t>(rdram, kh2state::addr::Obj0Ptr);
     if (!table || table >= 0x02000000u)
@@ -319,11 +323,17 @@ struct Fill
 std::vector<Fill> g_fill;   // under g_mutex
 bool g_fillRefresh = false; // a slot in this room's world was just filled
 
+// Party places keepParty left out for the avatars (save address -> who was
+// there). Like the fills, saves never see it.
+std::map<uint32_t, uint8_t> g_trimmed; // under g_mutex
+
 void publishFill()
 {
     std::vector<std::pair<uint32_t, uint8_t>> o;
     for (const Fill &f : g_fill)
         o.emplace_back(f.addr - kh2state::addr::Save, f.original);
+    for (const auto &[addr, was] : g_trimmed)
+        o.emplace_back(addr - kh2state::addr::Save, was);
     kh2story::setSaveOverrides(o);
 }
 
@@ -1546,10 +1556,10 @@ std::vector<uint8_t> localLoadout(const uint8_t *rdram)
 
 // Avatars: a world's party slots past one per other player are emptied
 // (the room then makes only the place holders), and given back when the
-// session ends (keep < 0). Per save address, what was there.
-std::map<uint32_t, uint8_t> g_trimmed;
+// session ends (keep < 0). Per save address, what was there (g_trimmed).
 void keepParty(uint8_t *rdram, uint8_t world, int keep)
 {
+    std::lock_guard<std::mutex> lock(g_mutex);
     if (keep < 0 || world == 0 || world >= 0x20)
     {
         for (const auto &[addr, was] : g_trimmed)
@@ -1561,8 +1571,11 @@ void keepParty(uint8_t *rdram, uint8_t world, int keep)
             std::fflush(stdout);
         }
         g_trimmed.clear();
+        publishFill();
         return;
     }
+    const size_t before = g_trimmed.size();
+    bool changed = false;
     for (int k = 1; k <= 3; ++k)
     {
         const uint32_t addr = kSaveParty + uint32_t(world) * 4u + uint32_t(k);
@@ -1570,6 +1583,7 @@ void keepParty(uint8_t *rdram, uint8_t world, int keep)
         if (k > keep && cur != kNobody)
         {
             g_trimmed.emplace(addr, cur);
+            changed = true;
             wr<uint8_t>(rdram, addr, kNobody);
             std::printf("[partner] party place %d of world %02X (%02X) left out: the other players are the party\n", k,
                         world, cur);
@@ -1583,11 +1597,13 @@ void keepParty(uint8_t *rdram, uint8_t world, int keep)
                 if (cur == kNobody)
                     wr<uint8_t>(rdram, addr, it->second);
                 g_trimmed.erase(it);
+                changed = true;
             }
         }
     }
+    if (changed || g_trimmed.size() != before)
+        publishFill();
 }
-
 void setReduceParty(bool on, int players)
 {
     g_reduceTo = std::min(players, 2);

@@ -66,6 +66,18 @@ void onOwnKill(uint32_t object);
 // the game's way. false: no live copy to kill.
 bool onHostKill(uint8_t *rdram, uint8_t world, uint8_t room, int16_t serial, uint16_t entry, const kh2hits::Hit &hit,
                 uint32_t attacker, double now);
+// Random enemy sets: a room's spawn script picks a group (RandomSpawn) or
+// rolls for one (CasualSpawn) from the game's random number, so each game
+// made its own pick and the client's enemies were not the host's. The host
+// gives each room it enters a seed (sent with SpawnSeed); in a session, both
+// games draw those picks from it, in the same order, so they pick the same.
+// Host: this room's seed, made anew when the room changes (`fresh`: just made).
+uint32_t hostSpawnSeed(uint8_t world, uint8_t room, bool &fresh);
+// Client: the host's seed for a room (from the SpawnSeed event).
+void onSpawnSeed(uint8_t world, uint8_t room, uint32_t seed);
+// In a session (both sides) or not: the picks are shared only in one.
+void setSpawnSeeding(bool on, bool host);
+
 // Forget everything (session ended). The enemies whose AI we turned off get
 // it back on the next thawAfterSession() (host loop, with the guest's memory).
 void reset();

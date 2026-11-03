@@ -519,6 +519,14 @@ void makeSession()
             }
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::SpawnSeed) && !g_session->isHost())
+        {
+            if (data.size() == 6)
+                kh2enemies::onSpawnSeed(data[0], data[1],
+                                        uint32_t(data[2]) | uint32_t(data[3]) << 8 | uint32_t(data[4]) << 16 |
+                                            uint32_t(data[5]) << 24);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling) && !g_session->isHost())
         {
             kh2scale::onHostSettings(data);
@@ -998,6 +1006,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2downed::reset(ram);
         endStory(ram);
         kh2hits::setCapture(false);
+        kh2enemies::setSpawnSeeding(false, false);
         kh2spells::setCapture(false);
         kh2hits::setBlockedAttackers({});
         kh2hits::setProtectedTargets({});
@@ -1202,6 +1211,23 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     kh2hits::setCapture(g_opt.sharedEnemies && !g_session->isHost());
     kh2hits::setKillCapture(g_opt.sharedEnemies && g_session->isHost());
+    // Random enemy sets (enemies.h): the host's seed for each room it enters.
+    kh2enemies::setSpawnSeeding(g_opt.sharedEnemies, g_session->isHost());
+    if (g_opt.sharedEnemies && g_session->isHost())
+    {
+        static uint16_t sentKey = 0xFFFF;
+        const kh2state::State me = kh2state::read(rdram);
+        const uint16_t key = uint16_t(me.now.world << 8 | me.now.room);
+        if (key != sentKey)
+        {
+            sentKey = key;
+            bool fresh = false;
+            const uint32_t seed = kh2enemies::hostSpawnSeed(me.now.world, me.now.room, fresh);
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SpawnSeed),
+                                 {me.now.world, me.now.room, uint8_t(seed), uint8_t(seed >> 8), uint8_t(seed >> 16),
+                                  uint8_t(seed >> 24)});
+        }
+    }
     // 30 updates a second: every other guest frame.
     if (guestFrame / 2 == g_lastSentFrame / 2)
         return;

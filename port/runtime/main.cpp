@@ -989,6 +989,7 @@ void dumpGs(Harness &h, uint64_t frame)
 //   actors                                     the object list (as --actors-at)
 //   gifcap                                     the next frame of GIF packets (as --gif-capture)
 //   gsdump                                     GS registers, draws and memory (as --gs-dump) 3 frames on
+//   savetest                                   a save image as the save menu makes it (as --story-save-test)
 //   echo TEXT                                  "[control] echo TEXT" (a marker to wait for)
 //   partner on|off                             the Echo test partner (as --partner-test)
 //   freeze ADDR HEXBYTES | unfreeze ADDR       write those bytes every frame (e.g. full HP)
@@ -1174,6 +1175,12 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             unsigned w = 0, r = 0, b = 0xFFFF, e = 0xFFFF;
             ls >> w >> r >> b >> e;
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
+            say(line);
+        }
+        else if (cmd == "savetest")
+        {
+            // A memory card image made as the save menu would, and what it holds.
+            kh2story::testSave();
             say(line);
         }
         else if (cmd == "threads")

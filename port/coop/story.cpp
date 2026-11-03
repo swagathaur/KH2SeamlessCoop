@@ -396,6 +396,18 @@ void testSave()
         std::printf("[story] save test: the image holds %s (own story %s, the running story %s, place %02X-%02X)\n",
                     own ? "your own story" : running ? "the running story" : "neither", own ? "yes" : "no",
                     running ? "yes" : "no", env.host(*image)[kSaveLocation], env.host(*image)[kSaveLocation + 1]);
+        // The session-only party bytes (setSaveOverrides): the save's own
+        // values in the image, whatever the running game has.
+        size_t kept = 0;
+        for (const auto &[off, v] : g_saveOverrides)
+        {
+            const uint8_t inImage = env.host(*image)[off], running = env.rdram[kSave + off];
+            kept += inImage == v;
+            std::printf("[story] save test: offset %04X: image %02X, the save's own %02X, running %02X\n", off, inImage,
+                        v, running);
+        }
+        std::printf("[story] save test: %zu of %zu session-only byte(s) left out of the image\n", kept,
+                    g_saveOverrides.size());
         std::fflush(stdout);
         return std::nullopt;
     });

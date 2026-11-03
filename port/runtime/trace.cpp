@@ -42,6 +42,12 @@ const uint64_t kLogFirst = [] {
     return v > 0 ? static_cast<uint64_t>(v) : 8ull;
 }();
 
+// KH2_TRACE_A0=hex: only calls with this a0 are counted and logged.
+const uint32_t kOnlyA0 = [] {
+    const char *e = std::getenv("KH2_TRACE_A0");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0u;
+}();
+
 void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t address = ctx->pc;
@@ -52,6 +58,11 @@ void wrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     Traced &t = *it->second;
+    if (kOnlyA0 && getRegU32(ctx, 4) != kOnlyA0)
+    {
+        kh2::callOriginal(t.original, rdram, ctx, runtime);
+        return;
+    }
     const uint64_t n = t.calls.fetch_add(1) + 1;
     {
         std::lock_guard<std::mutex> lock(t.raMutex);

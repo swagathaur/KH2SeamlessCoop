@@ -20,6 +20,7 @@
 #include "spells.h"
 #include "roomlock.h"
 #include "avatars.h"
+#include "summons.h"
 #include "names.h"
 #include "puppets.h"
 #include "story.h"
@@ -776,9 +777,15 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             p.maxHp = ps.maxHp;
             p.mp = ps.mp;
             p.maxMp = ps.maxMp;
+            p.summon = ps.summon;
+            std::memcpy(p.summonPos, ps.summonPos, sizeof(p.summonPos));
+            p.summonYaw = ps.summonYaw;
+            p.summonMotion = ps.summonMotion;
             p.loadout = r.loadout;
             list.push_back(p);
         }
+    // Their summons (summons.h), shown here while they have one out.
+    kh2summons::update(ram, list);
     // Avatars (avatars.h): second players for them; the partners stand down.
     std::vector<kh2partner::Heal> heals;
     if (kh2avatars::enabled())
@@ -997,6 +1004,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2spells::setOthersKnow({}, false);
         if (kh2avatars::enabled())
             kh2avatars::reset(ram);
+            kh2summons::reset(ram);
             kh2partner::keepParty(ram, 0, -1); // the party as it was
         kh2puppets::update(rdram, {});
         kh2scale::tick(ram, false, false, 1);
@@ -1021,6 +1029,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
                 standIns.push_back(a.object);
         std::vector<uint32_t> avatars = kh2avatars::objects();
         standIns.insert(standIns.end(), avatars.begin(), avatars.end());
+        for (uint32_t o : kh2summons::objects())
+            standIns.push_back(o);
         kh2hits::setProtectedTargets(avatars);
         kh2hits::setBlockedAttackers(std::move(standIns));
         kh2spells::setCapture(true);
@@ -1241,6 +1251,8 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     ps.mp = st.party[0].mp;
     ps.maxMp = st.party[0].maxMp;
     ps.weapon = kh2partner::localWeaponEntry(rdram);
+    if (st.player.valid)
+        kh2summons::localSummon(rdram, ps);
     g_session->sendState(ps);
 }
 

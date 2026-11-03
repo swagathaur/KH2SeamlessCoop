@@ -100,6 +100,12 @@ private:
         s.rotY = lerpAngle(a.rotY, b.rotY, f > 1 ? 1 : f);
         if (a.anim == b.anim)
             s.animTime = a.animTime + (b.animTime - a.animTime) * f;
+        if (a.summon && a.summon == b.summon)
+        {
+            for (int i = 0; i < 3; ++i)
+                s.summonPos[i] = a.summonPos[i] + (b.summonPos[i] - a.summonPos[i]) * f;
+            s.summonYaw = lerpAngle(a.summonYaw, b.summonYaw, f > 1 ? 1 : f);
+        }
         return s;
     }
 

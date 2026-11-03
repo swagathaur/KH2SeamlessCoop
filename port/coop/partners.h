@@ -55,6 +55,10 @@ struct Remote
     int16_t rideSerial = -1; // what they ride (protocol.h PlayerState)
     uint16_t rideEntry = 0, rideJoint = 0, rideFlags = 0, rideMotion = 0;
     int32_t hp = 0, maxHp = 0, mp = 0, maxMp = 0;
+    uint16_t summon = 0; // their summon's objentry id while one is out (protocol.h PlayerState)
+    float summonPos[3] = {0, 0, 0};
+    float summonYaw = 0;
+    uint16_t summonMotion = 0;
     std::vector<uint8_t> loadout; // their own save record (kLoadoutSize), or empty
 };
 

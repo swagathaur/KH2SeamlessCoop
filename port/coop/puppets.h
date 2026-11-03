@@ -33,7 +33,8 @@ struct Target
 // Party members other players stand in for (partners.h): only the motion
 // their player is playing may be started on them (object, motion index; up
 // to two; an empty list: none).
-// Channel 0: partners (partners.cpp); 1: avatars (avatars.cpp).
+// Channel 0: partners (partners.cpp); 1: avatars (avatars.cpp); 2: remote
+// summons (summons.cpp).
 void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects, int channel = 0);
 
 enum class Mode
@@ -59,6 +60,9 @@ void requestSpawn(uint32_t entryId, float distance = 150.0f);
 void requestPreload(uint32_t entryId);
 // A drive form's look, read into a cache group of its own (as the drive does).
 void requestFormLoad(uint32_t entryId, uint32_t group = 0x1387);
+// The private entries remote players' summons are made from (i = 0, 1):
+// NPC-class records, dressed with requestDress in the summon's look.
+uint32_t summonEntry(int i);
 // Give a puppet entry (0x084C or 0x084D) another entry's model and motion set
 // (lookEntry 0 puts its own back). Takes effect for later loads and spawns.
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry);
@@ -89,7 +93,8 @@ struct Override
     float yaw = 0;
 };
 // Channel 0: the host's enemies (enemies.cpp); 1: partners (partners.cpp);
-// 2: avatars (avatars.cpp). Each is set whole by its owner every frame.
+// 2: avatars (avatars.cpp); 3: remote summons (summons.cpp). Each is set
+// whole by its owner every frame.
 void setOverrides(std::vector<Override> overrides, int channel = 0);
 
 struct Assignment

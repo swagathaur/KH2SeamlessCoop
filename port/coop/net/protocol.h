@@ -25,7 +25,7 @@
 namespace kh2net
 {
 constexpr uint16_t kMagic = 0x324B; // "K2" on the wire
-constexpr uint8_t kProtocolVersion = 7;
+constexpr uint8_t kProtocolVersion = 8;
 constexpr size_t kMaxPacket = 1200; // stays under every path MTU
 constexpr uint8_t kMaxPlayers = 3;
 constexpr uint16_t kDefaultPort = 27552;
@@ -94,6 +94,12 @@ struct PlayerState
     // known by its spawn serial in the room's data; -1 nothing.
     int16_t rideSerial = -1;
     uint16_t rideEntry = 0, rideJoint = 0, rideFlags = 0, rideMotion = 0;
+    // Their summon while one is out (objentry id; 0 none), where it is, its
+    // facing and its motion (summons.h shows it on the other machines).
+    uint16_t summon = 0;
+    float summonPos[3] = {0, 0, 0};
+    float summonYaw = 0;
+    uint16_t summonMotion = 0;
 };
 
 // The enemies in the host's room, sent ~20 times a second. Each is known by

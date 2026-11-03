@@ -58,7 +58,7 @@ double now()
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_any{false};
 std::atomic<bool> g_anyOverride{false};
-std::vector<Override> g_overrides[3]; // per channel, under g_mutex
+std::vector<Override> g_overrides[4]; // per channel, under g_mutex
 PS2Runtime::RecompiledFunction g_buildMatrix = nullptr;
 constexpr uint32_t kObjFactory = 0x0016F000; // OBJ* (entry id, const FVector* pos, float yaw in $f12)
 constexpr uint32_t kMotionChange = 0x0017F540; // YS::MOTION::change(MOTION* = obj+0x140, int id, float blend, float start)
@@ -353,6 +353,10 @@ void postLeave(uint32_t obj)
 // heap, holds two records copied from the townsfolk class's B_EX110_RTN
 // (0x084C) with private ids, so no entry the game itself uses is changed.
 constexpr uint32_t kPuppetEntries[kMaxPuppets] = {0x7F00, 0x7F01};
+// The table's records: the spawn-mode puppets', then two for remote players'
+// summons (summons.h), dressed the same way.
+constexpr uint32_t kTableEntries = 4;
+constexpr uint32_t kTableIds[kTableEntries] = {0x7F00, 0x7F01, 0x7F02, 0x7F03};
 constexpr uint32_t kTemplateEntry = 0x084C; // B_EX110_RTN: type 15, "npc, no collision"
 constexpr uint32_t kPrivateTable = 0x01E4D000u;
 constexpr uint32_t kTableSlot = kh2state::addr::Obj0Ptr + 8; // the third table
@@ -386,18 +390,18 @@ bool ensurePrivateTable(uint8_t *rdram)
         return false; // someone else's (never seen)
     uint32_t head[2];
     std::memcpy(head, rdram + kPrivateTable, 8);
-    if (slot == kPrivateTable && head[0] == 3 && head[1] == kMaxPuppets)
+    if (slot == kPrivateTable && head[0] == 3 && head[1] == kTableEntries)
         return true;
     const uint32_t tmpl = primaryRecord(rdram, kTemplateEntry);
     if (!tmpl)
         return false;
-    const uint32_t newHead[2] = {3, kMaxPuppets};
+    const uint32_t newHead[2] = {3, kTableEntries};
     std::memcpy(rdram + kPrivateTable, newHead, 8);
-    for (uint32_t i = 0; i < kMaxPuppets; ++i)
+    for (uint32_t i = 0; i < kTableEntries; ++i)
     {
         uint8_t *rec = rdram + kPrivateTable + 8 + i * kEntrySize;
         std::memcpy(rec, rdram + (tmpl & 0x01FFFFFFu), kEntrySize);
-        std::memcpy(rec, &kPuppetEntries[i], 4);
+        std::memcpy(rec, &kTableIds[i], 4);
     }
     const uint32_t table = kPrivateTable;
     std::memcpy(rdram + kTableSlot, &table, 4);
@@ -406,8 +410,8 @@ bool ensurePrivateTable(uint8_t *rdram)
 
 uint32_t entryRecord(const uint8_t *rdram, uint32_t id)
 {
-    for (uint32_t i = 0; i < kMaxPuppets; ++i)
-        if ((id & 0xFFFF) == kPuppetEntries[i])
+    for (uint32_t i = 0; i < kTableEntries; ++i)
+        if ((id & 0xFFFF) == kTableIds[i])
             return ensurePrivateTable(const_cast<uint8_t *>(rdram)) ? kPrivateTable + 8 + i * kEntrySize : 0;
     return primaryRecord(rdram, id);
 }
@@ -417,12 +421,12 @@ struct Dress
     bool saved = false;
     uint8_t original[kEntryLookSize];
 };
-Dress g_dress[kMaxPuppets]; // EE thread only (guest jobs)
+Dress g_dress[kTableEntries]; // EE thread only (guest jobs)
 
 int dressSlot(uint32_t puppetEntry)
 {
-    for (size_t i = 0; i < kMaxPuppets; ++i)
-        if (kPuppetEntries[i] == puppetEntry)
+    for (size_t i = 0; i < kTableEntries; ++i)
+        if (kTableIds[i] == puppetEntry)
             return int(i);
     return -1;
 }
@@ -480,9 +484,12 @@ struct Guard
     std::atomic<uint32_t> motion{0}; // puppet object + 0x140; 0: none
     std::atomic<int32_t> wanted{-1};
 };
-Guard g_guards[kMaxPuppets + 4]; // our puppets, then the party members players stand in for (2), then avatars (2)
-float g_lastMotionTime[kMaxPuppets + 2] = {};
-uint64_t g_lastStepFrame[kMaxPuppets + 2] = {}; // guest frame of the last look at it
+// Our puppets, then the party members players stand in for (2), then avatars
+// (2), then remote players' summons (2).
+constexpr size_t kGuards = kMaxPuppets + 6;
+Guard g_guards[kGuards];
+float g_lastMotionTime[kGuards] = {};
+uint64_t g_lastStepFrame[kGuards] = {}; // guest frame of the last look at it
 PS2Runtime::RecompiledFunction g_motionUpdate = nullptr;
 constexpr uint32_t kMotionUpdate = 0x0017F620; // YS::MOTION's per-frame step (MOTION*, float dt)
 constexpr uint32_t kFrameDelta = 0x00349E10;   // the dt YS::OBJ's update passes it
@@ -500,8 +507,10 @@ void stepFrozenMotion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, ui
     if (!g_motionUpdate)
         return;
     const uint32_t m = obj + kh2state::addr::ObjMotion;
-    for (size_t i = 0; i < kMaxPuppets + 2; ++i)
+    for (size_t i = 0; i < kGuards; ++i)
     {
+        if (i == kMaxPuppets + 2 || i == kMaxPuppets + 3)
+            continue; // (avatars: player objects step their own)
         if (g_guards[i].motion.load(std::memory_order_relaxed) != m)
             continue;
         const uint64_t frame = ps2PadCurrentGuestFrame();
@@ -1217,6 +1226,7 @@ void preload(uint32_t entryId, std::function<void()> requested)
 } // namespace
 
 void requestDress(uint32_t puppetEntry, uint32_t lookEntry) { postDress(puppetEntry, lookEntry); }
+uint32_t summonEntry(int i) { return i >= 0 && i < 2 ? kTableIds[2 + i] : 0; }
 
 void postMotion(uint32_t obj, uint32_t id, float blend)
 {
@@ -1262,15 +1272,16 @@ void spawnAt(uint32_t entryId, const float pos[3], float yaw, std::function<void
 void setOverrides(std::vector<Override> overrides, int channel)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_overrides[channel < 0 || channel > 2 ? 0 : channel] = std::move(overrides);
-    g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty() || !g_overrides[2].empty();
+    g_overrides[channel < 0 || channel > 3 ? 0 : channel] = std::move(overrides);
+    g_anyOverride = !g_overrides[0].empty() || !g_overrides[1].empty() || !g_overrides[2].empty() ||
+                    !g_overrides[3].empty();
 }
 
 void setMotionGuards(const std::vector<std::pair<uint32_t, int32_t>> &objects, int channel)
 {
     for (size_t i = 0; i < 2; ++i)
     {
-        Guard &g = g_guards[kMaxPuppets + (channel == 1 ? 2 : 0) + i];
+        Guard &g = g_guards[kMaxPuppets + (channel == 2 ? 4 : channel == 1 ? 2 : 0) + i];
         const bool on = i < objects.size() && objects[i].first;
         g.wanted.store(on ? objects[i].second : -1, std::memory_order_relaxed);
         g.motion.store(on ? objects[i].first + kh2state::addr::ObjMotion : 0, std::memory_order_relaxed);

@@ -711,6 +711,7 @@ struct Harness
     uint64_t lastSpawnFrame = UINT64_MAX;
     uint64_t lastWarpFrame = UINT64_MAX;
     uint64_t lastActorsFrame = UINT64_MAX;
+    bool actorsNow = false; // live "actors"
     std::chrono::steady_clock::time_point menuOpenedAt;
     bool menuByHarness = false;
     uint64_t lastSceneKey = UINT64_MAX;
@@ -984,6 +985,7 @@ void dumpGs(Harness &h, uint64_t frame)
 //   warp WORLD ROOM [BTL EVT]                  (decimal, as --warp-test)
 //   tp X Y Z                                   put the player there
 //   dump                                       all 32 MB of RAM to SHOTS/ram_N.bin
+//   actors                                     the object list (as --actors-at)
 //   gifcap                                     the next frame of GIF packets (as --gif-capture)
 //   gsdump                                     GS registers, draws and memory (as --gs-dump) 3 frames on
 //   echo TEXT                                  "[control] echo TEXT" (a marker to wait for)
@@ -1105,6 +1107,12 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             char name[64];
             std::snprintf(name, sizeof(name), "frame_%06llu.png", (unsigned long long)frame);
             say(std::string("shot ") + name);
+        }
+        else if (cmd == "actors")
+        {
+            // The object list (as --actors-at), now.
+            h.actorsNow = true;
+            say("actors");
         }
         else if (cmd == "gifcap")
         {
@@ -1438,8 +1446,9 @@ bool harnessTick(Harness &h, uint64_t frame)
         std::printf("[local] arranged %d windows\n", kh2local::arrangeWindows());
     if (o.storySaveTest && due(o.storySaveTest))
         kh2story::testSave();
-    if (hit(o.actorsAt) && frame != h.lastActorsFrame)
+    if ((hit(o.actorsAt) && frame != h.lastActorsFrame) || h.actorsNow)
     {
+        h.actorsNow = false;
         h.lastActorsFrame = frame;
         const uint8_t *ram = h.runtime->memory().getRDRAM();
         uint32_t player;

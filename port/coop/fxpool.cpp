@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "hle_call.h"
 #include "ps2_runtime.h"
@@ -24,6 +25,42 @@ constexpr uint32_t kOurPool = 0x03C00000u, kOurPoolSize = 0x00400000u;
 PS2Runtime::RecompiledFunction g_fxInit = nullptr, g_alloc = nullptr, g_free = nullptr;
 std::atomic<bool> g_logged{false};
 
+// Each area hands the particle system the pool afresh. The particle system
+// keeps a small header at the bottom and takes its blocks from the top down,
+// so how far down from the top the last area wrote is its high-water mark
+// (the pool is cleared each time). The log says, so a heavy fight shows how
+// close it came to the game's own 512 KB. (A test fight on two PCs, both
+// casting, one in Wisdom: 262 KB.)
+uint32_t g_peakEver = 0;
+void reportAndClear(uint8_t *rdram)
+{
+    uint8_t *pool = rdram + kOurPool;
+    constexpr uint32_t kHeader = 0x4000; // (the bottom's header: not counted)
+    uint32_t low = kOurPoolSize;
+    for (uint32_t off = kHeader; off < kOurPoolSize; off += 16)
+    {
+        uint64_t a, b;
+        std::memcpy(&a, pool + off, 8);
+        std::memcpy(&b, pool + off + 8, 8);
+        if (a | b)
+        {
+            low = off;
+            break;
+        }
+    }
+    const uint32_t used = kOurPoolSize - low;
+    if (used)
+    {
+        if (used > g_peakEver)
+            g_peakEver = used;
+        std::printf("[fxpool] the last area used %u KB of the effect pool at most (the game's own pool was 512 KB; "
+                    "the most so far %u KB)\n",
+                    (used + 1023) / 1024, (g_peakEver + 1023) / 1024);
+        std::fflush(stdout);
+    }
+    std::memset(pool, 0, kOurPoolSize);
+}
+
 void fxInitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (ctx->pc == kFxInit && getRegU32(ctx, 5) < kOurPoolSize)
@@ -35,6 +72,7 @@ void fxInitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             std::fflush(stdout);
         }
         SET_GPR_U32(ctx, 5, kOurPoolSize);
+        reportAndClear(rdram);
     }
     kh2::callOriginal(g_fxInit, rdram, ctx, runtime);
 }

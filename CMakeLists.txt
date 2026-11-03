@@ -313,6 +313,7 @@ target_sources(kh2recomp PRIVATE
     port/coop/avatars.cpp
     port/coop/formcache.cpp
     port/coop/summons.cpp
+    port/coop/fxpool.cpp
     port/coop/story.cpp
     port/coop/names.cpp
     port/coop/roomlock.cpp

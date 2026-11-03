@@ -53,6 +53,7 @@
 #include "unlock.h"
 #include "formcache.h"
 #include "summons.h"
+#include "fxpool.h"
 #include "guest_call.h"
 #include "puppets.h"
 #include "partners.h"
@@ -1149,9 +1150,9 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             std::string a;
             uint32_t len = 16;
             ls >> a >> len;
-            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & 0x01FFFFFFu;
+            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & PS2_RAM_MASK; // (the port's RAM past 32 MB too)
             std::string out = "peek " + a + ":";
-            for (uint32_t i = 0; i < len && i < 256 && addr + i < 0x02000000u; ++i)
+            for (uint32_t i = 0; i < len && i < 256 && addr + i < PS2_RAM_SIZE; ++i)
             {
                 char b[4];
                 std::snprintf(b, sizeof(b), " %02X", ram[addr + i]);
@@ -1163,8 +1164,8 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
         {
             std::string a, hex;
             ls >> a >> hex;
-            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & 0x01FFFFFFu;
-            for (size_t n = 0; 2 * n + 2 <= hex.size() && addr + n < 0x02000000u; ++n)
+            const uint32_t addr = uint32_t(std::stoul(a, nullptr, 16)) & PS2_RAM_MASK;
+            for (size_t n = 0; 2 * n + 2 <= hex.size() && addr + n < PS2_RAM_SIZE; ++n)
                 ram[addr + n] = uint8_t(std::stoul(hex.substr(2 * n, 2), nullptr, 16));
             say(line);
         }
@@ -2264,6 +2265,7 @@ int main(int argc, char **argv)
     kh2spells::install(runtime);
     kh2avatars::install(runtime);
     kh2summons::install(runtime);
+    kh2fxpool::install(runtime);
     kh2story::install(runtime);
     kh2names::install(runtime);
     kh2roomlock::install(runtime);

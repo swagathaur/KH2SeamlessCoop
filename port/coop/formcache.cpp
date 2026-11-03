@@ -42,7 +42,7 @@ constexpr uint32_t kDriveTask = 0x00351184;  // YS::CHANGEFORM's task (our own d
 
 // Our room: the RAM past the 32MB the game knows of (the runtime keeps 64MB;
 // patch 0052). Nothing of the game's is ever there.
-constexpr uint32_t kOurs = 0x02000000u, kOursEnd = 0x04000000u;
+constexpr uint32_t kOurs = 0x02000000u, kOursEnd = 0x03C00000u; // (the top 4 MB: the effect pool, fxpool.h)
 
 // The batches: 4 of 4 groups (a form entry reads its model into the first,
 // its weapons into the next ones: FUN_0016EB48(entry, group, 4, 7)).

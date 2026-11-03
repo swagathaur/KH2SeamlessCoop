@@ -1,6 +1,7 @@
 #include "enemies.h"
 #include "hits.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -142,11 +143,55 @@ void spawnUnitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 size_t g_lastSentCount = SIZE_MAX, g_lastFollowCount = SIZE_MAX; // for the log
 
+double nowSeconds()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// An object's status bits: (+0xABC | +0xAC0) & ~+0xAC4 (set, set for now, cleared).
+constexpr uint32_t kStatus = 0xABC;
+uint32_t statusBits(const uint8_t *rdram, uint32_t obj)
+{
+    return (rd<uint32_t>(rdram, obj + kStatus) | rd<uint32_t>(rdram, obj + kStatus + 4)) &
+           ~rd<uint32_t>(rdram, obj + kStatus + 8);
+}
+
+// The survive check (enemies.h kRule*) for a party member's hit on HP.
+bool survives(uint32_t status, bool finisher)
+{
+    if (status & kRuleNever)
+        return true;
+    if ((status & kRuleFinisher) && !finisher)
+        return true; // (HP is gauge 0: the 0x80000 case doesn't matter here)
+    return false;    // (0x800: the party may; a client's hit is the party's)
+}
+
+// Last client hit per enemy: a finisher? (for the HP of it, which follows)
+struct ClientHit
+{
+    bool skipsRules = false, finisher = false;
+    double at = -100.0;
+};
+std::map<int16_t, ClientHit> g_clientHits;
+// A client's HP that the rules stopped short of a kill, by enemy: its hit's
+// own message can come just after the HP (they are taken on two threads),
+// and if that hit was a finisher, the kill goes ahead then.
+struct Blocked
+{
+    uint32_t object = 0;
+    double at = -100.0;
+};
+std::map<int16_t, Blocked> g_blocked;
+std::mutex g_rulesMutex; // g_clientHits, g_blocked
+
 // Guest job: obj->add_hp(amount) (negative = damage; at 0 the object dies
 // the game's own way).
-void postAddHp(uint32_t obj, int32_t amount)
+// finisher >= 0: a client's hit (0 or 1: was it a finisher?), under the
+// game's survive rules, as the game's own hit step would have applied them
+// (finisher 2: an attack type that skips them).
+void postAddHp(uint32_t obj, int32_t amount, int finisher = -1, int16_t serial = 0)
 {
-    kh2guest::post([obj, amount](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+    kh2guest::post([obj, amount, finisher, serial](const kh2guest::Env &env, uint32_t, bool first) mutable -> std::optional<kh2guest::Call> {
         if (!first)
             return std::nullopt;
         // Still a live enemy? (It may have gone since this was queued.)
@@ -161,6 +206,45 @@ void postAddHp(uint32_t obj, int32_t amount)
         const uint32_t fn = rd<uint32_t>(env.rdram, vt + kVtableAddHp);
         if (!fn)
             return std::nullopt;
+        if (finisher >= 0 && amount < 0)
+        {
+            const uint32_t sheet = rd<uint32_t>(env.rdram, obj + 0x48C);
+            if (inRam(sheet))
+            {
+                const int32_t hp = rd<int32_t>(env.rdram, sheet), floor = rd<int32_t>(env.rdram, sheet + 8);
+                const uint32_t status = statusBits(env.rdram, obj);
+                // (The hit's own message may have come since this was queued;
+                // checked and the held-back kill noted under one lock, as the
+                // message's side looks for it.)
+                bool held = false;
+                int32_t keep = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_rulesMutex);
+                    if (finisher == 0 && serial)
+                    {
+                        const auto f = g_clientHits.find(serial);
+                        if (f != g_clientHits.end() && nowSeconds() - f->second.at < 0.5)
+                            finisher = f->second.skipsRules ? 2 : f->second.finisher ? 1 : 0;
+                    }
+                    if (hp + amount <= floor && finisher != 2 && survives(status, finisher != 0))
+                    {
+                        held = true;
+                        keep = std::max(hp - floor - 1, 0);
+                        if (serial)
+                            g_blocked[serial] = {obj, nowSeconds()};
+                    }
+                }
+                if (held)
+                {
+                    std::printf("[enemies] a client's hit of %d leaves %08X at %d HP (its rules %03X%s)\n", -amount,
+                                obj, hp - keep, status & kRuleMask, finisher == 1 ? ", a finisher" : "");
+                    std::fflush(stdout);
+                    amount = -keep;
+                    if (amount == 0)
+                        return std::nullopt;
+                }
+            }
+        }
         return kh2guest::Call{fn, {obj, static_cast<uint32_t>(amount), 0u, 0u}, {}};
     });
 }
@@ -400,6 +484,8 @@ std::vector<Local> scan(const uint8_t *rdram)
         e.hp = rd<int32_t>(rdram, sheet);
         e.maxHp = rd<int32_t>(rdram, sheet + 4);
         e.minHp = rd<int32_t>(rdram, sheet + 8);
+        const uint32_t status = statusBits(rdram, a.address);
+        e.rules = uint16_t((status & kRuleMask) | ((status & 0x80000u) ? kRuleAnyChannel : 0));
         out.push_back(e);
     }
     return out;
@@ -424,6 +510,7 @@ kh2net::EnemyStates snapshot(const uint8_t *rdram, uint8_t world, uint8_t room, 
         es.hp = e.hp;
         es.maxHp = e.maxHp;
         es.minHp = e.minHp;
+        es.rules = e.rules;
         s.enemies.push_back(es);
     }
     if (s.enemies.size() != g_lastSentCount)
@@ -445,9 +532,51 @@ void applyDamage(const uint8_t *rdram, uint8_t world, uint8_t room, int16_t seri
         {
             std::printf("[enemies] a client hit %04X #%d for %d (hp %d)\n", e.entry, serial, amount, e.hp);
             std::fflush(stdout);
-            postAddHp(e.object, -amount);
+            int finisher = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_rulesMutex);
+                const auto f = g_clientHits.find(serial);
+                if (f != g_clientHits.end() && nowSeconds() - f->second.at < 2.0)
+                    finisher = f->second.skipsRules ? 2 : f->second.finisher ? 1 : 0;
+            }
+            postAddHp(e.object, -amount, finisher, serial);
             return;
         }
+}
+
+void noteClientHit(int16_t serial, bool skipsRules, bool finisher)
+{
+    Blocked late;
+    {
+        std::lock_guard<std::mutex> lock(g_rulesMutex);
+        g_clientHits[serial] = {skipsRules, finisher, nowSeconds()};
+        const auto b = g_blocked.find(serial);
+        if (b != g_blocked.end())
+        {
+            if ((skipsRules || finisher) && nowSeconds() - b->second.at < 2.0)
+                late = b->second;
+            else if (skipsRules || finisher)
+            {
+                std::printf("[enemies] a client's finisher on #%d, %.2f s after a held-back kill: too late\n", serial,
+                            nowSeconds() - b->second.at);
+                std::fflush(stdout);
+            }
+            g_blocked.erase(b);
+        }
+    }
+    if (late.object)
+    {
+        // The kill the rules held back a moment ago: this was its blow.
+        std::printf("[enemies] a client's finisher on #%d came after its HP: the kill goes ahead\n", serial);
+        std::fflush(stdout);
+        postAddHp(late.object, -0x7FFFFFF, skipsRules ? 2 : 1, serial);
+    }
+    if (std::getenv("KH2_HIT_RULES_LOG"))
+    {
+        std::printf("[enemies] a client's hit on #%d:%s%s\n", serial, skipsRules ? " skips the rules" : "",
+                    finisher ? " a finisher" : " (no finisher)");
+        std::fflush(stdout);
+    }
 }
 
 void onHostStates(const kh2net::EnemyStates &states, double now)
@@ -705,6 +834,21 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
             {
                 std::memcpy(rdram + ((e.sheet + 8) & 0x01FFFFFFu), &h->minHp, 4);
                 std::printf("[enemies] %04X #%d: the host's HP floor %d\n", e.entry, e.serial, h->minHp);
+                std::fflush(stdout);
+            }
+            // And its survive rules (enemies.h), for the same reason: our
+            // hits on our copy then take the HP the host's would.
+            if (h->rules != e.rules)
+            {
+                const uint32_t bits = kRuleMask | 0x80000u;
+                const uint32_t want = (h->rules & kRuleMask) | ((h->rules & kRuleAnyChannel) ? 0x80000u : 0);
+                uint32_t w[3];
+                std::memcpy(w, rdram + ((e.object + kStatus) & 0x01FFFFFFu), sizeof(w));
+                w[0] = (w[0] & ~bits) | want;
+                w[1] &= ~bits;
+                w[2] &= ~bits;
+                std::memcpy(rdram + ((e.object + kStatus) & 0x01FFFFFFu), w, sizeof(w));
+                std::printf("[enemies] %04X #%d: the host's survive rules %03X\n", e.entry, e.serial, h->rules);
                 std::fflush(stdout);
             }
             if (h->hp != hp)

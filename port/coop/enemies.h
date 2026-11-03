@@ -31,7 +31,18 @@ struct Local
     uint16_t motion = 0;
     int32_t hp = 0, maxHp = 0, minHp = 0;
     uint32_t sheet = 0; // YS::SHEET*: hp, max hp, min hp
+    uint16_t rules = 0; // its "won't die from this hit" rules (kRule*)
 };
+
+// The game's "won't die from this hit" rules (the survive check at an enemy's
+// vtable +0x58, 0x00186EC0, asked by the HP-from-a-hit step 0x00186D48 when a
+// hit would take the HP to its floor; the hit then leaves floor + 1). The
+// object's status bits ((+0xABC | +0xAC0) & ~+0xAC4), which a boss's script
+// sets: 0x200 never; 0x400 only to a finisher (the attack's +0x12 bit 0x20);
+// 0x800 only to a finisher or the party. kRuleAnyChannel stands for 0x80000
+// (0x400 for every gauge, not only HP).
+constexpr uint16_t kRuleNever = 0x200, kRuleFinisher = 0x400, kRuleParty = 0x800, kRuleAnyChannel = 0x1;
+constexpr uint16_t kRuleMask = kRuleNever | kRuleFinisher | kRuleParty;
 
 // Hooks the room spawn step (a client's own enemy spawns, see enemies.cpp).
 bool install(PS2Runtime &runtime);
@@ -43,6 +54,10 @@ std::vector<Local> scan(const uint8_t *rdram);
 kh2net::EnemyStates snapshot(const uint8_t *rdram, uint8_t world, uint8_t room, uint32_t tick);
 // Host: a client hit enemy `serial` for `amount` (applied next frame).
 void applyDamage(const uint8_t *rdram, uint8_t world, uint8_t room, int16_t serial, int32_t amount);
+// Host: a client's hit on enemy `serial`: of an attack type that skips the
+// rules above (5, 6: the HP step takes it as it is), a finisher? (For the HP
+// of it, which follows.)
+void noteClientHit(int16_t serial, bool skipsRules, bool finisher);
 
 // Client: the host's latest enemies (from the session callback).
 void onHostStates(const kh2net::EnemyStates &states, double now);

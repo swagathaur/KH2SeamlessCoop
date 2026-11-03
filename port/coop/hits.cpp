@@ -159,6 +159,14 @@ void execDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 if (inRam(sheet) && rd<int32_t>(rdram, sheet) <= 0)
                 {
                     h.lethal = true;
+                    if (std::getenv("KH2_HIT_RULES_LOG"))
+                    {
+                        std::printf("[hits] our blow killed our copy %08X: attack type %u, finisher bit %u, status %08X\n",
+                                    obj, h.param[4], (h.param[0x12] >> 5) & 1,
+                                    (rd<uint32_t>(rdram, obj + 0xABC) | rd<uint32_t>(rdram, obj + 0xAC0)) &
+                                        ~rd<uint32_t>(rdram, obj + 0xAC4));
+                        std::fflush(stdout);
+                    }
                     const uint32_t flags = rd<uint32_t>(rdram, obj + 0x10C);
                     put32(rdram, obj + 0x10C, flags & ~0x200000u);
                 }

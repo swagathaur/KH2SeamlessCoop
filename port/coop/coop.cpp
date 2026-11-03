@@ -627,6 +627,10 @@ void makeSession()
             for (const kh2enemies::Local &e : kh2enemies::scan(g_rdram))
                 if (e.serial == serial && e.entry == entry && e.hp > 0)
                 {
+                    // (For enemies.h's survive rules: attack types 5 and 6
+                    // skip them; the attack's finisher bit.)
+                    kh2enemies::noteClientHit(serial, hit.param[4] == 5 || hit.param[4] == 6,
+                                              (hit.param[0x12] & 0x20) != 0);
                     kh2hits::replay(e.object, attackerFor(g_rdram, origin), hit.damage, hit.param);
                     break;
                 }

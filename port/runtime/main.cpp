@@ -1177,6 +1177,20 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "avatarcast")
+        {
+            unsigned c = 0;
+            ls >> c;
+            kh2spells::avatarCast(uint16_t(c));
+            say(line);
+        }
+        else if (cmd == "playercast")
+        {
+            unsigned c = 0;
+            ls >> c;
+            kh2spells::playerCast(uint16_t(c));
+            say(line);
+        }
         else if (cmd == "savetest")
         {
             // A memory card image made as the save menu would, and what it holds.

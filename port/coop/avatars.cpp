@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <memory>
 #include <mutex>
 #include <chrono>
 
@@ -821,6 +822,39 @@ void longJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 } // namespace
 
+// Making an avatar (a player-class object, in a form or not) writes its kind
+// of gauge into "Sora's" sheet for a moment (put back since, puppets.cpp), and
+// the HUD (*0x003485EC) picks it up: in a form, our gauge then read "Drive"
+// with the Drive bars' colour and number until the form ended. Its label
+// (FUN_00157068), the bar's look (the sprite at +0x2F1C, FUN_00155FC0's pick)
+// and the number (+0x3CF7: the form bars' digit is set again) worked out once
+// more from our sheet, as the HUD does when they change. (The split-screen
+// mod's notes on PC: a second Sora's constructor is seen by the HUD.)
+void refreshGauge()
+{
+    auto step = std::make_shared<int>(0);
+    kh2guest::post([step](const kh2guest::Env &env, uint32_t last, bool) -> std::optional<kh2guest::Call> {
+        const uint32_t hud = rd<uint32_t>(env.rdram, kHud);
+        const uint32_t ours = g_ourPlayerShared.load(std::memory_order_relaxed);
+        if (hud < 0x00100000u || hud >= 0x02000000u || !ours || rd<uint32_t>(env.rdram, hud + 0x34) != ours)
+            return std::nullopt;
+        switch ((*step)++)
+        {
+        case 0:
+            return kh2guest::Call{0x00155FC0u, {hud}, {}};
+        case 1:
+            return kh2guest::Call{0x00138C10u, {hud + 0x2F1C, last}, {}};
+        case 2:
+            return kh2guest::Call{0x00157068u, {hud}, {}};
+        case 3:
+            env.rdram[(hud + 0x3CF7) & 0x01FFFFFFu] = 1;
+            return std::nullopt;
+        default:
+            return std::nullopt;
+        }
+    });
+}
+
 bool install(PS2Runtime &runtime)
 {
     g_wrapAngle = runtime.lookupFunction(kWrapAngle);
@@ -1317,6 +1351,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 g_avatarMadeAt = nowMs();
                 std::printf("[avatars] player %u's avatar is %08X\n", id + 1, obj);
                 std::fflush(stdout);
+                refreshGauge();
             });
             continue;
         }

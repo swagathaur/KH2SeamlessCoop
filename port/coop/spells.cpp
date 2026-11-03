@@ -20,6 +20,7 @@ namespace kh2spells
 namespace
 {
 constexpr uint32_t kCast = 0x001A6178; // (caster, command id, combo)
+
 PS2Runtime::RecompiledFunction g_cast = nullptr;
 std::atomic<int> g_logged{0};
 std::atomic<bool> g_capture{false};
@@ -397,6 +398,31 @@ void testSecondPlayer(uint8_t *rdram, uint64_t frame)
                     b[1], b[2], int32_t(rd32(theirs)), int32_t(rd32(theirs + 0x180)), rd32(p2 + 0x154), rd32(p2 + 0x10C));
         std::fflush(stdout);
     }
+}
+
+void avatarCast(uint16_t command)
+{
+    for (uint32_t o : kh2avatars::objects())
+        if (o)
+        {
+            std::printf("[spells] test: avatar %08X casts command %u\n", o, command);
+            std::fflush(stdout);
+            castAsPlayer(o, Cast{command, 0});
+            return;
+        }
+}
+
+void playerCast(uint16_t command)
+{
+    kh2guest::post([command](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+            return std::nullopt;
+        uint32_t player = 0;
+        std::memcpy(&player, env.rdram + kh2state::addr::PlayerPtr, 4);
+        if (!player)
+            return std::nullopt;
+        return kh2guest::Call{0x0017A590u, {player, command}, {}};
+    });
 }
 
 void testTick(uint8_t *rdram, uint64_t frame)

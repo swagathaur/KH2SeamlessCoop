@@ -42,4 +42,8 @@ bool decode(const std::vector<uint8_t> &data, Cast &c, uint8_t &world, uint8_t &
 // Testing: KH2_TEST_CAST=FRAME:COMMAND casts COMMAND with the first party
 // member at that guest frame (polled from the harness's frame hook).
 void testTick(uint8_t *rdram, uint64_t frame);
+// Testing (the live command "avatarcast"): the first avatar casts `command` now.
+void avatarCast(uint16_t command);
+// Testing ("playercast"): our own player casts `command` now, as its magic command would.
+void playerCast(uint16_t command);
 } // namespace kh2spells

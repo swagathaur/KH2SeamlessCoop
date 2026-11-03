@@ -53,3 +53,4 @@
 0x00170670    CACHE_BUFF layout          formcache.cpp (avatars' form looks kept out of it: placed past the game's 32MB)
 0x001707D8    CACHE_BUFF settle          formcache.cpp (the files past the top it frees: not ours)
 0x00170400    CACHE_BUFF::ReadRequest    formcache.cpp (an avatar's form look never shares our form's files)
+0x001C9AB8    may we summon             summons.cpp (always: no two friends needed)

@@ -719,10 +719,28 @@ void draw()
                 ImGui::Text("%s", fo[i].name.c_str());
                 ImGui::PopID();
             }
+            const std::vector<kh2unlock::Entry> su = kh2unlock::summons(ram);
+            if (!su.empty())
+            {
+                ImGui::SeparatorText("Summons");
+                for (size_t i = 0; i < su.size(); ++i)
+                {
+                    ImGui::PushID(200 + int(i));
+                    const bool have = su[i].have > 0;
+                    ImGui::BeginDisabled(have);
+                    if (ImGui::Button(have ? "Have charm" : "Get charm", ImVec2(90, 0)))
+                        kh2unlock::giveSummon(int(i));
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::Text("%s", su[i].name.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::TextDisabled("In battle: press Left or Right on the command menu, then Summon.");
+            }
             ImGui::Separator();
             if (ImGui::Button("Unlock everything"))
                 kh2unlock::giveAll();
-            ImGui::SetItemTooltip("Every spell at level 3, every drive form, and a full 9-bar drive gauge.");
+            ImGui::SetItemTooltip("Every spell at level 3, every drive form, every summon, and a full 9-bar drive gauge.");
             ImGui::SameLine();
             if (ImGui::Button("Fill drive gauge"))
                 kh2unlock::fillDrive();

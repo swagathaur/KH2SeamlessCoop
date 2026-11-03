@@ -52,6 +52,7 @@
 #include "coop.h"
 #include "unlock.h"
 #include "formcache.h"
+#include "summons.h"
 #include "guest_call.h"
 #include "puppets.h"
 #include "partners.h"
@@ -2253,6 +2254,7 @@ int main(int argc, char **argv)
     kh2mission::install(runtime);
     kh2spells::install(runtime);
     kh2avatars::install(runtime);
+    kh2summons::install(runtime);
     kh2story::install(runtime);
     kh2names::install(runtime);
     kh2roomlock::install(runtime);

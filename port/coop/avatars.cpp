@@ -1361,11 +1361,26 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // give goes to its player as a heal.
         {
             const uint32_t slot = sheetIndex - 1; // 0 or 1 (party slots 1 and 2)
-            const uint32_t proxy = slot < 2 ? rd<uint32_t>(rdram, kFriendTable + slot * 4) : 0;
+            // Not while a summon is on (YS::SUMMON::GetMode, 0x01D49968): the
+            // summon sends the party away first (YS::SACRIFICE, which waits
+            // until each member has gone) and then takes a party place
+            // itself. A place kept frozen and hidden never went, and the
+            // summon in the place after it was taken for theirs: hidden,
+            // frozen, with their face on the gauge (the world stayed dark
+            // behind a summon that never came).
+            constexpr uint32_t kSummonMode = 0x01D49968;
+            const bool summon = rd<uint32_t>(rdram, kSummonMode) != 0;
+            const uint32_t proxy = slot < 2 && !summon ? rd<uint32_t>(rdram, kFriendTable + slot * 4) : 0;
             const uint32_t was = s.proxy;
             s.proxy = proxy && live(rdram, proxy) && proxy != obj ? proxy : 0;
             if (was && was != s.proxy && live(rdram, was))
-                show(rdram, was); // no longer anyone's place: seen again
+            {
+                // No longer anyone's place: seen again, and acting.
+                const uint32_t wf = rd<uint32_t>(rdram, was + kObjFlags);
+                if (wf & kNoAct)
+                    wr<uint32_t>(rdram, was + kObjFlags, wf & ~kNoAct);
+                show(rdram, was);
+            }
             if (s.proxy)
             {
                 const uint32_t pf = rd<uint32_t>(rdram, s.proxy + kObjFlags);

@@ -24,6 +24,7 @@ constexpr uint32_t kItemTablePtr = 0x01C6CB90;
 constexpr uint32_t kMagicDataPtr = 0x01C6CB28;
 // YS::ITEM::FormToItem: u16 item per form, form 1 (Valor) on, at 0x0036D458.
 constexpr uint32_t kFormItems = 0x0036D458;
+// Summons: each comes with its charm, a flag item (type 0x14).
 // The player's sheet (party slot 1): drive at +0x1B1, its maximum at +0x1B2.
 constexpr uint32_t kSlot1 = 0x01C6C750;
 
@@ -97,6 +98,11 @@ uint16_t spellItem(const uint8_t *ram, int slot)
     return 0;
 }
 uint16_t formItem(const uint8_t *ram, int index) { return rd<uint16_t>(ram, kFormItems + (index + 1) * 2); }
+constexpr int kSummons = 4;
+constexpr uint16_t kCharms[kSummons] = {0x0019, 0x017F, 0x009F, 0x00A0};
+const char *const kSummonNames[kSummons] = {"Stitch (Ukulele Charm)", "Chicken Little (Baseball Charm)",
+                                            "Genie (Lamp Charm)", "Peter Pan (Feather Charm)"};
+uint16_t summonItem(const uint8_t *, int index) { return kCharms[index]; }
 
 void setDrive(uint8_t *ram)
 {
@@ -106,7 +112,7 @@ void setDrive(uint8_t *ram)
 }
 
 std::mutex g_mutex;
-std::vector<int> g_spellRequests, g_formRequests; // under g_mutex
+std::vector<int> g_spellRequests, g_formRequests, g_summonRequests; // under g_mutex
 std::atomic<bool> g_allRequested{false}, g_driveRequested{false};
 
 void say(const std::string &s)
@@ -143,6 +149,19 @@ std::vector<Entry> forms(const uint8_t *ram)
     return out;
 }
 
+std::vector<Entry> summons(const uint8_t *ram)
+{
+    std::vector<Entry> out;
+    for (int i = 0; i < kSummons; ++i)
+    {
+        const int have = owned(ram, summonItem(ram, i));
+        if (have < 0)
+            return {};
+        out.push_back({kSummonNames[i], have > 0 ? 1 : 0, 1});
+    }
+    return out;
+}
+
 void giveSpell(int slot)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -153,32 +172,41 @@ void giveForm(int index)
     std::lock_guard<std::mutex> lock(g_mutex);
     g_formRequests.push_back(index);
 }
+void giveSummon(int index)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_summonRequests.push_back(index);
+}
 void giveAll() { g_allRequested = true; }
 void fillDrive() { g_driveRequested = true; }
 
 std::string apply(uint8_t *ram)
 {
-    int spellsDone = 0, formsDone = 0;
+    int spellsDone = 0, formsDone = 0, summonsDone = 0;
     for (int slot = 0; slot < 6; ++slot)
         if (const uint16_t item = spellItem(ram, slot))
             spellsDone += give(ram, item, 3) ? 1 : 0;
     for (int i = 0; i < kForms; ++i)
         formsDone += give(ram, formItem(ram, i), 1) ? 1 : 0;
-    if (!spellsDone && !formsDone)
+    for (int i = 0; i < kSummons; ++i)
+        summonsDone += give(ram, summonItem(ram, i), 1) ? 1 : 0;
+    if (!spellsDone && !formsDone && !summonsDone)
         return {};
     setDrive(ram);
-    char buf[96];
-    std::snprintf(buf, sizeof buf, "%d spell(s) at level 3, %d drive form(s), drive 9/9", spellsDone, formsDone);
+    char buf[128];
+    std::snprintf(buf, sizeof buf, "%d spell(s) at level 3, %d drive form(s), %d summon(s), drive 9/9", spellsDone,
+                  formsDone, summonsDone);
     return buf;
 }
 
 void tick(uint8_t *ram, uint64_t guestFrame)
 {
-    std::vector<int> spellReq, formReq;
+    std::vector<int> spellReq, formReq, summonReq;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         spellReq.swap(g_spellRequests);
         formReq.swap(g_formRequests);
+        summonReq.swap(g_summonRequests);
     }
     for (int slot : spellReq)
         if (slot >= 0 && slot < 6)
@@ -191,6 +219,9 @@ void tick(uint8_t *ram, uint64_t guestFrame)
     for (int i : formReq)
         if (i >= 0 && i < kForms && give(ram, formItem(ram, i), 1))
             say(std::string(kFormNames[i]) + " learned");
+    for (int i : summonReq)
+        if (i >= 0 && i < kSummons && give(ram, summonItem(ram, i), 1))
+            say(std::string(kSummonNames[i]) + " can be summoned");
     if (g_driveRequested.exchange(false))
     {
         setDrive(ram);

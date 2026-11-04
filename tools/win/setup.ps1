@@ -126,34 +126,51 @@ if ($py -eq 'py') {
 # ---- 2. libraries -------------------------------------------------------------------
 Step '2/5  Libraries (git submodules)'
 if (-not (Test-Path .git)) { Fail 'This folder is not a git checkout: get it with "git clone" (see README).' }
-$missing = (& git submodule status --recursive) | Where-Object { $_ -match '^-' }
 $pgs = 'third_party\parallel-gs'
-if ($missing -or -not (Test-Path "$pgs\gs")) {
+$rt = 'third_party\PS2Recomp'
+# Put a library back to its pinned version: our edits on top of it are made
+# again from patches\ (the runtime's by configure, the renderer's below).
+function Reset-Library([string]$dir) {
+    if (-not (Test-Path (Join-Path $dir '.git'))) { return }
+    Say "  Resetting $dir to its pinned version ..." 'Yellow'
+    & git -C $dir reset -q --hard
+    & git -C $dir clean -fdq
+    if ($dir -eq $rt) {
+        # Configure's record of the runtime patches it applied.
+        Remove-Item -Force -ErrorAction SilentlyContinue "$rt\.kh2-applied-patches"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$rt\.kh2-applied"
+    }
+}
+# A pull without updating the libraries leaves them at older versions ("+" in
+# git submodule status), with our older edits on them: reset those, then
+# check out the versions this checkout pins.
+$status = & git submodule status --recursive
+$missing = $status | Where-Object { $_ -match '^-' }
+$moved = @($status | Where-Object { $_ -match '^\+' } | ForEach-Object { ($_.Substring(1) -split ' ')[1] })
+foreach ($m in $moved) { Reset-Library ($m -replace '/', '\') }
+if ($missing -or $moved -or -not (Test-Path "$pgs\gs")) {
     Say '  Downloading them (a few minutes) ...'
-    & git -c core.longpaths=true submodule update --init --recursive --jobs 8
+    & git -c core.longpaths=true submodule update --init --recursive --force --jobs 8
     if ($LASTEXITCODE) { Fail 'Could not download the libraries (see above).' }
 } else {
     Say '  Present.' 'Green'
 }
-# The GPU renderer's edits for this project, on top of its pinned version.
-$diff = (Resolve-Path patches\parallel-gs\tree.diff -ErrorAction SilentlyContinue).Path
-if ($diff) {
-    & git -C $pgs apply --check --reverse --whitespace=nowarn $diff 2>$null
-    if ($LASTEXITCODE) {
-        & git -C $pgs apply --whitespace=nowarn $diff
-        if ($LASTEXITCODE) { Fail "Could not apply $diff to $pgs (it has other local changes?)." }
-        Say '  Applied the renderer changes.' 'Green'
-    }
+# The GPU renderer's edits for this project, on top of its pinned version (and
+# those to Granite, its Vulkan layer, a library inside it). Applied if missing;
+# an older version of them is undone first by resetting the library.
+function Sync-Diff([string]$dir, [string]$diff) {
+    if (-not (Test-Path $diff) -or -not (Test-Path (Join-Path $dir '.git'))) { return }
+    $diff = (Resolve-Path $diff).Path
+    & git -C $dir apply --check --reverse --whitespace=nowarn $diff 2>$null
+    if (-not $LASTEXITCODE) { return } # already applied
+    & git -C $dir apply --check --whitespace=nowarn $diff 2>$null
+    if ($LASTEXITCODE) { Reset-Library $dir }
+    & git -C $dir apply --whitespace=nowarn $diff
+    if ($LASTEXITCODE) { Fail "Could not apply $diff to $dir (see above)." }
+    Say "  Applied $(Split-Path -Leaf $diff) to $dir." 'Green'
 }
-# ... and those to Granite (its Vulkan layer, a library inside it).
-$gdiff = (Resolve-Path patches\parallel-gs\granite.diff -ErrorAction SilentlyContinue).Path
-if ($gdiff) {
-    & git -C "$pgs\Granite" apply --check --reverse --whitespace=nowarn $gdiff 2>$null
-    if ($LASTEXITCODE) {
-        & git -C "$pgs\Granite" apply --whitespace=nowarn $gdiff
-        if ($LASTEXITCODE) { Fail "Could not apply $gdiff to $pgs\Granite (it has other local changes?)." }
-    }
-}
+Sync-Diff $pgs 'patches\parallel-gs\tree.diff'
+Sync-Diff "$pgs\Granite" 'patches\parallel-gs\granite.diff'
 
 # ---- 3. PC release --------------------------------------------------------------------
 Step '3/5  KINGDOM HEARTS HD 1.5+2.5 ReMIX (Steam or Epic), for English text and HD textures'
@@ -217,6 +234,13 @@ $recompiler = 'build\ps2recomp-tools\ps2xRecomp\ps2_recomp.exe'
 if (-not (Test-Path $recompiler)) {
     Say '  The recompiler ...'
     cmake -S . -B build\patch-only -G Ninja -DKH2_PATCH_ONLY=ON 2>&1 | Out-File -Encoding utf8 logs\patch.log
+    if ($LASTEXITCODE) {
+        # The runtime's edits did not go on: most often its record of what is
+        # on it is out of step with it. Reset it and apply them all again.
+        Reset-Library $rt
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue build\patch-only
+        cmake -S . -B build\patch-only -G Ninja -DKH2_PATCH_ONLY=ON 2>&1 | Out-File -Encoding utf8 logs\patch.log
+    }
     if ($LASTEXITCODE) { Get-Content logs\patch.log -Tail 15 | Out-Host; Fail 'Could not patch the runtime (logs\patch.log).' }
     cmake -S third_party\PS2Recomp -B build\ps2recomp-tools -G Ninja -DCMAKE_BUILD_TYPE=Release `
         -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF 2>&1 | Out-File -Encoding utf8 logs\tools.log

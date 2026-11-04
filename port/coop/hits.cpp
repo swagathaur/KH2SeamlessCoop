@@ -206,6 +206,17 @@ void setBlockedAttackers(std::vector<uint32_t> objects)
     g_blocked = std::move(objects);
 }
 
+bool isBlockedAttacker(uint32_t object)
+{
+    if (!object)
+        return false;
+    std::lock_guard<std::mutex> lock(g_blockedMutex);
+    for (uint32_t b : g_blocked)
+        if (b == object)
+            return true;
+    return false;
+}
+
 void setProtectedTargets(std::vector<uint32_t> objects)
 {
     std::lock_guard<std::mutex> lock(g_blockedMutex);

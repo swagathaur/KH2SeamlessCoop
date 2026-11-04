@@ -12,6 +12,7 @@
 #include "partners.h"
 #include "avatars.h"
 #include "guest_call.h"
+#include "hits.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
 
@@ -20,6 +21,48 @@ namespace kh2spells
 namespace
 {
 constexpr uint32_t kCast = 0x001A6178; // (caster, command id, combo)
+
+// A spell's script keeps what must outlive one cast in a "teamwork" block it
+// asks for by a key (trap_teamwork_alloc, 0x0018FD10 -> FUN_001A6A20: one
+// block per key for the room, 8 at most, the table at 0x01C6CB30, its count
+// at 0x01C6CB70). Reflect's (key 0x10002) holds the barrier it started: a
+// new cast kills the one there (trap_effect_kill) and puts its own, as for a
+// Sora casting Reflect again. A stand-in's cast is another Sora's, so a
+// remote player's Reflect ended ours a moment after it started (and ours
+// theirs). A stand-in's scripts get blocks of their own: the key changed by
+// the caster. (The trap runs from the script machine's call at 0x001DAE80,
+// with the running script in $s2; its caster at +0x38, FUN_0016C8F8.)
+constexpr uint32_t kTeamworkAlloc = 0x0018FD10, kTeamworkCount = 0x01C6CB70;
+constexpr uint32_t kTeamworkMax = 8, kScriptCaster = 0x38;
+PS2Runtime::RecompiledFunction g_teamworkAlloc = nullptr;
+
+void teamworkHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kTeamworkAlloc)
+    {
+        const uint32_t args = getRegU32(ctx, 4), script = getRegU32(ctx, 18);
+        uint32_t caster = 0, count = 0;
+        if (script >= 0x00100000u && script < 0x02000000u)
+            std::memcpy(&caster, rdram + script + kScriptCaster, 4);
+        std::memcpy(&count, rdram + kTeamworkCount, 4);
+        if (args >= 0x00100000u && args < 0x02000000u && kh2hits::isBlockedAttacker(caster) &&
+            count + 2 <= kTeamworkMax)
+        {
+            uint32_t key = 0;
+            std::memcpy(&key, rdram + args, 4);
+            const uint32_t ours = key ^ (0x7C000000u | (caster & 0x00FFFFF0u));
+            std::memcpy(rdram + args, &ours, 4);
+            static int logged = 0;
+            if (logged++ < 20)
+            {
+                std::printf("[spells] stand-in %08X's spell script: a teamwork block of its own (key %X -> %X)\n",
+                            caster, key, ours);
+                std::fflush(stdout);
+            }
+        }
+    }
+    kh2::callOriginal(g_teamworkAlloc, rdram, ctx, runtime);
+}
 
 PS2Runtime::RecompiledFunction g_cast = nullptr;
 std::atomic<int> g_logged{0};
@@ -229,6 +272,12 @@ bool install(PS2Runtime &runtime)
         g_debugOriginal = runtime.lookupFunction(g_debugAddr);
         if (!g_debugOriginal || !runtime.replaceFunction(g_debugAddr, &debugHook))
             g_debugOriginal = nullptr;
+    }
+    if (const char *e = std::getenv("KH2_SPELL_TEAMWORK"); !e || *e != '0')
+    {
+        g_teamworkAlloc = runtime.lookupFunction(kTeamworkAlloc);
+        if (!g_teamworkAlloc || !runtime.replaceFunction(kTeamworkAlloc, &teamworkHook))
+            std::fprintf(stderr, "[spells] could not give stand-ins' spells blocks of their own\n");
     }
     g_cast = runtime.lookupFunction(kCast);
     if (!g_cast || !runtime.replaceFunction(kCast, &castHook))

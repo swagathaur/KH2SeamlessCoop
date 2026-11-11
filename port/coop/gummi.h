@@ -62,6 +62,18 @@ void onPlayerTeeny(uint8_t player, const std::vector<uint8_t> &plan);
 bool ourTeeny(const uint8_t *rdram, std::vector<uint8_t> &out);
 // Client: a piece of the host's launch.
 void onHostSortie(const std::vector<uint8_t> &piece);
+
+// During a mission, every other frame: the host's main ship (its place
+// relative to the rail) and the piloted Teenies (GummiShips, host -> clients);
+// a pilot's Teeny (GummiPilot, client -> host): its offset from the main ship
+// and how many shots it has fired. Each machine fires a remote pilot's Teeny
+// as its count goes up.
+bool hostShips(const uint8_t *rdram, std::vector<uint8_t> &out);
+void onHostShips(const std::vector<uint8_t> &data);
+bool pilotState(std::vector<uint8_t> &out);
+void onPilotState(uint8_t player, const std::vector<uint8_t> &data);
+// No mission any more (back to the field, or the session ended).
+void endMission();
 // Test: start mission `route` at `level` (1-3), EX or not, with the save's
 // main ship blueprint `mainSlot` and Teeny blueprints `teeny0` / `teeny1`
 // (-1: none), as the menu would.

@@ -163,6 +163,14 @@ and the mission state follow (mission.h).
   the field's co-op stands down. Guest jobs now wait in two queues
   (`kh2guest::kField`, `kGummi`): an avatar queued in the field and run inside
   a mission called the field's allocator (AREA::Alloc) with the field gone.
+- **Phase 5 works (tested, two games):** the client's pad flies its Teeny
+  (PAD(0)'s stick and fire; the main ship's own update sees an empty pad on
+  a client) and the host's main ship is placed on the client from the host's
+  (its object's +0x10..+0x5F, relative to the rail). Every other frame the
+  host sends its main ship and the piloted Teenies (GummiShips) and each
+  pilot its Teeny's offset and shot count (GummiPilot); the other machines
+  fire it as the count goes up. The Teeny steered up and right on the client
+  showed in the same place on the host.
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

@@ -546,6 +546,16 @@ void makeSession()
             kh2gummi::onHostSortie(data);
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiShips) && !g_session->isHost())
+        {
+            kh2gummi::onHostShips(data);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiPilot) && g_session->isHost())
+        {
+            kh2gummi::onPilotState(origin, data);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny) && g_session->isHost())
         {
             kh2gummi::onPlayerTeeny(origin, data);
@@ -962,6 +972,15 @@ void tickGummi(const uint8_t *ram, uint64_t guestFrame)
     }
     else if ((guestFrame % 300 == 150 || g_resendLoadout) && kh2gummi::ourTeeny(ram, blob))
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny), blob);
+    // In a mission, every other frame: the host's main ship and the piloted
+    // Teenies; a client's own Teeny.
+    if (guestFrame % 2 == 0)
+    {
+        if (g_session->isHost() ? kh2gummi::hostShips(ram, blob) : kh2gummi::pilotState(blob))
+            g_session->sendEvent(static_cast<uint16_t>(g_session->isHost() ? kh2net::GameEventType::GummiShips
+                                                                           : kh2net::GameEventType::GummiPilot),
+                                 blob);
+    }
 }
 
 void tick(const uint8_t *rdram, uint64_t guestFrame)
@@ -1002,7 +1021,12 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     // nobody walks, there is no party or room, and a room jump (a follow, a
     // party refresh) in the middle of one breaks it. Only the session and the
     // Gummi missions' own sharing run.
-    if (kh2gummi::inGummi(ram))
+    static bool wasGummi = false;
+    const bool gummi = kh2gummi::inGummi(ram);
+    if (wasGummi && !gummi)
+        kh2gummi::endMission();
+    wasGummi = gummi;
+    if (gummi)
     {
         if (!g_session)
             return;

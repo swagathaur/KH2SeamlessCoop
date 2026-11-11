@@ -184,17 +184,31 @@ constexpr uint32_t kFrameDelta = 0x00349E10; // the frame's time (1 at 60 fps)
 PS2Runtime::RecompiledFunction g_shipUpdate = nullptr, g_apply[2] = {}, g_teenyFire = nullptr,
                                g_teenyLockOn = nullptr, g_teenyMissile = nullptr;
 
+enum class Mode { Off, Local, Remote, Test };
 struct Pilot
 {
-    bool on = false, test = false;
+    Mode mode = Mode::Off;
     PilotInput in;
     bool wasFire = false;
     bool placed = false;  // offset taken from where the formation had it
     float offset[3] = {}; // the Teeny's place relative to the main ship
     int cooldown = 0;
+    uint16_t shots = 0;       // Local/Test: shots fired here (sent)
+    uint16_t remoteShots = 0; // Remote: its pilot's count, as last heard
+    uint16_t shotsSeen = 0;   // Remote: fired here so far
+    bool heard = false;       // Remote: offset heard from its pilot
 };
 std::mutex g_pilotMutex;
 Pilot g_pilots[2];
+// Client: the main ship is the host's (its place from the host; our pad does
+// not move it). The host's main ship, as last heard: its object's +0x10..+0x5F
+// (position, rotation and the rest, relative to the rail: FUN_01F1C618).
+constexpr uint32_t kShipPlace = 0x10, kShipPlaceSize = 0x50;
+bool g_followShip = false;
+bool g_heardShip = false;
+uint8_t g_hostShip[kShipPlaceSize] = {};
+constexpr uint32_t kPad0 = 0x0034D6C0, kPadSize = 0x60; // PAD(0): held u64 +0, pressed u64 +8, stick f32 x2 +0x30
+constexpr uint64_t kFireButton = 0x100;
 
 // Steering: units per frame at full stick, and the room around the main ship
 // (the formation's own Teenies sit about 60 to each side of it).
@@ -228,23 +242,58 @@ void testScript(Pilot &p, uint64_t frame, int k)
     p.in.fire = (frame / 20) % 3 == 0;
 }
 
+void fire(uint32_t teeny)
+{
+    kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}}, {}, kh2guest::kGummi);
+}
+
 void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (ctx->pc == kShipUpdate)
+    if (ctx->pc != kShipUpdate)
     {
-        kh2guest::runPending(rdram, ctx, runtime, kShipUpdate, kh2guest::kGummi); // may not return
-        const uint32_t ship = getRegU32(ctx, 4);
-        static uint64_t frame = 0;
-        ++frame;
+        kh2::callOriginal(g_shipUpdate, rdram, ctx, runtime);
+        return;
+    }
+    kh2guest::runPending(rdram, ctx, runtime, kShipUpdate, kh2guest::kGummi); // may not return
+    const uint32_t ship = getRegU32(ctx, 4);
+    static uint64_t frame = 0;
+    ++frame;
+    uint8_t pad[kPadSize];
+    std::memcpy(pad, rdram + kPad0, kPadSize);
+    bool follow = false;
+    {
         std::lock_guard<std::mutex> lock(g_pilotMutex);
         for (int k = 0; k < 2; ++k)
         {
             Pilot &p = g_pilots[k];
-            if (!p.on)
+            if (p.mode == Mode::Off)
                 continue;
-            if (p.test)
-                testScript(p, frame, k);
             const uint32_t teeny = rd<uint32_t>(rdram, ship + kShipTeenies + 4 * k);
+            if (p.mode == Mode::Remote)
+            {
+                // Its pilot's shots, fired here too (a few at most at once).
+                int n = 0;
+                while (p.shotsSeen != p.remoteShots && n++ < 3)
+                {
+                    ++p.shotsSeen;
+                    if (teeny)
+                        fire(teeny);
+                }
+                p.shotsSeen = p.remoteShots;
+                continue;
+            }
+            if (p.mode == Mode::Test)
+                testScript(p, frame, k);
+            else // Local: this machine's pad
+            {
+                uint64_t held = 0;
+                std::memcpy(&held, pad, 8);
+                float stick[2];
+                std::memcpy(stick, pad + 0x30, 8);
+                p.in.fire = (held & kFireButton) != 0;
+                for (int i = 0; i < 2; ++i)
+                    p.in.stick[i] = std::isfinite(stick[i]) ? std::fmax(-1.f, std::fmin(1.f, stick[i])) : 0.f;
+            }
             const bool press = p.in.fire && !p.wasFire;
             p.wasFire = p.in.fire;
             if (p.cooldown > 0)
@@ -252,11 +301,30 @@ void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             if (teeny && (press || (p.in.fire && p.cooldown == 0)))
             {
                 p.cooldown = 8;
-                kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}}, {}, kh2guest::kGummi);
+                ++p.shots;
+                fire(teeny);
             }
         }
+        follow = g_followShip && g_heardShip;
+        if (follow)
+            std::memcpy(rdram + ship + kShipPlace, g_hostShip, kShipPlaceSize);
+    }
+    if (g_followShip)
+    {
+        // Our pad flies our Teeny, not the main ship: the main ship's update
+        // sees none (buttons and stick cleared, put back after).
+        std::memset(rdram + kPad0, 0, 0x10);
+        std::memset(rdram + kPad0 + 0x30, 0, 8);
     }
     kh2::callOriginal(g_shipUpdate, rdram, ctx, runtime);
+    if (g_followShip)
+    {
+        std::memcpy(rdram + kPad0, pad, 0x10);
+        std::memcpy(rdram + kPad0 + 0x30, pad + 0x30, 8);
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        if (g_heardShip)
+            std::memcpy(rdram + ship + kShipPlace, g_hostShip, kShipPlaceSize);
+    }
 }
 
 // FUN_01F280A0 / FUN_01F281A0(formation): a piloted Teeny's target is where
@@ -269,7 +337,14 @@ template <int K> void applyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *r
         const uint32_t target = f + 0x10 + 0x40 * K, current = f + 0x30 + 0x40 * K;
         std::lock_guard<std::mutex> lock(g_pilotMutex);
         Pilot &p = g_pilots[K];
-        if (p.on)
+        if (p.mode == Mode::Remote && p.heard)
+        {
+            for (int i = 0; i < 3; ++i)
+                wrf(rdram, target + 4 * i, p.offset[i]);
+            for (int i = 0; i < 3; ++i)
+                wrf(rdram, target + 0x10 + 4 * i, 0.f);
+        }
+        else if (p.mode == Mode::Local || p.mode == Mode::Test)
         {
             if (!p.placed)
             {
@@ -289,9 +364,9 @@ template <int K> void applyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *r
         }
         static int logged = 0;
         if (logged < 12 && (logged++ % 4) == 0)
-            std::printf("[gummi] Teeny %d target %.1f %.1f %.1f current %.1f %.1f %.1f%s\n", K,
+            std::printf("[gummi] Teeny %d target %.1f %.1f %.1f current %.1f %.1f %.1f mode %d\n", K,
                         rdf(rdram, target), rdf(rdram, target + 4), rdf(rdram, target + 8), rdf(rdram, current),
-                        rdf(rdram, current + 4), rdf(rdram, current + 8), p.on ? " (piloted)" : "");
+                        rdf(rdram, current + 4), rdf(rdram, current + 8), int(p.mode));
     }
     kh2::callOriginal(g_apply[K], rdram, ctx, runtime);
 }
@@ -304,7 +379,7 @@ bool piloted(uint8_t *rdram, uint32_t teeny)
         return false;
     std::lock_guard<std::mutex> lock(g_pilotMutex);
     for (int k = 0; k < 2; ++k)
-        if (g_pilots[k].on && rd<uint32_t>(rdram, ship + kShipTeenies + 4 * k) == teeny)
+        if (g_pilots[k].mode != Mode::Off && rd<uint32_t>(rdram, ship + kShipTeenies + 4 * k) == teeny)
             return true;
     return false;
 }
@@ -350,6 +425,7 @@ std::vector<uint8_t> g_outSortie;               // host: to send
 std::vector<uint8_t> g_inSortie;                // client: to start
 std::atomic<bool> g_starting{false};            // client: our own start of the host's mission
 std::vector<uint8_t> g_sentTeeny;
+uint8_t g_pilotIds[2] = {0xFF, 0xFF}; // who flies each Teeny in this mission
 bool g_sentTeenyOnce = false;
 
 // A preset's Teeny blueprint for players who brought none (the first preset
@@ -392,6 +468,18 @@ void hostLaunch(uint8_t *ram)
                     : plan.empty()                                ? "the host's"
                                                                   : "a preset");
     }
+    {
+        std::lock_guard<std::mutex> pl(g_pilotMutex);
+        for (int k = 0; k < 2; ++k)
+        {
+            g_pilots[k] = Pilot{};
+            g_pilots[k].mode = pilots[k] != 0xFF ? Mode::Remote : Mode::Off;
+        }
+        g_followShip = false;
+        g_heardShip = false;
+    }
+    g_pilotIds[0] = pilots[0];
+    g_pilotIds[1] = pilots[1];
     std::vector<uint8_t> b(kSortieSize, 0);
     b[0] = 1;
     b[1] = uint8_t(rd<uint32_t>(ram, kRoute));
@@ -567,11 +655,139 @@ void onHostSortie(const std::vector<uint8_t> &piece)
     {
         std::lock_guard<std::mutex> lock(g_netMutex);
         g_inSortie = data;
+        g_pilotIds[0] = data[8];
+        g_pilotIds[1] = data[9];
+        std::lock_guard<std::mutex> pl(g_pilotMutex);
+        for (int k = 0; k < 2; ++k)
+        {
+            g_pilots[k] = Pilot{};
+            g_pilots[k].mode = data[8 + k] == 0xFF ? Mode::Off : data[8 + k] == g_localId ? Mode::Local : Mode::Remote;
+        }
+        g_followShip = true;
+        g_heardShip = false;
         std::printf("[gummi] the host launched route %u level %u; Teeny pilots %d %d (we are %u)\n", data[1], data[2],
                     data[8] == 0xFF ? -1 : data[8], data[9] == 0xFF ? -1 : data[9], g_localId);
     }
     std::fflush(stdout);
     startHostMission();
+}
+
+namespace
+{
+void putF(std::vector<uint8_t> &b, float v)
+{
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(&v);
+    b.insert(b.end(), p, p + 4);
+}
+void putU16(std::vector<uint8_t> &b, uint16_t v)
+{
+    b.push_back(uint8_t(v));
+    b.push_back(uint8_t(v >> 8));
+}
+constexpr uint32_t kShipPtr = 0x01F7DE44, kShipVtable = 0x01F81060;
+uint32_t missionShip(const uint8_t *ram)
+{
+    if (!inGummi(ram) || std::strcmp(kh2ovl::activeName(), "gumibattle") != 0)
+        return 0;
+    const uint32_t ship = rd<uint32_t>(ram, kShipPtr);
+    if (ship < 0x00100000u || ship >= 0x02000000u || rd<uint32_t>(ram, ship) != kShipVtable)
+        return 0;
+    return ship;
+}
+} // namespace
+
+bool hostShips(const uint8_t *ram, std::vector<uint8_t> &out)
+{
+    const uint32_t ship = missionShip(ram);
+    if (!ship)
+        return false;
+    static uint32_t seq = 0;
+    out.clear();
+    out.push_back(1);
+    ++seq;
+    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&seq), reinterpret_cast<const uint8_t *>(&seq) + 4);
+    out.insert(out.end(), ram + ship + kShipPlace, ram + ship + kShipPlace + kShipPlaceSize);
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    for (int k = 0; k < 2; ++k)
+    {
+        const Pilot &p = g_pilots[k];
+        out.push_back(p.mode == Mode::Remote && p.heard ? 1 : 0);
+        for (int i = 0; i < 3; ++i)
+            putF(out, p.offset[i]);
+        putU16(out, p.remoteShots);
+    }
+    return true;
+}
+
+void onHostShips(const std::vector<uint8_t> &d)
+{
+    constexpr size_t kSize = 1 + 4 + kShipPlaceSize + 2 * 15;
+    if (d.size() != kSize || d[0] != 1)
+        return;
+    static uint32_t lastSeq = 0;
+    uint32_t seq;
+    std::memcpy(&seq, d.data() + 1, 4);
+    if (seq < lastSeq && lastSeq - seq < 1000)
+        return; // (older)
+    lastSeq = seq;
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    std::memcpy(g_hostShip, d.data() + 5, kShipPlaceSize);
+    g_heardShip = true;
+    const uint8_t *t = d.data() + 5 + kShipPlaceSize;
+    for (int k = 0; k < 2; ++k, t += 15)
+    {
+        Pilot &p = g_pilots[k];
+        if (p.mode != Mode::Remote || !t[0])
+            continue;
+        std::memcpy(p.offset, t + 1, 12);
+        p.remoteShots = uint16_t(t[13] | t[14] << 8);
+        if (!p.heard)
+            p.shotsSeen = p.remoteShots;
+        p.heard = true;
+    }
+}
+
+bool pilotState(std::vector<uint8_t> &out)
+{
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    for (int k = 0; k < 2; ++k)
+    {
+        const Pilot &p = g_pilots[k];
+        if (p.mode != Mode::Local || !p.placed)
+            continue;
+        out.clear();
+        out.push_back(uint8_t(k));
+        for (int i = 0; i < 3; ++i)
+            putF(out, p.offset[i]);
+        putU16(out, p.shots);
+        return true;
+    }
+    return false;
+}
+
+void onPilotState(uint8_t player, const std::vector<uint8_t> &d)
+{
+    if (d.size() != 15 || d[0] > 1 || g_pilotIds[d[0]] != player)
+        return;
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    Pilot &p = g_pilots[d[0]];
+    if (p.mode != Mode::Remote)
+        return;
+    std::memcpy(p.offset, d.data() + 1, 12);
+    p.remoteShots = uint16_t(d[13] | d[14] << 8);
+    if (!p.heard)
+        p.shotsSeen = p.remoteShots;
+    p.heard = true;
+}
+
+void endMission()
+{
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    for (Pilot &p : g_pilots)
+        if (p.mode != Mode::Test)
+            p = Pilot{};
+    g_followShip = false;
+    g_heardShip = false;
 }
 
 bool install(PS2Runtime &runtime)
@@ -599,10 +815,8 @@ void setPilot(int k, bool on)
     if (k < 0 || k > 1)
         return;
     std::lock_guard<std::mutex> lock(g_pilotMutex);
-    Pilot &p = g_pilots[k];
-    if (p.on != on)
-        p = Pilot{};
-    p.on = on;
+    g_pilots[k] = Pilot{};
+    g_pilots[k].mode = on ? Mode::Local : Mode::Off;
 }
 
 void setPilotInput(int k, const PilotInput &in)
@@ -615,10 +829,11 @@ void setPilotInput(int k, const PilotInput &in)
 
 void testPilot(int k, bool on)
 {
-    setPilot(k, on);
+    if (k < 0 || k > 1)
+        return;
     std::lock_guard<std::mutex> lock(g_pilotMutex);
-    if (k >= 0 && k <= 1)
-        g_pilots[k].test = on;
+    g_pilots[k] = Pilot{};
+    g_pilots[k].mode = on ? Mode::Test : Mode::Off;
 }
 
 void listPresets()

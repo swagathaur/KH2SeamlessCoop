@@ -188,6 +188,14 @@ and the mission state follow (mission.h).
   hook the caller. And a hook cannot run code after an overlay function's
   original returns (the original hands back to the dispatcher at its first
   call out).
+- **Phase 7 (tested, two games):** a client cannot pause; its game stands
+  still while the host's is under a menu (pause, game over); it retries and
+  leaves (Gummi menu, World Map) when the host does (GummiFlow); a cleared
+  mission ends on both. Each player is told who flies what as the mission
+  starts. Tested: client START does nothing; host pause -> Retry restarts
+  both; host game over (HP poked low) -> Continue restarts both; host pause
+  -> World Map takes both to the World Map. A piloted Teeny's lock-on
+  missiles go with the main ship's lock-on (the targets are the main ship's).
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

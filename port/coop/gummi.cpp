@@ -183,8 +183,7 @@ constexpr uint32_t kBodyFire = 0x01F2DCE0, kTeenyBody = 0x3A0;
 constexpr uint32_t kShipTeenies = 0x5D0, kShipFormation = 0x5E0, kFormationTeenies = 0x98;
 constexpr uint32_t kFrameDelta = 0x00349E10; // the frame's time (1 at 60 fps)
 
-PS2Runtime::RecompiledFunction g_shipUpdate = nullptr, g_apply[2] = {}, g_teenyFire = nullptr,
-                               g_teenyLockOn = nullptr, g_teenyMissile = nullptr;
+PS2Runtime::RecompiledFunction g_shipUpdate = nullptr, g_apply[2] = {}, g_teenyFire = nullptr;
 
 enum class Mode { Off, Local, Remote, Test };
 struct Pilot
@@ -398,24 +397,6 @@ void teenyFireHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     kh2::callOriginal(g_teenyFire, rdram, ctx, runtime);
 }
-void teenyLockOnHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    if (ctx->pc == kTeenyLockOn && piloted(rdram, getRegU32(ctx, 4)))
-    {
-        ctx->pc = getRegU32(ctx, 31);
-        return;
-    }
-    kh2::callOriginal(g_teenyLockOn, rdram, ctx, runtime);
-}
-void teenyMissileHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    if (ctx->pc == kTeenyMissile && piloted(rdram, getRegU32(ctx, 4)))
-    {
-        ctx->pc = getRegU32(ctx, 31);
-        return;
-    }
-    kh2::callOriginal(g_teenyMissile, rdram, ctx, runtime);
-}
 bool g_clientMission = false; // this machine follows the host's mission (a client in one)
 constexpr uint32_t kGummiSave = kh2state::addr::Save + 0x100E0, kGummiSaveSize = 0x10FC0 - 0x100E0;
 std::vector<uint8_t> g_savedGummi; // client: our Gummi save data as the mission began
@@ -436,6 +417,7 @@ std::vector<uint8_t> g_outSortie;               // host: to send
 std::vector<uint8_t> g_inSortie;                // client: to start
 std::atomic<bool> g_starting{false};            // client: our own start of the host's mission
 uint8_t g_pilotIds[2] = {0xFF, 0xFF}; // who flies each Teeny in this mission
+int g_notice = 0; // a launch to tell the player about (1), with g_pilotIds
 
 // The host's garage's k-th Teeny blueprint (empty: none).
 std::vector<uint8_t> garageTeeny(const uint8_t *ram, int k)
@@ -507,6 +489,7 @@ void hostLaunch(uint8_t *ram)
     }
     g_pilotIds[0] = pilots[0];
     g_pilotIds[1] = pilots[1];
+    g_notice = 1;
     clearEnemies();
     g_hostMission = !g_others.empty();
     g_clientMission = false;
@@ -549,9 +532,10 @@ void battleInitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // Client: the host's mission, started here from any mode (the hook of every
 // task's yield runs the job while one is waiting).
 std::atomic<bool> g_startWaiting{false};
+std::atomic<bool> g_flowWaiting{false}; // client: the host's retry or quit to make here
 void taskYieldHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (ctx->pc == kTaskYield && g_startWaiting.load(std::memory_order_relaxed))
+    if (ctx->pc == kTaskYield && (g_startWaiting.load(std::memory_order_relaxed) || g_flowWaiting.load(std::memory_order_relaxed)))
         kh2guest::runPending(rdram, ctx, runtime, kTaskYield, kh2guest::kGummi); // may not return
     kh2::callOriginal(g_taskYield, rdram, ctx, runtime);
 }
@@ -596,12 +580,116 @@ void startHostMission()
         return call;
     }, kh2guest::kGummi);
 }
+
+// --- The mission's course: pause, retry, quit (phase 7) -------------------
+//
+// The host's pause (GumiPause, a menu mode: the battle mode's state goes to
+// 2 under it) and game over menus put their choice in the pause block's +3
+// (*0x0032BA78, GUMIBATTLE::GetPauseParam): 0 go on, 1 retry, 2 the Gummi
+// menu, 3 the World Map. The menu's callback (pause FUN_01F19340, game over
+// FUN_01F19730, results FUN_01F186A0, at the block's +4) retries with
+// FUN_01F18510; FUN_00104108 leaves for the Gummi menu (2) or the World Map
+// (3); the host's leaving is seen as its battle mode ending with that choice
+// made (FUN_00104108 is reached by a direct call). A client follows the
+// host's: it cannot pause (FUN_01F19240 opens the pause menu; passed by), its
+// game stands still while the host's is under a menu (the game speed,
+// 0x00349E0C, at 0), and it retries or leaves when the host does (GummiFlow).
+constexpr uint32_t kPauseOpen = 0x01F19240, kRetry = 0x01F18510, kLeave = 0x00104108, kPauseBlock = 0x0032BA78;
+constexpr uint32_t kPauseDone = 0x01F19340, kGameOverDone = 0x01F19730, kResultsDone = 0x01F186A0;
+constexpr uint32_t kGameSpeed = 0x00349E0C;
+PS2Runtime::RecompiledFunction g_pauseOpen = nullptr, g_pauseDone = nullptr, g_gameOverDone = nullptr,
+                               g_resultsDone = nullptr;
+std::vector<uint8_t> g_flowOut;        // host: [kind, value] to send (1 retry, 2 leave)
+std::atomic<bool> g_hostPaused{false}; // client: the host's game is under a menu
+bool g_frozen = false;                 // client: stood still for the host's menu
+float g_speedBefore = 1.f;
+
+void pauseOpenHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kPauseOpen && g_clientMission)
+    {
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_pauseOpen, rdram, ctx, runtime);
+}
+
+uint8_t pauseChoice(const uint8_t *ram)
+{
+    const uint32_t block = rd<uint32_t>(ram, kPauseBlock);
+    return block >= 0x00100000u && block < 0x02000000u ? ram[block + 3] : 0;
+}
+
+// Host: a menu's callback, its choice made: a retry for the others too.
+template <uint32_t Entry, PS2Runtime::RecompiledFunction *Original>
+void menuDoneHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == Entry && g_hostMission && pauseChoice(rdram) == 1)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_netMutex);
+            g_flowOut = {1, 1};
+        }
+        clearEnemies(); // (the mission starts over: its enemies are named anew)
+        std::printf("[gummi] the host retries the mission\n");
+    }
+    kh2::callOriginal(*Original, rdram, ctx, runtime);
+}
+
+// Client: stand still while the host's game is under a menu.
+void setFrozen(uint8_t *ram, bool on)
+{
+    if (on == g_frozen)
+        return;
+    g_frozen = on;
+    if (on)
+    {
+        g_speedBefore = rdf(ram, kGameSpeed);
+        if (!(g_speedBefore > 0.f && g_speedBefore < 10.f))
+            g_speedBefore = 1.f;
+        wrf(ram, kGameSpeed, 0.f);
+    }
+    else
+        wrf(ram, kGameSpeed, g_speedBefore);
+    std::printf("[gummi] %s with the host's game\n", on ? "standing still" : "going on");
+}
+
+// Client: the host's retry or leaving, made here.
+void followFlow(uint8_t kind, uint8_t value)
+{
+    g_flowWaiting = true;
+    kh2guest::post(
+        [kind, value](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+            if (!first)
+            {
+                g_flowWaiting = false;
+                return std::nullopt;
+            }
+            uint8_t *ram = env.rdram;
+            if (std::strcmp(kh2ovl::activeName(), "gumibattle") != 0 || !inGummi(ram))
+            {
+                g_flowWaiting = false;
+                return std::nullopt;
+            }
+            const uint32_t block = rd<uint32_t>(ram, kPauseBlock);
+            if (block >= 0x00100000u && block < 0x02000000u)
+                ram[block + 3] = value;
+            if (kind == 1)
+                clearEnemies();
+            std::printf("[gummi] %s, as the host did\n", kind == 1 ? "retrying the mission" : "leaving the mission");
+            std::fflush(stdout);
+            return kh2guest::Call{kind == 1 ? kRetry : kLeave, {}, {}};
+        },
+        kh2guest::kGummi);
+}
 } // namespace
 
 bool inGummi(const uint8_t *ram)
 {
+    // (2: suspended under a menu mode: the pause, game over and results menus)
     constexpr uint32_t kMenuMode = 0x0032BA90, kModeState = 0x1C;
-    return rd<uint32_t>(ram, kBattleMode + kModeState) == 1 || rd<uint32_t>(ram, kMenuMode + kModeState) == 1;
+    const uint32_t b = rd<uint32_t>(ram, kBattleMode + kModeState), m = rd<uint32_t>(ram, kMenuMode + kModeState);
+    return b == 1 || b == 2 || m == 1 || m == 2;
 }
 
 void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8_t> &others)
@@ -663,6 +751,7 @@ void onHostSortie(const std::vector<uint8_t> &piece)
         g_inSortie = data;
         g_pilotIds[0] = data[8];
         g_pilotIds[1] = data[9];
+        g_notice = 1;
         std::lock_guard<std::mutex> pl(g_pilotMutex);
         for (int k = 0; k < 2; ++k)
         {
@@ -1027,6 +1116,7 @@ bool hostShips(const uint8_t *ram, std::vector<uint8_t> &out)
     putF(out, rdf(ram, ship + kShipStats + 4));
     const uint32_t score = rd<uint32_t>(ram, kScore);
     out.insert(out.end(), reinterpret_cast<const uint8_t *>(&score), reinterpret_cast<const uint8_t *>(&score) + 4);
+    out.push_back(rd<uint32_t>(ram, kBattleMode + 0x1C) == 2 ? 1 : 0); // under a menu
     std::lock_guard<std::mutex> lock(g_enemyMutex);
     if (seq % 300 == 0)
         std::printf("[gummi] host: %zu objects known, %u hits from clients taken, %u deaths sent, time %.1f (hits on enemies %u)\n",
@@ -1042,7 +1132,7 @@ bool hostShips(const uint8_t *ram, std::vector<uint8_t> &out)
 
 void onHostShips(const std::vector<uint8_t> &d)
 {
-    constexpr size_t kFixed = 1 + 4 + kShipPlaceSize + 2 * 15 + 12 + 1;
+    constexpr size_t kFixed = 1 + 4 + kShipPlaceSize + 2 * 15 + 13 + 1;
     if (d.size() < kFixed || d[0] != 2 || d.size() != kFixed + size_t(d[kFixed - 1]) * 4)
         return;
     uint32_t seq;
@@ -1075,6 +1165,7 @@ void onHostShips(const std::vector<uint8_t> &d)
     std::memcpy(&g_hostTime, q, 4);
     std::memcpy(&g_hostHp, q + 4, 4);
     std::memcpy(&g_hostScore, q + 8, 4);
+    g_hostPaused = q[12] != 0;
     g_haveHostTime = g_haveHostHp = true;
     for (size_t i = 0; i < d[kFixed - 1]; ++i)
     {
@@ -1151,8 +1242,66 @@ void onPilotState(uint8_t player, const std::vector<uint8_t> &d)
     }
 }
 
+bool takeNotice(uint8_t pilots[2])
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    if (!g_notice)
+        return false;
+    g_notice = 0;
+    pilots[0] = g_pilotIds[0];
+    pilots[1] = g_pilotIds[1];
+    return true;
+}
+
+bool takeFlow(std::vector<uint8_t> &out)
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    if (g_flowOut.empty())
+        return false;
+    out.swap(g_flowOut);
+    g_flowOut.clear();
+    return true;
+}
+
+void onHostFlow(const std::vector<uint8_t> &d)
+{
+    if (d.size() == 2 && g_clientMission && (d[0] == 1 || d[0] == 2))
+        followFlow(d[0], d[1]);
+}
+
+void hostTick(const uint8_t *ram)
+{
+    static bool was = false, led = false;
+    static uint8_t choice = 0;
+    const uint32_t b = rd<uint32_t>(ram, kBattleMode + 0x1C);
+    const bool in = b == 1 || b == 2;
+    if (in)
+    {
+        choice = pauseChoice(ram);
+        led = g_hostMission;
+    }
+    else if (was && led && (choice == 2 || choice == 3))
+    {
+        std::lock_guard<std::mutex> lock(g_netMutex);
+        g_flowOut = {2, choice};
+        std::printf("[gummi] the host leaves the mission (%s)\n", choice == 2 ? "Gummi menu" : "World Map");
+        std::fflush(stdout);
+    }
+    if (!in)
+        choice = 0;
+    was = in;
+}
+
+void clientTick(uint8_t *ram)
+{
+    setFrozen(ram, g_clientMission && g_hostPaused.load() && inGummi(ram));
+}
+
 void endMission(uint8_t *ram)
 {
+    if (ram)
+        setFrozen(ram, false);
+    g_hostPaused = false;
     if (!g_savedGummi.empty() && ram)
     {
         std::memcpy(ram + kGummiSave, g_savedGummi.data(), g_savedGummi.size());
@@ -1181,8 +1330,6 @@ bool install(PS2Runtime &runtime)
     g_apply[0] = hookOverlay("gumibattle", kApplyTeeny0, &applyHook<0>);
     g_apply[1] = hookOverlay("gumibattle", kApplyTeeny1, &applyHook<1>);
     g_teenyFire = hookOverlay("gumibattle", kTeenyFire, &teenyFireHook);
-    g_teenyLockOn = hookOverlay("gumibattle", kTeenyLockOn, &teenyLockOnHook);
-    g_teenyMissile = hookOverlay("gumibattle", kTeenyMissile, &teenyMissileHook);
     g_countSpawned = hookOverlay("gumibattle", kCountSpawned, &countSpawnedHook);
     g_spawnUnit = hookOverlay("gumibattle", kSpawnUnit, &spawnUnitHook);
     g_attachPart = hookOverlay("gumibattle", kAttachPart, &attachPartHook);
@@ -1191,10 +1338,16 @@ bool install(PS2Runtime &runtime)
     g_enemyUpdate = hookOverlay("gumibattle", kEnemyUpdate, &enemyUpdateHook<kEnemyUpdate, &g_enemyUpdate>);
     g_enemyUpdate2 = hookOverlay("gumibattle", kEnemyUpdate2, &enemyUpdateHook<kEnemyUpdate2, &g_enemyUpdate2>);
     g_shipDamage = hookOverlay("gumibattle", kShipDamage, &shipDamageHook);
+    g_pauseOpen = hookOverlay("gumibattle", kPauseOpen, &pauseOpenHook);
+    g_pauseDone = hookOverlay("gumibattle", kPauseDone, &menuDoneHook<kPauseDone, &g_pauseDone>);
+    g_gameOverDone = hookOverlay("gumibattle", kGameOverDone, &menuDoneHook<kGameOverDone, &g_gameOverDone>);
+    g_resultsDone = hookOverlay("gumibattle", kResultsDone, &menuDoneHook<kResultsDone, &g_resultsDone>);
+    if (!g_pauseOpen || !g_pauseDone || !g_gameOverDone || !g_resultsDone)
+        std::fprintf(stderr, "[gummi] could not hook the mission's menus\n");
     if (!g_countSpawned || !g_spawnUnit || !g_attachPart || !g_enemyHit || !g_enemyDamage || !g_enemyUpdate || !g_enemyUpdate2 ||
         !g_shipDamage)
         std::fprintf(stderr, "[gummi] could not hook the mission's enemies\n");
-    const bool ok = g_shipUpdate && g_apply[0] && g_apply[1] && g_teenyFire && g_teenyLockOn && g_teenyMissile;
+    const bool ok = g_shipUpdate && g_apply[0] && g_apply[1] && g_teenyFire;
     if (!ok)
         std::fprintf(stderr, "[gummi] could not hook the Gummi battle overlay\n");
     return ok;

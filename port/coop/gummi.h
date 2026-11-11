@@ -69,6 +69,16 @@ bool hostShips(const uint8_t *rdram, std::vector<uint8_t> &out);
 void onHostShips(const std::vector<uint8_t> &data);
 bool pilotState(std::vector<uint8_t> &out);
 void onPilotState(uint8_t player, const std::vector<uint8_t> &data);
+// The host's retry or leaving (GummiFlow, host -> clients: kind 1 retry, 2
+// leave for the Gummi menu or World Map as its value says), and a client's
+// part each host-loop iteration (standing still while the host's game is
+// under a menu).
+bool takeFlow(std::vector<uint8_t> &out);
+// A launch just made or followed: who flies Teeny 0 and 1 (0xFF: nobody), once.
+bool takeNotice(uint8_t pilots[2]);
+void onHostFlow(const std::vector<uint8_t> &data);
+void clientTick(uint8_t *rdram);
+void hostTick(const uint8_t *rdram);
 // No mission any more (back to the field, or the session ended).
 void endMission(uint8_t *rdram);
 // Test: start mission `route` at `level` (1-3), EX or not, with the save's

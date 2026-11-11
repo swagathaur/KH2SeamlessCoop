@@ -551,6 +551,11 @@ void makeSession()
             kh2gummi::onHostShips(data);
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiFlow) && !g_session->isHost())
+        {
+            kh2gummi::onHostFlow(data);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiPilot) && g_session->isHost())
         {
             kh2gummi::onPilotState(origin, data);
@@ -958,12 +963,36 @@ void tickGummi(const uint8_t *ram, uint64_t guestFrame)
     kh2gummi::setSession(true, g_session->isHost(), g_session->localId(), others);
     std::vector<uint8_t> blob;
     std::vector<std::vector<uint8_t>> pieces;
+    // Who flies what, said once as the mission starts.
+    uint8_t pilots[2];
+    if (kh2gummi::takeNotice(pilots))
+    {
+        const uint8_t me = g_session->localId();
+        std::string text = g_session->isHost() ? "You fly the Gummi Ship" : hostName() + " flies the Gummi Ship";
+        for (int k = 0; k < 2; ++k)
+        {
+            if (pilots[k] == 0xFF)
+                continue;
+            const auto it = g_remotes.find(pilots[k]);
+            const std::string who = pilots[k] == me ? "you" : it != g_remotes.end() && !it->second.name.empty()
+                                                                 ? it->second.name
+                                                                 : "Player " + std::to_string(pilots[k] + 1);
+            text += ", " + who + " Teeny Ship " + std::to_string(k + 1);
+        }
+        kh2pgs::toast(text, 6.0);
+        addLog(text);
+    }
     if (g_session->isHost())
     {
         if (kh2gummi::takeSortie(pieces))
             for (const auto &p : pieces)
                 g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiSortie), p);
+        kh2gummi::hostTick(ram);
+        if (kh2gummi::takeFlow(blob))
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiFlow), blob);
     }
+    else
+        kh2gummi::clientTick(const_cast<uint8_t *>(ram));
     // In a mission, every other frame: the host's main ship and the piloted
     // Teenies; a client's own Teeny.
     if (guestFrame % 2 == 0)

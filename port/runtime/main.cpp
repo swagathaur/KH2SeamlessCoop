@@ -1203,6 +1203,14 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2gummi::testStartPreset(route, level, ex != 0, mainPreset, t0, t1);
             say(line);
         }
+        else if (cmd == "teenytest")
+        {
+            // teenytest K [0|1]: Teeny Ship K flown by a test script.
+            int k = 0, on = 1;
+            ls >> k >> on;
+            kh2gummi::testPilot(k, on != 0);
+            say(line);
+        }
         else if (cmd == "presets")
         {
             kh2gummi::listPresets();
@@ -2312,6 +2320,7 @@ int main(int argc, char **argv)
     kh2scale::install(runtime);
     kh2mission::install(runtime);
     kh2spells::install(runtime);
+    kh2gummi::install(runtime);
     kh2avatars::install(runtime);
     kh2summons::install(runtime);
     kh2fxpool::install(runtime);

@@ -17,8 +17,26 @@
 #include <cstdint>
 #include <string>
 
+class PS2Runtime;
+
 namespace kh2gummi
 {
+// Hooks in the Gummi battle overlay (its functions, by address in its image).
+bool install(PS2Runtime &runtime);
+
+// A Teeny Ship flown by a player instead of the formation (k: 0 or 1).
+// While one is piloted, the formation leaves it alone: it keeps the place its
+// pilot steers it to (an offset from the main ship, inside the formation's
+// room), and it fires on its pilot's button, not the main ship's.
+struct PilotInput
+{
+    float stick[2] = {0, 0}; // -1..1 (x right, y up)
+    bool fire = false;       // held
+};
+void setPilot(int k, bool on);
+void setPilotInput(int k, const PilotInput &in);
+// Test: Teeny `k` flown by a script (circles, firing now and then).
+void testPilot(int k, bool on);
 // Test: start mission `route` at `level` (1-3), EX or not, with the save's
 // main ship blueprint `mainSlot` and Teeny blueprints `teeny0` / `teeny1`
 // (-1: none), as the menu would.

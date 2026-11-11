@@ -1,6 +1,9 @@
 #include "gummi.h"
 
+#include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -10,6 +13,9 @@
 #include "game_state.h"
 #include "cd_iso.h"
 #include "guest_call.h"
+#include "hle_call.h"
+#include "overlay_manager.h"
+#include "ps2_runtime.h"
 
 namespace kh2gummi
 {
@@ -154,7 +160,221 @@ std::optional<kh2guest::Call> launch(uint8_t *ram, int route, int level, bool ex
         return std::nullopt;
     return kh2guest::Call{kModeEnable, {kBattleMode}, {}};
 }
+// --- Piloted Teeny Ships -----------------------------------------------------
+//
+// The main ship (0x1440 bytes, vtable 0x01F81060) holds the Teeny Ships at
+// +0x5D0/+0x5D4 and their formation at +0x5E0 (FUN_01F2CA10 each frame, 8
+// kinds). The formation works out a target for each Teeny relative to the
+// main ship: Teeny 0 position +0x10, rotation +0x20 (current +0x30 / +0x40),
+// Teeny 1 +0x50 / +0x60 (+0x70 / +0x80); FUN_01F280A0 / FUN_01F281A0 then
+// bring the current ones toward the targets, and FUN_01F28BF0 places the
+// Teenies from the main ship's matrix. Firing: the main ship's fire
+// (FUN_01F1EDxx) fires its own body (+0x3E0, FUN_01F2DCE0) and each Teeny's
+// (FUN_01F27A68 -> FUN_01F2DCE0(teeny + 0x3A0)); lock-on missiles likewise
+// (FUN_01F27A80 / FUN_01F27A98). The main ship's update is FUN_01F219A8
+// (vtable +8), once a frame while the mission runs.
+constexpr uint32_t kShipUpdate = 0x01F219A8, kApplyTeeny0 = 0x01F280A0, kApplyTeeny1 = 0x01F281A0;
+constexpr uint32_t kTeenyFire = 0x01F27A68, kTeenyLockOn = 0x01F27A80, kTeenyMissile = 0x01F27A98;
+constexpr uint32_t kBodyFire = 0x01F2DCE0, kTeenyBody = 0x3A0;
+constexpr uint32_t kShipTeenies = 0x5D0, kShipFormation = 0x5E0, kFormationTeenies = 0x98;
+constexpr uint32_t kFrameDelta = 0x00349E10; // the frame's time (1 at 60 fps)
+
+PS2Runtime::RecompiledFunction g_shipUpdate = nullptr, g_apply[2] = {}, g_teenyFire = nullptr,
+                               g_teenyLockOn = nullptr, g_teenyMissile = nullptr;
+
+struct Pilot
+{
+    bool on = false, test = false;
+    PilotInput in;
+    bool wasFire = false;
+    bool placed = false;  // offset taken from where the formation had it
+    float offset[3] = {}; // the Teeny's place relative to the main ship
+    int cooldown = 0;
+};
+std::mutex g_pilotMutex;
+Pilot g_pilots[2];
+
+// Steering: units per frame at full stick, and the room around the main ship
+// (the formation's own Teenies sit about 60 to each side of it).
+constexpr float kSpeed = 2.0f, kRoomX = 110.f, kRoomY = 70.f;
+
+PS2Runtime::RecompiledFunction hookOverlay(const char *overlay, uint32_t address, PS2Runtime::RecompiledFunction fn)
+{
+    for (size_t i = 0; i < kh2ovl::kOverlayCount; ++i)
+        if (std::strcmp(kh2ovl::kOverlays[i].name, overlay) == 0)
+        {
+            PS2Runtime::FunctionRegion &r = kh2ovl::kOverlays[i].region();
+            if (address < r.base || address >= r.end || !r.slots)
+                return nullptr;
+            PS2Runtime::RecompiledFunction &slot = r.slots[(address - r.base) >> 2];
+            PS2Runtime::RecompiledFunction original = slot;
+            if (original)
+                slot = fn;
+            return original;
+        }
+    return nullptr;
+}
+
+float rdf(const uint8_t *ram, uint32_t a) { return rd<float>(ram, a); }
+void wrf(uint8_t *ram, uint32_t a, float v) { std::memcpy(ram + (a & 0x01FFFFFFu), &v, 4); }
+
+void testScript(Pilot &p, uint64_t frame, int k)
+{
+    const float t = float(frame) * 0.03f + float(k) * 3.14159f;
+    p.in.stick[0] = std::cos(t);
+    p.in.stick[1] = std::sin(t * 0.7f);
+    p.in.fire = (frame / 20) % 3 == 0;
+}
+
+void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kShipUpdate)
+    {
+        kh2guest::runPending(rdram, ctx, runtime, kShipUpdate); // may not return
+        const uint32_t ship = getRegU32(ctx, 4);
+        static uint64_t frame = 0;
+        ++frame;
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        for (int k = 0; k < 2; ++k)
+        {
+            Pilot &p = g_pilots[k];
+            if (!p.on)
+                continue;
+            if (p.test)
+                testScript(p, frame, k);
+            const uint32_t teeny = rd<uint32_t>(rdram, ship + kShipTeenies + 4 * k);
+            const bool press = p.in.fire && !p.wasFire;
+            p.wasFire = p.in.fire;
+            if (p.cooldown > 0)
+                --p.cooldown;
+            if (teeny && (press || (p.in.fire && p.cooldown == 0)))
+            {
+                p.cooldown = 8;
+                kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}});
+            }
+        }
+    }
+    kh2::callOriginal(g_shipUpdate, rdram, ctx, runtime);
+}
+
+// FUN_01F280A0 / FUN_01F281A0(formation): a piloted Teeny's target is where
+// its pilot steers it.
+template <int K> void applyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == (K == 0 ? kApplyTeeny0 : kApplyTeeny1))
+    {
+        const uint32_t f = getRegU32(ctx, 4);
+        const uint32_t target = f + 0x10 + 0x40 * K, current = f + 0x30 + 0x40 * K;
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        Pilot &p = g_pilots[K];
+        if (p.on)
+        {
+            if (!p.placed)
+            {
+                for (int i = 0; i < 3; ++i)
+                    p.offset[i] = rdf(rdram, current + 4 * i);
+                p.placed = true;
+            }
+            float dt = rdf(rdram, kFrameDelta);
+            if (!(dt > 0 && dt < 4))
+                dt = 1;
+            p.offset[0] = std::fmax(-kRoomX, std::fmin(kRoomX, p.offset[0] + p.in.stick[0] * kSpeed * dt));
+            p.offset[1] = std::fmax(-kRoomY, std::fmin(kRoomY, p.offset[1] + p.in.stick[1] * kSpeed * dt));
+            for (int i = 0; i < 3; ++i)
+                wrf(rdram, target + 4 * i, p.offset[i]);
+            for (int i = 0; i < 3; ++i) // facing: the main ship's
+                wrf(rdram, target + 0x10 + 4 * i, 0.f);
+        }
+        static int logged = 0;
+        if (logged < 12 && (logged++ % 4) == 0)
+            std::printf("[gummi] Teeny %d target %.1f %.1f %.1f current %.1f %.1f %.1f%s\n", K,
+                        rdf(rdram, target), rdf(rdram, target + 4), rdf(rdram, target + 8), rdf(rdram, current),
+                        rdf(rdram, current + 4), rdf(rdram, current + 8), p.on ? " (piloted)" : "");
+    }
+    kh2::callOriginal(g_apply[K], rdram, ctx, runtime);
+}
+
+// The main ship's fire and missiles reach a piloted Teeny no more.
+bool piloted(uint8_t *rdram, uint32_t teeny)
+{
+    const uint32_t ship = rd<uint32_t>(rdram, 0x01F7DE44);
+    if (ship < 0x00100000u || ship >= 0x02000000u)
+        return false;
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    for (int k = 0; k < 2; ++k)
+        if (g_pilots[k].on && rd<uint32_t>(rdram, ship + kShipTeenies + 4 * k) == teeny)
+            return true;
+    return false;
+}
+void teenyFireHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kTeenyFire && piloted(rdram, getRegU32(ctx, 4)))
+    {
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_teenyFire, rdram, ctx, runtime);
+}
+void teenyLockOnHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kTeenyLockOn && piloted(rdram, getRegU32(ctx, 4)))
+    {
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_teenyLockOn, rdram, ctx, runtime);
+}
+void teenyMissileHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kTeenyMissile && piloted(rdram, getRegU32(ctx, 4)))
+    {
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_teenyMissile, rdram, ctx, runtime);
+}
 } // namespace
+
+bool install(PS2Runtime &)
+{
+    g_shipUpdate = hookOverlay("gumibattle", kShipUpdate, &shipUpdateHook);
+    g_apply[0] = hookOverlay("gumibattle", kApplyTeeny0, &applyHook<0>);
+    g_apply[1] = hookOverlay("gumibattle", kApplyTeeny1, &applyHook<1>);
+    g_teenyFire = hookOverlay("gumibattle", kTeenyFire, &teenyFireHook);
+    g_teenyLockOn = hookOverlay("gumibattle", kTeenyLockOn, &teenyLockOnHook);
+    g_teenyMissile = hookOverlay("gumibattle", kTeenyMissile, &teenyMissileHook);
+    const bool ok = g_shipUpdate && g_apply[0] && g_apply[1] && g_teenyFire && g_teenyLockOn && g_teenyMissile;
+    if (!ok)
+        std::fprintf(stderr, "[gummi] could not hook the Gummi battle overlay\n");
+    return ok;
+}
+
+void setPilot(int k, bool on)
+{
+    if (k < 0 || k > 1)
+        return;
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    Pilot &p = g_pilots[k];
+    if (p.on != on)
+        p = Pilot{};
+    p.on = on;
+}
+
+void setPilotInput(int k, const PilotInput &in)
+{
+    if (k < 0 || k > 1)
+        return;
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    g_pilots[k].in = in;
+}
+
+void testPilot(int k, bool on)
+{
+    setPilot(k, on);
+    std::lock_guard<std::mutex> lock(g_pilotMutex);
+    if (k >= 0 && k <= 1)
+        g_pilots[k].test = on;
+}
 
 void listPresets()
 {

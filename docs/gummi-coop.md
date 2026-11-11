@@ -143,6 +143,15 @@ and the mission state follow (mission.h).
   Teenies flying. `presets` lists them; `gummi ...` does the same with the
   save's garage (save +0x55A0, valid byte then plans; empty until the player
   builds a ship).
+- **Phase 3 works on one machine (tested):** `teenytest K` hands Teeny K to a
+  test script. The formation leaves it alone (its target offset is the
+  pilot's, kept within 110 x / 70 y of the main ship; the formation's own sit
+  60 to each side), it fires on its pilot's button only (the main ship's fire
+  and lock-on missiles skip it) and shoots enemies down on its own. The hooks
+  are in the Gummi battle overlay's own function table
+  (`kh2ovl::kOverlays[..].region()`), patched once at start-up; the main
+  ship's update (FUN_01F219A8) is also the frame hook that runs guest jobs
+  during a mission. Piloted Teenies have no lock-on missiles yet.
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

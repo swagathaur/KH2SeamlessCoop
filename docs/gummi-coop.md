@@ -74,7 +74,9 @@ are for SLPM_666.75 and the overlays as loaded at 0x01F18000.
   (FUN_01F280A0 / FUN_01F281A0) and places them from the player's matrix
   (FUN_01F28BF0). Pressing fire fires the main ship and both Teenies
   (FUN_01F27A68), lock-on missiles likewise (FUN_01F27A80/FUN_01F27A98).
-  The mission is lost when the main ship and both Teenies are destroyed.
+  Teeny Ships have no HP: an enemy bullet that reaches one only plays an
+  effect (FUN_01F27A40); only the main ship's HP (player +0x4A8 stats, +4)
+  counts.
 - The course runs on rails: course object 0x01F8F8E0, time at +0xC grows by
   the frame delta, progress +0x10; ships' positions are relative to the rail
   (+0x10..+0x4F).

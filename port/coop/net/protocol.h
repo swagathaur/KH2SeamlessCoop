@@ -76,6 +76,7 @@ enum class GameEventType : uint16_t
     // 16: unused (was GummiTeeny: the host chooses every Teeny Ship)
     GummiShips = 17,    // host -> clients: its main ship and the piloted Teenies, every other frame (gummi.h)
     GummiPilot = 18,    // client -> host: the sender's Teeny: offset and shots (gummi.h)
+    RoomIntent = 20,    // host -> clients: the host's map jump as it decides it: world u8, room u8, door u16, map u16, battle u16, event u16 (roomsync.h)
     GummiFlow = 19,     // host -> clients: retry (1) or leave (2, value 2 Gummi menu / 3 World Map) (gummi.h)
     EnemyKill = 9,    // host -> clients: as EnemyHit (the blow that killed one), then the attacker's player id u8 (0xFF: none)
 };

@@ -19,6 +19,7 @@
 #include "mission.h"
 #include "spells.h"
 #include "gummi.h"
+#include "roomsync.h"
 #include "roomlock.h"
 #include "avatars.h"
 #include "summons.h"
@@ -60,6 +61,17 @@ double g_lastWarp = -100.0;
 double g_hostRoomSince = 0.0;
 uint16_t g_hostRoomSeen = 0xFFFF;
 bool g_followPending = false; // the host moved since we last followed
+// Where the host last decided to go (its own map jump, or its RoomIntent):
+// everyone follows it, so each other player is expected there.
+struct LeadJump
+{
+    uint8_t world = 0xFF, room = 0xFF;
+    double at = -1e9;
+} g_leadJump;
+// The host's room change as it decided it (RoomIntent): followed at once.
+bool g_haveIntent = false;
+kh2roomsync::Location g_intent;
+double g_intentAt = 0;
 int g_rejoins = 0;            // automatic joins after losing the host
 int g_lastMapState = -1;      // the port mapping's state as last logged
 double g_lastRejoin = -100.0;
@@ -551,6 +563,23 @@ void makeSession()
             kh2gummi::onHostShips(data);
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::RoomIntent) && !g_session->isHost() && data.size() == 10 &&
+            kh2roomsync::fast())
+        {
+            kh2roomsync::Location l;
+            l.world = data[0];
+            l.room = data[1];
+            std::memcpy(&l.door, data.data() + 2, 2);
+            std::memcpy(&l.map, data.data() + 4, 2);
+            std::memcpy(&l.battle, data.data() + 6, 2);
+            std::memcpy(&l.event, data.data() + 8, 2);
+            g_intent = l;
+            g_haveIntent = true;
+            g_intentAt = now();
+            g_leadJump = {l.world, l.room, now()};
+            kh2roomsync::timing("intent", l.world, l.room, l.door);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiFlow) && !g_session->isHost())
         {
             kh2gummi::onHostFlow(data);
@@ -815,6 +844,30 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
             p.summonYaw = ps.summonYaw;
             p.summonMotion = ps.summonMotion;
             p.loadout = r.loadout;
+            // On their way here: everyone follows the host's room changes, so
+            // a player not here yet (still loading, or not yet told) after the
+            // host decided to come here is shown here at once, by our side,
+            // until their own state says where they are (avatars only).
+            if (kh2avatars::enabled() && kh2roomsync::fast())
+            {
+                const kh2state::State me = kh2state::read(ram);
+                const bool hereNow = p.present && p.world == me.now.world && p.room == me.now.room;
+                if (!hereNow && me.player.valid && g_leadJump.world == me.now.world && g_leadJump.room == me.now.room &&
+                    t - g_leadJump.at < 8.0)
+                {
+                    p.present = true;
+                    p.world = me.now.world;
+                    p.room = me.now.room;
+                    const float side = 90.0f * float(1 + (id % 2)) * ((id & 1) ? 1.f : -1.f);
+                    p.pos[0] = me.player.pos[0] + side * std::cos(me.player.facing);
+                    p.pos[1] = me.player.pos[1];
+                    p.pos[2] = me.player.pos[2] - side * std::sin(me.player.facing);
+                    p.yaw = me.player.facing;
+                    p.motion = 0;
+                    p.rideSerial = -1;
+                    p.summon = 0;
+                }
+            }
             list.push_back(p);
         }
     // Their summons (summons.h), shown here while they have one out.
@@ -1241,7 +1294,48 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
                           host.world != 0 && host.world != 0xFF;
         kh2roomlock::set(lead, lead ? host.world : 0xFF, lead ? host.room : 0xFF);
     }
-    if ((g_opt.followHost || kh2story::active()) && !g_session->isHost())
+    // Room changes as they are decided (roomsync.h): the host's go to the
+    // clients at once (its intent is final); ours are only noted.
+    {
+        kh2roomsync::Location l;
+        while (kh2roomsync::takeJump(l))
+            if (g_session->isHost())
+            {
+                g_leadJump = {l.world, l.room, now()};
+                std::vector<uint8_t> d(10);
+                d[0] = l.world;
+                d[1] = l.room;
+                std::memcpy(d.data() + 2, &l.door, 2);
+                std::memcpy(d.data() + 4, &l.map, 2);
+                std::memcpy(d.data() + 6, &l.battle, 2);
+                std::memcpy(d.data() + 8, &l.event, 2);
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::RoomIntent), d);
+            }
+    }
+    if ((g_opt.followHost || kh2story::active()) && !g_session->isHost() && g_haveIntent)
+    {
+        // The host's intent: followed as soon as a jump can be made here (not
+        // in the middle of one; a client in a fight goes too). Its own room
+        // (the host reloading where it is) needs nothing.
+        const kh2state::State me = kh2state::read(rdram);
+        uint32_t jumping;
+        std::memcpy(&jumping, rdram + kh2state::addr::MapJumpTask, 4);
+        if (now() - g_intentAt > 20.0)
+            g_haveIntent = false; // (stale: the fallback below follows where the host is)
+        else if (me.now.world == g_intent.world && me.now.room == g_intent.room && !jumping)
+            g_haveIntent = false;
+        else if (me.player.valid && !jumping && me.now.world != 0 && me.now.world != 0xFF)
+        {
+            g_haveIntent = false;
+            g_lastWarp = now();
+            g_followPending = false;
+            g_hostRoomSeen = uint16_t(g_intent.world << 8 | g_intent.room);
+            g_hostRoomSince = now();
+            addLog("following the host to " + kh2state::describe({g_intent.world, g_intent.room}));
+            warpLocked(g_intent.world, g_intent.room, g_intent.door, g_intent.battle, g_intent.event, g_intent.map);
+        }
+    }
+    if ((g_opt.followHost || kh2story::active()) && !g_session->isHost() && !g_haveIntent)
     {
         kh2net::PlayerState host;
         const kh2state::State me = kh2state::read(rdram);

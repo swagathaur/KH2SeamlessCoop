@@ -63,6 +63,7 @@
 #include "mission.h"
 #include "spells.h"
 #include "gummi.h"
+#include "roomsync.h"
 #include "avatars.h"
 #include "names.h"
 #include "roomlock.h"
@@ -2327,6 +2328,7 @@ int main(int argc, char **argv)
     kh2mission::install(runtime);
     kh2spells::install(runtime);
     kh2gummi::install(runtime);
+    kh2roomsync::install(runtime);
     kh2avatars::install(runtime);
     kh2summons::install(runtime);
     kh2fxpool::install(runtime);

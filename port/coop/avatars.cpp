@@ -1,4 +1,5 @@
 #include "avatars.h"
+#include "roomsync.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1056,7 +1057,32 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             }
         }
     }
-    const bool settled = st.player.valid && st.control == 0 && !jumping && t - g_roomSince > 1.5;
+    // Ready to make avatars: our player is here and known (an avatar's first
+    // updates point the game's player pointer at itself; ours must be known
+    // first), in control, not changing rooms. (It waited 1.5 s more, for no
+    // reason found: KH2_AVATAR_SETTLE=seconds puts a wait back, for tests.)
+    static const double settleWait = [] {
+        const char *e = std::getenv("KH2_AVATAR_SETTLE");
+        return e ? std::atof(e) : kh2roomsync::fast() ? 0.0 : 1.5;
+    }();
+    const bool settled = st.player.valid && st.control == 0 && !jumping && g_ourPlayer == player && player &&
+                         t - g_roomSince >= settleWait;
+    {
+        // (timings: in the room with control, and settled)
+        static uint16_t inRoom = 0xFFFF, settledRoom = 0xFFFF;
+        if (st.player.valid && st.control == 0 && !jumping && inRoom != room)
+        {
+            inRoom = room;
+            kh2roomsync::timing("control", st.now.world, st.now.room);
+        }
+        if (jumping)
+            inRoom = settledRoom = 0xFFFF;
+        if (settled && settledRoom != room)
+        {
+            settledRoom = room;
+            kh2roomsync::timing("settled", st.now.world, st.now.room);
+        }
+    }
     // Our own drive or revert under way (YS::CHANGEFORM's task, or its clear
     // of the form groups in the last 3 s): no form look is read or made for
     // an avatar meanwhile (our new form's reads first).
@@ -1287,6 +1313,28 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             }
             s.parked = 0;
         }
+        // Their place in the party is theirs before their avatar comes:
+        // the member there (Donald, Goofy, a world's own) is hidden and
+        // still from the moment the room makes it, whether or not they are
+        // here yet (it was seen until their avatar took over). Not in a
+        // cutscene: its actors are the story's.
+        if (!cutscene && kh2roomsync::fast())
+        {
+            const uint32_t slot = sheetIndex - 1;
+            constexpr uint32_t kSummonMode = 0x01D49968;
+            const bool summon = rd<uint32_t>(rdram, kSummonMode) != 0;
+            const uint32_t proxy = slot < 2 && !summon && !jumping ? rd<uint32_t>(rdram, kFriendTable + slot * 4) : 0;
+            if (proxy && live(rdram, proxy) && proxy != g_ourPlayer)
+            {
+                const uint32_t pf = rd<uint32_t>(rdram, proxy + kObjFlags);
+                if (!(pf & kNoAct))
+                    wr<uint32_t>(rdram, proxy + kObjFlags, pf | kNoAct);
+                hide(rdram, proxy, t);
+                if (s.proxy != proxy)
+                    kh2roomsync::timing("proxyhidden", st.now.world, st.now.room, int(slot + 1));
+                s.proxy = proxy;
+            }
+        }
         if (!here || cutscene || (s.object && s.entry != want))
         {
             if (s.object)
@@ -1350,6 +1398,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 s.prepared = false;
                 g_avatarMadeAt = nowMs();
                 std::printf("[avatars] player %u's avatar is %08X\n", id + 1, obj);
+                kh2roomsync::timing("avatar", uint8_t(g_room >> 8), uint8_t(g_room), id + 1);
                 std::fflush(stdout);
                 refreshGauge();
             });

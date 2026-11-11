@@ -1163,6 +1163,14 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             }
             say(out);
         }
+        else if (cmd == "preload")
+        {
+            // (an objentry's files read in, as a client does for the host's enemies)
+            std::string a;
+            ls >> a;
+            kh2puppets::requestPreload(uint32_t(std::stoul(a, nullptr, 16)));
+            say(line);
+        }
         else if (cmd == "poke")
         {
             std::string a, hex;

@@ -64,6 +64,7 @@ struct State
     uint32_t baseKept = 0;     // their base-look avatar, hidden while they wear a form
     uint16_t baseEntry = 0;
     int64_t spawnAskedMs = -100000; // when its making was asked (ms)
+    uint32_t waitLoggedRoom = 0xFFFFFFFFu; // (its wait logged in this room)
 };
 std::mutex g_mutex; // g_states (spawn callbacks run on the EE thread)
 std::map<uint8_t, State> g_states;
@@ -415,8 +416,14 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 std::fflush(stdout);
             }
     }
-    // (Diagnostics: the frees for a few seconds after an avatar's teardown.)
-    if (ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 4000)
+    // (Diagnostics, KH2_FREE_LOG=1: the frees for a few seconds after an
+    // avatar's teardown. Off by default: a room's teardown frees dozens of
+    // files, and a line each slowed the room change.)
+    static const bool freeLog = [] {
+        const char *e = std::getenv("KH2_FREE_LOG");
+        return e && *e == '1';
+    }();
+    if (freeLog && ctx->pc == kCacheFree && sinceTeardown >= 0 && sinceTeardown < 4000)
     {
         const uint32_t a0 = getRegU32(ctx, 4);
         uint32_t h = 0;
@@ -1163,6 +1170,18 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             last = now;
         }
     }
+    {
+        // (Diagnostics: once a room, 3 s in, what the avatars go by.)
+        static uint16_t toldRoom = 0xFFFF;
+        if (t - g_roomSince > 3.0 && toldRoom != g_room)
+        {
+            toldRoom = g_room;
+            std::printf("[avatars] %02X-%02X: %zu other player(s), settled %d (player %08X ours %08X control %u)%s\n",
+                        st.now.world, st.now.room, remotes.size(), int(settled), player, g_ourPlayer, st.control,
+                        ourDriveBusy ? ", our drive busy" : "");
+            std::fflush(stdout);
+        }
+    }
     uint32_t sheetIndex = 0;
     for (const kh2partner::Remote &r : remotes)
     {
@@ -1284,8 +1303,22 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         // (Nor is a base look made while we are in a form: a base player
         // object made then let go of our form player's motion (its helper
         // called through nothing). The old look stays until we revert.)
-        if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 && !s.object && !s.pending)
+        static const bool baseInForm = [] { // (testing: KH2_AVATAR_BASE_IN_FORM=1 makes it anyway)
+            const char *e = std::getenv("KH2_AVATAR_BASE_IN_FORM");
+            return e && *e == '1';
+        }();
+        if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 && !s.object && !s.pending &&
+            !baseInForm)
+        {
+            if (settled && t - g_roomSince > 3.0 && s.waitLoggedRoom != g_room)
+            {
+                s.waitLoggedRoom = g_room;
+                std::printf("[avatars] player %u's avatar (entry %04X) waits: we are in a form (made once we revert)\n",
+                            r.playerId + 1, want);
+                std::fflush(stdout);
+            }
             continue;
+        }
         // Nor is one torn down while we are in a form: its teardown let go of
         // motion data our form player still used (a pure virtual call in our
         // motion). For a new form look the old avatar is put aside, hidden,
@@ -1337,6 +1370,14 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         }
         if (!here || cutscene || (s.object && s.entry != want))
         {
+            if (!s.object && settled && t - g_roomSince > 3.0 && s.waitLoggedRoom != g_room)
+            {
+                s.waitLoggedRoom = g_room;
+                std::printf("[avatars] player %u's avatar waits: %s (their %02X-%02X%s, ours %02X-%02X)\n", r.playerId + 1,
+                            cutscene ? "a cutscene" : "not here", r.world, r.room, r.present ? "" : " not in a room",
+                            st.now.world, st.now.room);
+                std::fflush(stdout);
+            }
             if (s.object)
             {
                 std::printf("[avatars] player %u's avatar %08X goes (%s)\n", r.playerId + 1, s.object,
@@ -1352,10 +1393,25 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         }
         if (!s.object)
         {
+            // (Why an avatar is not made yet, once a room, after 3 s settled.)
+            auto waits = [&](const char *why) {
+                if (settled && t - g_roomSince > 3.0 && s.waitLoggedRoom != g_room)
+                {
+                    s.waitLoggedRoom = g_room;
+                    std::printf("[avatars] player %u's avatar (entry %04X) waits: %s\n", r.playerId + 1, want, why);
+                    std::fflush(stdout);
+                }
+            };
             if (s.pending || !settled)
+            {
+                waits(s.pending ? "its making is under way" : "not settled");
                 continue;
+            }
             if (ourDriveBusy)
+            {
+                waits("our drive or revert");
                 continue; // (after our drive or revert, see above)
+            }
             // Their look's files: a form's (or one not here) read for them
             // into the cache where nothing moves them (kh2formcache); never
             // our own form's, which go when we revert.
@@ -1372,7 +1428,10 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                     continue;
                 }
                 if (look == kh2formcache::Look::Loading)
+                {
+                    waits("its look's files are being read");
                     continue;
+                }
             }
             s.pending = true;
             s.entry = want;

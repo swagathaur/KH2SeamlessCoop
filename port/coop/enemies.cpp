@@ -11,9 +11,12 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 
 #include "game_state.h"
+#include "formcache.h"
 #include "guest_call.h"
+#include "partners.h"
 #include "puppets.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
@@ -91,6 +94,7 @@ struct Made
 };
 std::map<int16_t, Made> g_made;
 std::map<uint16_t, double> g_preloaded; // entry -> when its files were requested, this room
+std::set<uint16_t> g_cached; // entries read into kh2formcache's batches instead (our player in a form), this room
 std::vector<std::pair<uint32_t, uint32_t>> g_thaw; // (object, flags before) to give their AI back
 uint16_t g_followRoom = 0xFFFF;
 double g_sharedSince = -1; // when the host and we were first both in this room (clientTick)
@@ -615,6 +619,13 @@ static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double
     }
     const kh2state::State st = kh2state::read(rdram);
     const bool freePlay = st.player.valid && st.control == 0 && !rd<uint32_t>(rdram, kh2state::addr::MapJumpTask);
+    // Our player in a drive form (or one starting or ending): an entry's
+    // files are not read the room's way then (its read request, group -1,
+    // then a flush), which took the place of our form player's files: its
+    // motion called through nothing (0x0017FE84) at once. They are read
+    // into kh2formcache's batches instead, out of the game's way.
+    const bool ourForm = rd<uint32_t>(rdram, 0x00351184u) != 0 ||
+                         (st.player.valid && kh2partner::formBaseLook(rdram, uint16_t(st.player.entryId)) != 0);
     bool jobQueued = false;
     for (const auto &[ser, m] : g_made)
         jobQueued = jobQueued || (m.posted && !m.object && now - m.postedAt < 3.0);
@@ -633,7 +644,22 @@ static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double
         if (m.posted && !m.object)
             m.posted = false; // the last try made nothing: again
         auto pre = g_preloaded.find(h.entry);
-        if (pre == g_preloaded.end())
+        if (ourForm && (pre == g_preloaded.end() || g_cached.count(h.entry)))
+        {
+            // (kh2formcache's batch: Ready once its files are in.)
+            const kh2formcache::Look look = kh2formcache::want(rdram, h.entry);
+            if (!g_cached.count(h.entry))
+            {
+                g_cached.insert(h.entry);
+                std::printf("[enemies] %04X's files read into our cache (our player is in a form)\n", h.entry);
+                std::fflush(stdout);
+            }
+            if (look != kh2formcache::Look::Ready || !freePlay || jobQueued)
+                continue;
+            if (pre == g_preloaded.end())
+                pre = g_preloaded.emplace(h.entry, now - 10.0).first;
+        }
+        else if (pre == g_preloaded.end())
         {
             g_preloaded[h.entry] = now;
             kh2puppets::requestPreload(h.entry);
@@ -683,6 +709,7 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         g_hostSeen.clear();
         g_made.clear();
         g_preloaded.clear();
+        g_cached.clear();
         g_followRoom = key;
         g_sharedSince = -1;
     }
@@ -1003,6 +1030,7 @@ void reset()
     g_hostSeen.clear();
     g_made.clear();
     g_preloaded.clear();
+    g_cached.clear();
     g_followRoom = 0xFFFF;
     g_sharedSince = -1;
     kh2puppets::setOverrides({});

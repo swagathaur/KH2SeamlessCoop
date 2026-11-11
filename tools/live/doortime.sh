@@ -1,6 +1,6 @@
 #!/bin/bash
 # doortime.sh up | warm | round N : timing of room changes with avatars (each call fits a 3-minute tool call).
-#   up [F] [B]  a fresh duo (avatars; KH2_FAST_ROOMS=F, default 1; KH2_AVATAR_BASE_IN_FORM=B, default 0),
+#   up [F] [B]  a fresh duo (avatars; KH2_FAST_ROOMS=F, default 1; KH2_AVATAR_BASE_IN_FORM=B, default 1),
 #               both on the Land of Dragons save (file 01 of the client's card)
 #   warm        HP held for both (the room's Heartless), the host to 08-01
 #   round N  the host goes to 08-02 (N odd) or 08-01 (N even); prints seconds from the host's map jump to:
@@ -14,7 +14,7 @@ up)
   # (the Land of Dragons save, file 01: a world with its party)
   n=$((n+1))
   extra=""; for kv in $LIVE_ENV; do extra+="\$env:${kv%%=*} = \"${kv#*=}\"\n"; done # (LIVE_ENV="NAME=VALUE ...")
-  printf 'Set-Location "$PSScriptRoot\\..\\.."\n$env:KH2_AVATARS = "1"\n$env:KH2_FAST_ROOMS = "%s"\n$env:KH2_AVATAR_BASE_IN_FORM = "%s"\n%bpowershell -NoProfile -ExecutionPolicy Bypass -File tools\\live\\live.ps1 duo\n' "${2:-1}" "${3:-0}" "$extra" > .agent/jobs/$n-live.ps1
+  printf 'Set-Location "$PSScriptRoot\\..\\.."\n$env:KH2_AVATARS = "1"\n$env:KH2_FAST_ROOMS = "%s"\n$env:KH2_AVATAR_BASE_IN_FORM = "%s"\n%bpowershell -NoProfile -ExecutionPolicy Bypass -File tools\\live\\live.ps1 duo\n' "${2:-1}" "${3:-1}" "$extra" > .agent/jobs/$n-live.ps1
   for i in $(seq 90); do [ -f .agent/jobs/$n-live.exit ] && break; sleep 1; done
   load=("wait 1700" "press DOWN" "wait 40" "press CIRCLE" "wait 160" "press CIRCLE" "wait 150" "press UP" "wait 30" "press CIRCLE" "wait 150" "press CIRCLE" "wait 400")
   (tools/live/ctl.sh host --timeout 150 "${load[@]}" >/dev/null) & (tools/live/ctl.sh client --timeout 150 "${load[@]}" >/dev/null); wait

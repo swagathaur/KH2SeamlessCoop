@@ -1125,6 +1125,63 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         const uint32_t rec = rd<uint32_t>(rdram, g_ourPlayer + kh2state::addr::ObjEntry);
         ourInForm = inRam(rec) && kh2partner::formBaseLook(rdram, uint16_t(rd<uint32_t>(rdram, rec) & 0xFFFF)) != 0;
     }
+    // (Diagnostics, KH2_FORM_DIAG=1: our player's motion helper (motion
+    // +0xC: the object whose vtable +0x18 FUN_0017FE10 calls) and its
+    // animation instances, which file each lies in, and when they change.)
+    {
+        static const bool diag = [] {
+            const char *e = std::getenv("KH2_FORM_DIAG");
+            return e && *e == '1';
+        }();
+        static uint32_t lastPlayer = 0, lastHelper = 0, lastVt = 0, lastSet = 0;
+        static int lines = 0;
+        if (diag && g_ourPlayer && live(rdram, g_ourPlayer) && lines < 300)
+        {
+            auto fileOf = [&](uint32_t a) {
+                std::string out = "-";
+                uint32_t h = rd<uint32_t>(rdram, kCacheHeaders);
+                for (int i = 0; i < 2048 && inRam(h); ++i)
+                {
+                    const uint32_t d = rd<uint32_t>(rdram, h + 0x30), sz = rd<uint32_t>(rdram, h + 0x2C);
+                    if (a >= d && a < d + sz)
+                    {
+                        char n[37] = {};
+                        std::memcpy(n, rdram + h + 4, 36);
+                        char b[96];
+                        std::snprintf(b, sizeof b, "%s(g%d,r%u,s%u)", n, rd<int32_t>(rdram, h + 0x28),
+                                      unsigned(rd<uint16_t>(rdram, h + 2)), unsigned(rdram[h + 1]));
+                        return std::string(b);
+                    }
+                    h = rd<uint32_t>(rdram, h + 0x3C);
+                }
+                return out;
+            };
+            const uint32_t mo = g_ourPlayer + 0x140;
+            const uint32_t set = rd<uint32_t>(rdram, mo), helper = rd<uint32_t>(rdram, mo + 0xC);
+            const uint32_t vt = inRam(helper) ? rd<uint32_t>(rdram, helper) : 0;
+            if (g_ourPlayer != lastPlayer || helper != lastHelper || vt != lastVt || set != lastSet)
+            {
+                ++lines;
+                std::printf("[formdiag] t=%lld player %08X (form %d) set %08X in %s; helper %08X in %s, vtable %08X "
+                            "(+0x18 %08X)\n",
+                            static_cast<long long>(kh2roomsync::wallMs()), g_ourPlayer, int(ourInForm), set,
+                            fileOf(set).c_str(), helper, fileOf(helper).c_str(), vt,
+                            inRam(vt) ? rd<uint32_t>(rdram, vt + 0x18) : 0u);
+                for (uint32_t i = 0; i < 8; ++i)
+                {
+                    const uint32_t inst = rd<uint32_t>(rdram, mo + 0x108 + i * 8);
+                    if (inRam(inst))
+                        std::printf("[formdiag]   instance %u %08X in %s, vtable %08X\n", i, inst, fileOf(inst).c_str(),
+                                    rd<uint32_t>(rdram, inst));
+                }
+                std::fflush(stdout);
+                lastPlayer = g_ourPlayer;
+                lastHelper = helper;
+                lastVt = vt;
+                lastSet = set;
+            }
+        }
+    }
     // (Diagnostics, KH2_FORM_WATCH=1: our form player's motion (+0x140,
     // 0x1A0 bytes), its helper's vtable and its animation instances' handlers,
     // each frame; what changed when they go bad.)
@@ -1318,12 +1375,17 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
                 continue;
             }
         }
-        // (Nor is a base look made while we are in a form: a base player
-        // object made then let go of our form player's motion (its helper
-        // called through nothing). The old look stays until we revert.)
-        static const bool baseInForm = [] { // (testing: KH2_AVATAR_BASE_IN_FORM=1 makes it anyway)
+        // A base look is made while we are in a form too. (It was not: the
+        // null calls in our form player's motion seen then came from the
+        // client's reads of the host's enemies in the room's way, which took
+        // the place of our form's files, see enemies.cpp; and from a form
+        // look's batch taken for Ready after a room change had let its files
+        // go, see kh2formcache::want. With both fixed, every form with every
+        // other, and room changes in each, ran clean.) KH2_AVATAR_BASE_IN_FORM=0:
+        // the old wait until we revert.
+        static const bool baseInForm = [] {
             const char *e = std::getenv("KH2_AVATAR_BASE_IN_FORM");
-            return e && *e == '1';
+            return !(e && *e == '0');
         }();
         if (here && !cutscene && ourInForm && kh2partner::formBaseLook(rdram, want) == 0 && !s.object && !s.pending &&
             !baseInForm)

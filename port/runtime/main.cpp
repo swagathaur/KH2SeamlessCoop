@@ -1187,6 +1187,18 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "drive")
+        {
+            // drive FORM: our player drives into a form as the Drive command
+            // does (FUN_001B6B10(player, form): 1 Valor, 2 Wisdom, ...; 0 reverts).
+            unsigned form = 0;
+            ls >> form;
+            uint32_t player = 0;
+            std::memcpy(&player, ram + 0x0034E948u, 4);
+            if (player)
+                kh2guest::postCall(kh2guest::Call{0x001B6B10u, {player, form}, {}});
+            say(line + (player ? "" : " (no player)"));
+        }
         else if (cmd == "avatarcast")
         {
             unsigned c = 0;

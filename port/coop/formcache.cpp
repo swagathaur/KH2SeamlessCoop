@@ -450,8 +450,10 @@ Look want(uint8_t *rdram, uint16_t entry)
     if (g_layoutRun.active || !g_hiddenForDrive.empty() || !g_keptOut.empty())
         return Look::Loading; // (a layout paused part way, our drive: ours are out of sight; a room's clear)
     const int64_t now = nowMs();
-    for (auto &[base, b] : g_batches)
+    for (auto it = g_batches.begin(); it != g_batches.end(); ++it)
     {
+        const int32_t base = it->first;
+        Batch &b = it->second;
         if (b.entry != entry)
             continue;
         b.wantedMs = now;
@@ -466,7 +468,20 @@ Look want(uint8_t *rdram, uint16_t entry)
                 in += rdram[h + kHState] == 3 && g_placed.count(h) ? 1 : 0;
             }
         });
-        if (b.ready || (files && in == files && now - b.askedMs > 300))
+        // Its files gone (a room change made them old files): not Ready on
+        // the strength of having been ready once. An avatar made from them
+        // then, as the game let them go, posed from freed data (null calls
+        // at 0x0017FE84 and on). Read again.
+        if (files == 0 && now - b.askedMs > 1000)
+        {
+            std::printf("[formcache] look %04X (batch %d): its files are gone; read again\n", b.entry, base);
+            std::fflush(stdout);
+            g_batches.erase(it);
+            break;
+        }
+        if (b.ready && in != files)
+            b.ready = false;
+        if ((b.ready && files) || (files && in == files && now - b.askedMs > 300))
         {
             if (!b.ready)
             {

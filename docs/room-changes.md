@@ -98,22 +98,26 @@ avatar (ALL_VISIBLE), 5 rounds each:
 
 ## Known limits
 
-- **A client in a drive form sees no avatar of a player in their base look
-  in a new room until it reverts** (in the room where it drove, the avatar
-  stays). A base-look player object made while our player is in a form
-  breaks our form player's motion (null calls at 0x0017FE84 at once; tested
-  again: `KH2_AVATAR_BASE_IN_FORM=1` makes it anyway, and crashed on the
-  first room change; giving it copies of its own in kh2formcache's batch
-  crashed as the copies were read, before it was made). The other way
-  round works: a player in a form is seen
-  in its form look by everyone, in every room.
+- (Fixed since: a player in a drive form now sees the others in their base
+  look in every room. That was held back because making a base-look player
+  object while in a form "crashed"; the crashes were the enemy reads above,
+  and a form look's batch taken for Ready after a room change had let its
+  files go (an avatar made from freed files; `kh2formcache::want` now reads
+  the look again). Tested with `tools/live/formtest.sh`: Valor, Wisdom,
+  Limit, Master, Final and Anti on either side, each with the others, with
+  room changes and fights in between, and with three players in two
+  different forms. `KH2_AVATAR_BASE_IN_FORM=0` brings back the old wait.)
 
 ## Tests
 
 - `tools/live/doortime.sh up [F] [B]`, `warm`, `round N [frames]`: a duo on
   the Land of Dragons save; each round prints the timings above.
 - `tools/live/doortrio.sh up|warm|round`: the same with a third game.
-- `tools/live/valor.sh GAME [again]`, `revert.sh GAME [again]`: a game into
-  Valor Form and out (the drive gauge is set first).
+- `tools/live/formtest.sh h=N c=N r ...`: the host or client drives into
+  form N (1 Valor, 2 Wisdom, 3 Limit, 4 Master, 5 Final, 6 Anti; 0
+  reverts, through the ctl `drive N` command), or a room change; who sees
+  whom and the null calls after each step.
+- `tools/live/valor.sh GAME`, `revert.sh GAME`: the same through the
+  command menu (fragile: the menu keeps its cursor).
 - `tools/live/formstress.sh FROM TO`: door rounds, stopping at the first
   null call; with the client in a form, the crash test above.

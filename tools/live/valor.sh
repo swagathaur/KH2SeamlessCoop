@@ -1,6 +1,13 @@
 #!/bin/bash
-# valor.sh GAME [again] : that game drives into Valor (gauge set to 3 first). The command menu's cursor on
-# Attack (a fresh game); "again": on Drive (after a revert, the cursor stays there)
+# valor.sh GAME : that game drives into Valor Form (its drive gauge set to 3 first, in battle mode for it). The command menu's
+# cursor is where it was last left: each count of DOWN presses is tried until our model is Valor's (0055).
 cd "$HOME/mnt/KH2 Decomp project"
-if [ "$2" = again ]; then nav=(); else nav=("press DOWN" "wait 15" "press DOWN" "wait 15" "press DOWN" "wait 15"); fi
-tools/live/ctl.sh $1 --timeout 60 "poke 01C6C901 03" "wait 10" "${nav[@]}" "press CIRCLE" "wait 30" "press CIRCLE" "wait 300" "state" | tail -1 | cut -c1-100
+log=logs/live-$1.log
+model() { grep -a "our model is" $log | tail -1 | grep -oE "is [0-9A-F]{4}" | cut -c4-; }
+for downs in 3 2 1 0; do
+  [ "$(model)" = 0055 ] && break
+  nav=(); for i in $(seq $downs); do nav+=("press DOWN" "wait 15"); done
+  tools/live/ctl.sh $1 --timeout 60 "press TRIANGLE" "wait 15" "press TRIANGLE" "wait 15" "freeze 01C61958 01" "poke 01C6C901 03" "wait 30" \
+    "${nav[@]}" "press CIRCLE" "wait 30" "press CIRCLE" "wait 300" "unfreeze 01C61958" >/dev/null
+done
+echo "$1 model $(model)"

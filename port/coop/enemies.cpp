@@ -644,6 +644,11 @@ static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double
         if (m.posted && !m.object)
             m.posted = false; // the last try made nothing: again
         auto pre = g_preloaded.find(h.entry);
+        // (Not while our player is not there yet (a room loading): whether
+        // it is in a form is not known then, and the read would only run
+        // once it is there anyway.)
+        if (pre == g_preloaded.end() && !st.player.valid)
+            continue;
         if (ourForm && (pre == g_preloaded.end() || g_cached.count(h.entry)))
         {
             // (kh2formcache's batch: Ready once its files are in.)
@@ -662,6 +667,9 @@ static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double
         else if (pre == g_preloaded.end())
         {
             g_preloaded[h.entry] = now;
+            std::printf("[enemies] %04X's files read the room's way (our player %04X, control %u)\n", h.entry,
+                        unsigned(st.player.entryId), st.control);
+            std::fflush(stdout);
             kh2puppets::requestPreload(h.entry);
             continue;
         }

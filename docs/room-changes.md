@@ -67,6 +67,20 @@ avatar (ALL_VISIBLE), 5 rounds each:
   test before the fix; none in 11 after (the new path was taken once, and
   the enemy was made from the batch).
 
+- **An avatar begun as our own room jump started.** At a session's start
+  the party refresh reloads the room; the client was in control for that
+  one frame, the avatar's making began, and it was finished in the reloaded
+  room, where it was taken for our own player. Its removal cleared the
+  game's player pointer, and the client followed the host no more (it
+  stood with no player). With no settling wait this window was open. Now
+  no avatar is begun within 0.3 s of a map jump being asked for or started
+  (`kh2roomsync::lastJumpMs`), and one finished for a room since left goes
+  the way avatars go (the game's player pointers kept).
+- **The enemy read's form check came too early.** It was decided while
+  our player was not there yet (the room loading), when it could not tell
+  we were in a form: the room's way was used, and with both players in
+  Valor the client crashed again. Enemy reads now wait for our player.
+
 ## Tried and left off
 
 - **Keeping a worn form look through the room change**
@@ -89,7 +103,9 @@ avatar (ALL_VISIBLE), 5 rounds each:
   stays). A base-look player object made while our player is in a form
   breaks our form player's motion (null calls at 0x0017FE84 at once; tested
   again: `KH2_AVATAR_BASE_IN_FORM=1` makes it anyway, and crashed on the
-  first room change). The other way round works: a player in a form is seen
+  first room change; giving it copies of its own in kh2formcache's batch
+  crashed as the copies were read, before it was made). The other way
+  round works: a player in a form is seen
   in its form look by everyone, in every room.
 
 ## Tests

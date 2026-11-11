@@ -1,5 +1,6 @@
 #include "roomsync.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@ namespace
 PS2Runtime::RecompiledFunction g_mapJump = nullptr;
 std::mutex g_mutex;
 std::deque<Location> g_jumps;
+std::atomic<int64_t> g_lastJumpMs{0};
 
 template <typename T> T rd(const uint8_t *ram, uint32_t a)
 {
@@ -42,6 +44,7 @@ void mapJumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             l.event = rd<uint16_t>(rdram, loc + 8);
             l.at = wallMs();
             timing("jump", l.world, l.room, l.door);
+            g_lastJumpMs.store(l.at);
             std::lock_guard<std::mutex> lock(g_mutex);
             g_jumps.push_back(l);
             if (g_jumps.size() > 8)
@@ -104,4 +107,6 @@ bool install(PS2Runtime &runtime)
     }
     return true;
 }
+void noteJumpAsked() { g_lastJumpMs.store(wallMs()); }
+int64_t lastJumpMs() { return g_lastJumpMs.load(); }
 } // namespace kh2roomsync

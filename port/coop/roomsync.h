@@ -33,4 +33,9 @@ void timing(const char *what, uint8_t world, uint8_t room, int extra = -1);
 // follow's: the game's own room changes), oldest first; ones older than two
 // seconds are dropped (nobody asked for them in time).
 bool takeJump(Location &out);
+// A room jump was asked for (a job of ours queued to make one, before the
+// game's map jump runs): noted as if it had started.
+void noteJumpAsked();
+// Wall clock ms of the last map jump (started or asked for).
+int64_t lastJumpMs();
 } // namespace kh2roomsync

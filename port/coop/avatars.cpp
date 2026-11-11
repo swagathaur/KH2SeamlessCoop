@@ -1085,8 +1085,13 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         const char *e = std::getenv("KH2_AVATAR_SETTLE");
         return e ? std::atof(e) : kh2roomsync::fast() ? 0.0 : 1.5;
     }();
-    const bool settled = st.player.valid && st.control == 0 && !jumping && g_ourPlayer == player && player &&
-                         t - g_roomSince >= settleWait;
+    // (Nor in the moment a room jump is asked for or starting: the game's
+    // jump task is set a little after, and an avatar begun in the room being
+    // left came out in the next one, taken there for our own player; its
+    // removal cleared the game's player pointer, and we followed no more.)
+    const bool jumpAsked = kh2roomsync::wallMs() - kh2roomsync::lastJumpMs() < 300;
+    const bool settled = st.player.valid && st.control == 0 && !jumping && !jumpAsked && g_ourPlayer == player &&
+                         player && t - g_roomSince >= settleWait;
     {
         // (timings: in the room with control, and settled)
         static uint16_t inRoom = 0xFFFF, settledRoom = 0xFFFF;
@@ -1453,14 +1458,20 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             const uint8_t id = r.playerId;
             std::printf("[avatars] making player %u's avatar (entry %04X)\n", r.playerId + 1, want);
             std::fflush(stdout);
-            kh2puppets::spawnAt(want, r.pos, r.yaw, [id, gen](uint32_t obj) {
+            kh2puppets::spawnAt(want, r.pos, r.yaw, [id, gen, rdram](uint32_t obj) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 State &s = g_states[id];
                 s.pending = false;
                 if (gen != g_gen || !obj)
                 {
+                    // (made for a room since left: it goes, the game's
+                    // player pointers kept as they were)
                     if (obj)
-                        kh2puppets::remove(obj);
+                    {
+                        std::printf("[avatars] an avatar made for the room we left (%08X) goes\n", obj);
+                        std::fflush(stdout);
+                        removeAvatar(rdram, obj);
+                    }
                     return;
                 }
                 for (auto &t : g_torn) // (a new object at an old one's address)

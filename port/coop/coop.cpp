@@ -147,6 +147,7 @@ void warpLocked(uint8_t world, uint8_t room, uint16_t door, uint16_t battle = 0x
                 uint16_t map = 0xFFFF)
 {
     addLog("going to " + kh2state::describe({world, room}));
+    kh2roomsync::noteJumpAsked(); // (no avatar is made in the room we are leaving)
     kh2guest::post([world, room, door, battle, event, map](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
         if (!first)
         {

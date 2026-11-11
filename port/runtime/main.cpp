@@ -62,6 +62,7 @@
 #include "scaling.h"
 #include "mission.h"
 #include "spells.h"
+#include "gummi.h"
 #include "avatars.h"
 #include "names.h"
 #include "roomlock.h"
@@ -1183,6 +1184,33 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             ls >> c;
             kh2spells::avatarCast(uint16_t(c));
             say(line);
+        }
+        else if (cmd == "gummi")
+        {
+            // gummi ROUTE LEVEL [EX] [MAIN] [TEENY0] [TEENY1]: start a Gummi
+            // mission with the save's blueprints (-1: none).
+            int route = 0, level = 1, ex = 0, mainSlot = 0, t0 = -1, t1 = -1;
+            ls >> route >> level >> ex >> mainSlot >> t0 >> t1;
+            kh2gummi::testStart(route, level, ex != 0, mainSlot, t0, t1);
+            say(line);
+        }
+        else if (cmd == "gummip")
+        {
+            // gummip ROUTE LEVEL [EX] [MAIN] [TEENY0] [TEENY1]: the same with
+            // the game's preset blueprints (-1: none).
+            int route = 0, level = 1, ex = 0, mainPreset = 0, t0 = -1, t1 = -1;
+            ls >> route >> level >> ex >> mainPreset >> t0 >> t1;
+            kh2gummi::testStartPreset(route, level, ex != 0, mainPreset, t0, t1);
+            say(line);
+        }
+        else if (cmd == "presets")
+        {
+            kh2gummi::listPresets();
+            say(line);
+        }
+        else if (cmd == "garage")
+        {
+            say(line + ": " + kh2gummi::garage(ram));
         }
         else if (cmd == "playercast")
         {

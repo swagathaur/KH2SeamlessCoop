@@ -135,7 +135,125 @@ void searchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
     setReturnS32(ctx, 1);
     ctx->pc = getRegU32(ctx, 31);
 }
+// KH2.IMG's compression (port of OpenKh.Kh2/Img.Decompress, MIT; also
+// tools/kh2_compress.py): read from the end, a key byte, the size, then a
+// backwards LZ stream.
+std::vector<uint8_t> decompress(const std::vector<uint8_t> &src)
+{
+    std::vector<uint8_t> dst;
+    long i = long(src.size()) - 1;
+    uint8_t key = 0;
+    while (i > 0)
+    {
+        key = src[size_t(i--)];
+        if (key != 0)
+            break;
+    }
+    if (i < 4)
+        return dst;
+    const uint32_t size = src[size_t(i)] | (src[size_t(i - 1)] << 8) | (src[size_t(i - 2)] << 16) |
+                          (uint32_t(src[size_t(i - 3)]) << 24);
+    i -= 4;
+    if (size > 64u * 1024u * 1024u)
+        return dst;
+    dst.resize(size);
+    long o = long(size) - 1;
+    while (o >= 0 && i >= 0)
+    {
+        const uint8_t b = src[size_t(i--)];
+        if (b == key && i >= 0)
+        {
+            const uint8_t dist = src[size_t(i--)];
+            if (dist > 0 && i >= 0)
+            {
+                int n = src[size_t(i--)] + 3;
+                for (; n > 0 && o >= 0; --n, --o)
+                    dst[size_t(o)] = size_t(o) + dist < dst.size() ? dst[size_t(o) + dist] : 0;
+            }
+            else
+                dst[size_t(o--)] = b;
+        }
+        else
+            dst[size_t(o--)] = b;
+    }
+    return dst;
+}
+
+// The game's name hash (CRC-32, poly 0x04C11DB7, MSB first; kh2files::hash32).
+uint32_t nameHash(const std::string &name)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned char c : name)
+    {
+        crc ^= uint32_t(c) << 24;
+        for (int k = 0; k < 8; ++k)
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : crc << 1;
+    }
+    return ~crc;
+}
+
+// An index entry: +0 hash, +4 hash16, +6 block (sectors - 1 in bits 0-13,
+// compressed: bit 14), +8 sector in KH2.IMG, +C size.
+bool findEntry(const std::vector<uint8_t> &idx, uint32_t hash, uint16_t &block, uint32_t &sector, uint32_t &size)
+{
+    if (idx.size() < 4)
+        return false;
+    const uint32_t n = le32(idx.data());
+    for (uint32_t k = 0; k < n && 4 + (k + 1) * 16 <= idx.size(); ++k)
+    {
+        const uint8_t *e = idx.data() + 4 + k * 16;
+        if (le32(e) == hash)
+        {
+            block = uint16_t(e[6] | (e[7] << 8));
+            sector = le32(e + 8);
+            size = le32(e + 12);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool readEntry(std::ifstream &iso, uint32_t imgLsn, uint16_t block, uint32_t sector, uint32_t size,
+               std::vector<uint8_t> &out)
+{
+    if (block & 0x4000)
+    {
+        std::vector<uint8_t> raw;
+        if (!readSectors(iso, imgLsn + sector, ((block & 0x3FFFu) + 1u) * kSector, raw))
+            return false;
+        out = decompress(raw);
+    }
+    else if (!readSectors(iso, imgLsn + sector, size, out))
+        return false;
+    if (out.size() < size)
+        return false;
+    out.resize(size);
+    return true;
+}
 } // namespace
+
+bool readGameFile(const std::string &name, std::vector<uint8_t> &out, const std::string &subIndex)
+{
+    const auto idxFile = g_files.find("KH2.IDX"), img = g_files.find("KH2.IMG");
+    if (idxFile == g_files.end() || img == g_files.end())
+        return false;
+    std::ifstream iso(g_imagePath, std::ios::binary);
+    std::vector<uint8_t> idx;
+    if (!iso || !readSectors(iso, idxFile->second.lsn, idxFile->second.size, idx))
+        return false;
+    uint16_t block = 0;
+    uint32_t sector = 0, size = 0;
+    if (!subIndex.empty())
+    {
+        std::vector<uint8_t> sub;
+        if (findEntry(idx, nameHash(subIndex), block, sector, size) &&
+            readEntry(iso, img->second.lsn, block, sector, size, sub) &&
+            findEntry(sub, nameHash(name), block, sector, size))
+            return readEntry(iso, img->second.lsn, block, sector, size, out);
+    }
+    return findEntry(idx, nameHash(name), block, sector, size) &&
+           readEntry(iso, img->second.lsn, block, sector, size, out);
+}
 
 bool install(PS2Runtime &runtime, const std::string &isoPath)
 {

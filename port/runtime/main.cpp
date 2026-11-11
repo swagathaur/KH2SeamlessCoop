@@ -1203,6 +1203,12 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2gummi::testStartPreset(route, level, ex != 0, mainPreset, t0, t1);
             say(line);
         }
+        else if (cmd == "leave")
+        {
+            // Leave the co-op session (testing: a player dropping out).
+            kh2coop::leave();
+            say(line);
+        }
         else if (cmd == "teenytest")
         {
             // teenytest K [0|1]: Teeny Ship K flown by a test script.

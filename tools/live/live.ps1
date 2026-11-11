@@ -4,6 +4,7 @@
 # Env LIVE_EXTRA: more arguments for every game (space-separated).
 # Started without waiting: the job runner stays free. Saves: copies of game\mc0 (env LIVE_CLIENT_SAVE for the client's).
 param([string]$mode = 'solo', [int]$port = 27600)
+# trio: duo, and a third game (p3, ctl-p3 / live-p3) joined to the host
 Set-Location "$PSScriptRoot\..\.."
 $iso = (Get-ChildItem Src -Filter *.iso | Select-Object -First 1).FullName
 function Start-Live([string]$name, [string]$save, [string[]]$extra) {
@@ -25,4 +26,8 @@ else {
   Start-Live 'host' 'game\mc0' @("--host=$port", '--name=Host')
   Start-Sleep 3
   Start-Live 'client' $clientSave @("--join=127.0.0.1:$port", '--join-at=2700', '--name=Client')
+  if ($mode -eq 'trio') {
+    Start-Sleep 3
+    Start-Live 'p3' $clientSave @("--join=127.0.0.1:$port", '--join-at=2800', '--name=Third')
+  }
 }

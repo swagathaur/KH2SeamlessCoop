@@ -700,6 +700,16 @@ void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8
     g_localId = localId;
     g_others = others;
     std::sort(g_others.begin(), g_others.end());
+    // Host: a pilot who left gives their Teeny back to the formation.
+    if (g_hostMission)
+        for (int k = 0; k < 2; ++k)
+            if (g_pilotIds[k] != 0xFF && !std::binary_search(g_others.begin(), g_others.end(), g_pilotIds[k]))
+            {
+                std::printf("[gummi] Teeny %d's pilot left: it flies in formation again\n", k);
+                g_pilotIds[k] = 0xFF;
+                std::lock_guard<std::mutex> pl(g_pilotMutex);
+                g_pilots[k] = Pilot{};
+            }
     if (!active)
     {
     }

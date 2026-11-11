@@ -952,11 +952,18 @@ void stepRefresh(uint8_t *ram)
 // Gummi missions (gummi.h): the host's launch, with its ships, for everyone.
 void tickGummi(const uint8_t *ram, uint64_t guestFrame)
 {
+    static bool wasActive = false;
     if (!g_session || !g_session->active())
     {
+        // The session ended in a mission: it goes on here alone (our pad flies
+        // the main ship again, the Teenies fly in formation).
+        if (wasActive)
+            kh2gummi::endMission(const_cast<uint8_t *>(ram));
+        wasActive = false;
         kh2gummi::setSession(false, false, 0, {});
         return;
     }
+    wasActive = true;
     std::vector<uint8_t> others;
     for (const auto &[id, r] : g_remotes)
         others.push_back(id);
@@ -1049,11 +1056,12 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     wasGummi = gummi;
     if (gummi)
     {
-        if (!g_session)
-            return;
-        g_rdram = rdram;
-        g_session->update(now());
-        g_rdram = nullptr;
+        if (g_session)
+        {
+            g_rdram = rdram;
+            g_session->update(now());
+            g_rdram = nullptr;
+        }
         tickGummi(ram, guestFrame);
         return;
     }

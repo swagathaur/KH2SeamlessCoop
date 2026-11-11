@@ -196,6 +196,21 @@ and the mission state follow (mission.h).
   both; host game over (HP poked low) -> Continue restarts both; host pause
   -> World Map takes both to the World Map. A piloted Teeny's lock-on
   missiles go with the main ship's lock-on (the targets are the main ship's).
+- **Three players (tested):** P2 flew Teeny 1 and P3 Teeny 2, each from
+  their own pad; all three games showed both Teenies in the same places, the
+  same score (8430) and kills (35).
+- **A player leaving mid-mission (tested):** the host gives their Teeny back
+  to the formation; the one who left goes on alone (their pad flies the main
+  ship again, their Gummi save data is put back).
+- **Known limits:** a player who joins during a mission waits (on the World
+  Map, following the host) until it ends; the host's lock-on missiles show
+  only on the host's screen (their kills reach everyone); a client's local
+  hits only show (the host's copy of its shots decides).
+- Test scripts: `scratch/gstart.sh` (two games, the host launches route 0,
+  both past the tips), `scratch/gflow.sh` (pause, retry, World Map),
+  `scratch/gtrio.sh` (three games; `tools/live/live.ps1 trio`), and the
+  control commands `gummip`, `gummi`, `presets`, `garage`, `teenytest`,
+  `leave`.
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

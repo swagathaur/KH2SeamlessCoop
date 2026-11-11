@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "guest_call.h"
+
 class PS2Runtime;
 
 namespace kh2gummi
@@ -76,6 +78,10 @@ void onPilotState(uint8_t player, const std::vector<uint8_t> &data);
 bool takeFlow(std::vector<uint8_t> &out);
 // A launch just made or followed: who flies Teeny 0 and 1 (0xFF: nobody), once.
 bool takeNotice(uint8_t pilots[2]);
+// A guest call made from whatever mode the game is in (the hook of every
+// task's yield runs it: also under a menu, where the field's hook does not
+// run).
+void runInAnyMode(kh2guest::Call call);
 void onHostFlow(const std::vector<uint8_t> &data);
 void clientTick(uint8_t *rdram);
 void hostTick(const uint8_t *rdram);

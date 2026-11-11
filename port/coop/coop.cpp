@@ -72,6 +72,14 @@ struct LeadJump
 bool g_haveIntent = false;
 kh2roomsync::Location g_intent;
 double g_intentAt = 0;
+double g_menuClosedAt = -1e9;
+constexpr uint32_t kMenuRunning = 0x0032BA28, kMenuSetExit = 0x00287DA0;
+uint32_t rd32(const uint8_t *ram, uint32_t a)
+{
+    uint32_t v;
+    std::memcpy(&v, ram + a, 4);
+    return v;
+}
 int g_rejoins = 0;            // automatic joins after losing the host
 int g_lastMapState = -1;      // the port mapping's state as last logged
 double g_lastRejoin = -100.0;
@@ -1324,6 +1332,17 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             g_haveIntent = false; // (stale: the fallback below follows where the host is)
         else if (me.now.world == g_intent.world && me.now.room == g_intent.room && !jumping)
             g_haveIntent = false;
+        else if (rd32(rdram, kMenuRunning) != 0 && !kh2gummi::inGummi(rdram))
+        {
+            // Under the pause menu (MENU::isRunning, 0x0032BA28): it is closed
+            // the menu's own way (Tz::MenuBase::SetExit), then we go.
+            if (now() - g_menuClosedAt > 1.0)
+            {
+                g_menuClosedAt = now();
+                addLog("closing the menu: the host is moving on");
+                kh2gummi::runInAnyMode(kh2guest::Call{kMenuSetExit, {}, {}});
+            }
+        }
         else if (me.player.valid && !jumping && me.now.world != 0 && me.now.world != 0xFF)
         {
             g_haveIntent = false;

@@ -532,10 +532,12 @@ void battleInitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // Client: the host's mission, started here from any mode (the hook of every
 // task's yield runs the job while one is waiting).
 std::atomic<bool> g_startWaiting{false};
+std::atomic<int> g_anyModeWaiting{0}; // jobs posted with runInAnyMode, not yet done
 std::atomic<bool> g_flowWaiting{false}; // client: the host's retry or quit to make here
 void taskYieldHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (ctx->pc == kTaskYield && (g_startWaiting.load(std::memory_order_relaxed) || g_flowWaiting.load(std::memory_order_relaxed)))
+    if (ctx->pc == kTaskYield && (g_startWaiting.load(std::memory_order_relaxed) || g_flowWaiting.load(std::memory_order_relaxed) ||
+                                  g_anyModeWaiting.load(std::memory_order_relaxed) > 0))
         kh2guest::runPending(rdram, ctx, runtime, kTaskYield, kh2guest::kGummi); // may not return
     kh2::callOriginal(g_taskYield, rdram, ctx, runtime);
 }
@@ -1250,6 +1252,19 @@ void onPilotState(uint8_t player, const std::vector<uint8_t> &d)
         std::memcpy(&dmg, d.data() + 20 + i * 8, 4);
         g_hitsIn.emplace_back(id, dmg); // (applied in the next frame's hook)
     }
+}
+
+void runInAnyMode(kh2guest::Call call)
+{
+    ++g_anyModeWaiting;
+    kh2guest::post(
+        [call](const kh2guest::Env &, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+            if (first)
+                return call;
+            --g_anyModeWaiting;
+            return std::nullopt;
+        },
+        kh2guest::kGummi);
 }
 
 bool takeNotice(uint8_t pilots[2])

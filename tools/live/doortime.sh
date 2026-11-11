@@ -26,10 +26,12 @@ warm)
   tools/live/ctl.sh host --timeout 60 "warp 8 1" "wait 1500" >/dev/null; echo warm
   ;;
 round)
-  r=$(( $2 % 2 == 1 ? 2 : 1 ))
+  # (DOOR_ROOMS="WORLD ODD EVEN", decimal: the rooms the host goes between; default 8 2 1, Land of Dragons)
+  read dw dodd deven <<< "${DOOR_ROOMS:-8 2 1}"
+  r=$(( $2 % 2 == 1 ? dodd : deven ))
   ho=$(wc -l < logs/live-host.log); co=$(wc -l < logs/live-client.log)
-  tools/live/ctl.sh host --timeout 60 "warp 8 $r" "wait ${3:-1200}" >/dev/null
-  echo "round $2 to 08-0$r: $(python3 tools/live/doortime.py $ho $co | tr '\n' ' ')"
+  tools/live/ctl.sh host --timeout 60 "warp $dw $r" "wait ${3:-1200}" >/dev/null
+  echo "round $2 to $dw-$r: $(python3 tools/live/doortime.py $ho $co | tr '\n' ' ')"
   grep -a "null-call\|job dropped" logs/live-host.log logs/live-client.log | tail -2
   ;;
 esac

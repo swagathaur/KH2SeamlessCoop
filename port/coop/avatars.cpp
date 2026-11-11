@@ -534,8 +534,9 @@ void objFaceHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // place holder (objFaceHook answers with the avatar's).
 constexpr uint32_t kFriendGaugeSet = 0x00155300;
 PS2Runtime::RecompiledFunction g_friendGaugeSet = nullptr;
-constexpr uint32_t kMaxGauges = 4;
+constexpr uint32_t kMaxGauges = 8;
 std::atomic<uint32_t> g_friendGauges[kMaxGauges] = {};
+std::atomic<uint32_t> g_friendGaugeNext{0};
 void friendGaugeSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t gauge = getRegU32(ctx, 4);
@@ -544,13 +545,17 @@ void friendGaugeSetHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         bool known = false;
         for (auto &g : g_friendGauges)
             known = known || g.load() == gauge;
+        // (The newest in place of the oldest: the HUD is made anew in some
+        // worlds (Halloween Town's, Atlantica's, the Pride Lands' have their
+        // own), and with the first four kept for good a new world's gauges
+        // were never told of the avatar: they kept the place holder's face.)
         if (!known)
-            for (auto &g : g_friendGauges)
-            {
-                uint32_t empty = 0;
-                if (g.compare_exchange_strong(empty, gauge))
-                    break;
-            }
+        {
+            const uint32_t i = g_friendGaugeNext.fetch_add(1) % kMaxGauges;
+            g_friendGauges[i].store(gauge);
+            std::printf("[avatars] friend gauge %08X\n", gauge);
+            std::fflush(stdout);
+        }
     }
     kh2::callOriginal(g_friendGaugeSet, rdram, ctx, runtime);
 }

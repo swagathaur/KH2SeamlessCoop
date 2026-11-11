@@ -67,6 +67,21 @@ avatar (ALL_VISIBLE), 5 rounds each:
   test before the fix; none in 11 after (the new path was taken once, and
   the enemy was made from the batch).
 
+## Tried and left off
+
+- **Keeping a worn form look through the room change**
+  (`KH2_FORMCACHE_KEEP=1`). A player in a drive form is seen in the next
+  room about 0.65-0.75 s after we have control: the room change lets go of
+  the look's files (kh2formcache's batch, 9 files, 245 KB for Valor) and
+  they are read from the disc again (the reads take that long whatever the
+  flush cadence). Kept out of the room's CACHE_BUFF::Clear(0), the avatar
+  came 0.07 s after control, but our own load took 0.4-1.1 s longer: with
+  our files placed, the room's settling pass runs with the cache top moved,
+  the game's old copy of our player's Keyblade (W_EX010, which the form
+  look also has) was gone, and the game read it from the disc again
+  (`KH2_FORMCACHE_TRACE=1` shows the passes and that read). Our own control
+  matters more than the avatar's look, so it stays off.
+
 ## Known limits
 
 - **A client in a drive form sees no avatar of a player in their base look

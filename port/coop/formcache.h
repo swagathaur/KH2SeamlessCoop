@@ -41,6 +41,9 @@ void hideForDrive(uint8_t *rdram);
 
 // Each frame (game thread): batches no one wants or uses any more go.
 void tick(uint8_t *rdram);
+// Around a room change's CACHE_BUFF::Clear(0) (game thread): the looks
+// avatars still wear are left out of it (before), then put back (after).
+void keepThroughClear(uint8_t *rdram, bool before);
 // A cache group of ours (an avatar's or a remote summon's look)?
 bool ourGroup(int32_t group);
 // The session is over: all batches go.

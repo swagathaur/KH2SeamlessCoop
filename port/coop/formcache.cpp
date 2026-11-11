@@ -16,6 +16,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "puppets.h"
+#include "roomsync.h"
 
 namespace kh2formcache
 {
@@ -98,6 +99,9 @@ struct Block
 };
 std::mutex g_mutex;
 std::map<int32_t, Batch> g_batches; // by first group (under g_mutex)
+// Looks left out of a room change's clear, while it runs (keepThroughClear).
+std::vector<std::pair<uint32_t, int32_t>> g_keptOut; // header, its group (under g_mutex)
+int64_t g_keptAt = 0;
 std::map<uint32_t, Block> g_placed; // header -> its place in our room (under g_mutex)
 // Ours let go (old files now): their place stays taken until the game has
 // moved them out of it (to where it lays old files) or freed them.
@@ -259,13 +263,31 @@ void placeOurs(uint8_t *rdram)
 }
 
 Run g_layoutRun, g_settleRun;
+bool trace()
+{
+    static const bool on = [] {
+        const char *e = std::getenv("KH2_FORMCACHE_TRACE");
+        return e && *e == '1';
+    }();
+    return on;
+}
+void traceLine(const char *what)
+{
+    if (!trace())
+        return;
+    std::printf("[formcache] %s ms=%lld (placed %zu)\n", what, static_cast<long long>(kh2roomsync::wallMs()), g_placed.size());
+    std::fflush(stdout);
+}
 void layoutHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (ctx->pc == kLayout)
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_layoutRun.active)
+        {
             g_layoutRun = Run{true, getRegU32(ctx, 31), getRegU32(ctx, 29)};
+            traceLine("layout starts");
+        }
         unlinkOurs(rdram);
     }
     kh2::callOriginal(g_layout, rdram, ctx, runtime);
@@ -275,6 +297,7 @@ void layoutHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_layoutRun.active = false;
         relinkOurs(rdram);
         placeOurs(rdram);
+        traceLine("layout ends");
     }
 }
 
@@ -300,6 +323,7 @@ void settleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 if (rd<uint32_t>(rdram, h + kHNow) == b.addr)
                     wr<uint32_t>(rdram, h + kHFlags, rd<uint32_t>(rdram, h + kHFlags) | 2u);
             g_settleRun = Run{true, getRegU32(ctx, 31), getRegU32(ctx, 29)};
+            traceLine("settle starts (top moved)");
             g_savedTop = rd<uint32_t>(rdram, kLaidTop);
             eachHeader(rdram, [&](uint32_t h) {
                 const int32_t g = rd<int32_t>(rdram, h + kHGroup);
@@ -316,6 +340,7 @@ void settleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (g_settleRun.active && finished(ctx, g_settleRun))
     {
         g_settleRun.active = false;
+        traceLine("settle ends");
         if (rd<uint32_t>(rdram, kLaidTop) == kOursEnd)
             wr<uint32_t>(rdram, kLaidTop, g_savedTop);
     }
@@ -348,6 +373,16 @@ void requestHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             {
                 rdram[h + kHName] ^= 0x80;
                 g_hidden.push_back(h);
+                if (!forUs && trace())
+                {
+                    static int logged = 0;
+                    if (logged++ < 200)
+                    {
+                        std::printf("[formcache] the game reads %s (group %d) itself: ours (group %d) out of its sight\n",
+                                    want, group, g);
+                        std::fflush(stdout);
+                    }
+                }
             }
         });
         g_requestRun = Run{true, getRegU32(ctx, 31), getRegU32(ctx, 29)};
@@ -356,6 +391,15 @@ void requestHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (g_requestRun.active && finished(ctx, g_requestRun))
     {
         g_requestRun.active = false;
+        if (trace() && !g_hidden.empty())
+        {
+            const uint32_t got = getRegU32(ctx, 2);
+            std::printf("[formcache] that request gave %08X (state %u, group %d, refs %u) ms=%lld\n", got,
+                        inRam(got) ? rdram[got + kHState] : 0u, inRam(got) ? rd<int32_t>(rdram, got + kHGroup) : 0,
+                        inRam(got) ? unsigned(rd<uint16_t>(rdram, got + kHRefs)) : 0u,
+                        static_cast<long long>(kh2roomsync::wallMs()));
+            std::fflush(stdout);
+        }
         for (uint32_t h : g_hidden)
             rdram[h + kHName] ^= 0x80;
         g_hidden.clear();
@@ -403,8 +447,8 @@ Look want(uint8_t *rdram, uint16_t entry)
     if (!g_layout || !g_settle || !g_request)
         return Look::NoRoom;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_layoutRun.active || !g_hiddenForDrive.empty())
-        return Look::Loading; // (a layout paused part way, or our drive: ours are out of sight)
+    if (g_layoutRun.active || !g_hiddenForDrive.empty() || !g_keptOut.empty())
+        return Look::Loading; // (a layout paused part way, our drive: ours are out of sight; a room's clear)
     const int64_t now = nowMs();
     for (auto &[base, b] : g_batches)
     {
@@ -487,9 +531,89 @@ Look want(uint8_t *rdram, uint16_t entry)
 
 bool ourGroup(int32_t group) { return isPool(group); }
 
+// A room change (CACHE_BUFF::Clear(0): every group from 0 up made old) lets
+// go of the looks avatars were wearing, and each is read again in the next
+// room (about 650 ms for a drive form: the avatar comes that much after its
+// player). KH2_FORMCACHE_KEEP=1 (an experiment, off): those still worn are
+// left out of that clear (for the call their groups are -100 and down, which
+// neither Clear(0) nor the room's Clear(-200) touches), then theirs again.
+// The avatar then came at once, but our own load took 0.4-1.1 s longer:
+// with ours placed the room's settling pass runs with the top moved, the
+// game's old copy of our player's Keyblade (W_EX010, which the form look
+// has too) was gone, and it was read from the disc again
+// (KH2_FORMCACHE_TRACE=1 shows it). Not worth it as it is.
+
+void keepThroughClear(uint8_t *rdram, bool before)
+{
+    static const bool keep = [] {
+        const char *e = std::getenv("KH2_FORMCACHE_KEEP");
+        return e && *e == '1';
+    }();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!before)
+    {
+        int back = 0;
+        for (const auto &[h, g] : g_keptOut)
+            if (rd<int32_t>(rdram, h + kHGroup) == -100 - (g - kPoolFirst))
+            {
+                wr<int32_t>(rdram, h + kHGroup, g);
+                ++back;
+            }
+        if (!g_keptOut.empty())
+        {
+            std::printf("[formcache] %d of %zu kept file(s) put back after the clear ms=%lld\n", back, g_keptOut.size(),
+                        static_cast<long long>(kh2roomsync::wallMs()));
+            std::fflush(stdout);
+        }
+        g_keptOut.clear();
+        return;
+    }
+    if (!keep || !g_keptOut.empty())
+        return;
+    const int64_t now = nowMs();
+    int kept = 0;
+    for (auto &[base, b] : g_batches)
+    {
+        if (!b.ready || b.failed || now - b.wantedMs > 3000)
+            continue;
+        ++kept;
+        eachHeader(rdram, [&](uint32_t h) {
+            const int32_t g = rd<int32_t>(rdram, h + kHGroup);
+            if (isPool(g) && batchOf(g) == base)
+            {
+                g_keptOut.emplace_back(h, g);
+                wr<int32_t>(rdram, h + kHGroup, -100 - (g - kPoolFirst));
+            }
+        });
+    }
+    g_keptAt = now;
+    if (kept)
+    {
+        std::printf("[formcache] %d look(s) still worn kept through the room change (%zu file(s)) ms=%lld\n", kept,
+                    g_keptOut.size(), static_cast<long long>(kh2roomsync::wallMs()));
+        std::fflush(stdout);
+    }
+}
+
 void tick(uint8_t *rdram)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
+    // (Groups left out of a room's clear and not put back: the clear's end
+    // was not seen. Put back now, before any layout.)
+    // (The clear runs on the game's loading thread: this may come while it
+    // is under way, when those files are in no batch's groups. Nothing is
+    // let go meanwhile.)
+    if (!g_keptOut.empty())
+    {
+        if (nowMs() - g_keptAt < 2000)
+            return;
+        for (const auto &[h, g] : g_keptOut)
+            if (rd<int32_t>(rdram, h + kHGroup) == -100 - (g - kPoolFirst))
+                wr<int32_t>(rdram, h + kHGroup, g);
+        g_keptOut.clear();
+        std::printf("[formcache] kept groups put back late\n");
+        std::fflush(stdout);
+    }
     if (!g_hiddenForDrive.empty())
     {
         const int64_t t = nowMs();
@@ -538,6 +662,8 @@ void tick(uint8_t *rdram)
         // (a form's effects linger after its object): old files.
         if (heads.empty() && now - b.askedMs > 5000)
         {
+            std::printf("[formcache] look %04X (batch %d): its files are gone\n", b.entry, base);
+            std::fflush(stdout);
             it = g_batches.erase(it);
             continue;
         }

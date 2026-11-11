@@ -610,7 +610,20 @@ void cacheClearHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     if (ctx->pc == kCacheClear && ra >= 0x001B65E0u && ra < 0x001B6CA8u)
         g_ourDriveClearAt = nowMs();
+    // (A room change's Clear(0): the looks avatars wear stay, kh2formcache.)
+    static uint32_t keptRa = 0, keptSp = 0;
+    if (ctx->pc == kCacheClear && getRegU32(ctx, 4) == 0)
+    {
+        kh2formcache::keepThroughClear(rdram, true);
+        keptRa = ra;
+        keptSp = getRegU32(ctx, 29);
+    }
     kh2::callOriginal(g_cacheClear, rdram, ctx, runtime);
+    if (keptRa && ctx->pc == keptRa && getRegU32(ctx, 29) == keptSp)
+    {
+        keptRa = 0;
+        kh2formcache::keepThroughClear(rdram, false);
+    }
 }
 
 

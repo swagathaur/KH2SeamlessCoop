@@ -96,6 +96,23 @@ avatar (ALL_VISIBLE), 5 rounds each:
   (`KH2_FORMCACHE_TRACE=1` shows the passes and that read). Our own control
   matters more than the avatar's look, so it stays off.
 
+## Worlds with their own looks
+
+Halloween Town, Atlantica and the Pride Lands give Sora (and so the
+avatars) a look of their own: the avatar is the world's Sora (02B5
+Halloween, 03BE merman, 028A lion), and the drive forms' Halloween looks
+(03E6 Valor, 03E7 Wisdom) come through kh2formcache as the others do.
+Tested with two and three players: room changes in each world, a tour
+between them, Valor and Wisdom in Halloween Town on two players at once.
+The party gauge shows the other player's face (fixed: these worlds make
+HUDs of their own, and the gauges of a new HUD were not told of the
+avatar). With a form look to read, a Halloween Town room change takes
+about 4.3 s until all three see all (the room's own load is about 2 s).
+
+The test save has not reached these worlds and has no party there:
+`tools/live/worlds.sh party` gives both games Donald and Goofy in them
+first (without a party there is no party gauge for the avatar either).
+
 ## Known limits
 
 - (Fixed since: a player in a drive form now sees the others in their base

@@ -18,10 +18,11 @@ warm)
   tools/live/ctl.sh host --timeout 60 "warp 8 1" "wait 1500" >/dev/null; echo warm
   ;;
 round)
-  r=$(( $2 % 2 == 1 ? 2 : 1 ))
+  read dw dodd deven <<< "${DOOR_ROOMS:-8 2 1}" # (as doortime.sh)
+  r=$(( $2 % 2 == 1 ? dodd : deven ))
   ho=$(wc -l < logs/live-host.log); co=$(wc -l < logs/live-client.log); po=$(wc -l < logs/live-p3.log)
-  tools/live/ctl.sh host --timeout 60 "warp 8 $r" "wait ${3:-1000}" >/dev/null
-  echo "round $2 to 08-0$r: $(python3 tools/live/doortrio.py $ho $co $po)"
+  tools/live/ctl.sh host --timeout 60 "warp $dw $r" "wait ${3:-1000}" >/dev/null
+  echo "round $2 to $dw-$r: $(python3 tools/live/doortrio.py $ho $co $po)"
   grep -a "null-call\|job dropped" logs/live-host.log logs/live-client.log logs/live-p3.log | tail -2
   ;;
 esac

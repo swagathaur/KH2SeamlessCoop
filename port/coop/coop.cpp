@@ -18,6 +18,7 @@
 #include "hits.h"
 #include "mission.h"
 #include "spells.h"
+#include "gummi.h"
 #include "roomlock.h"
 #include "avatars.h"
 #include "summons.h"
@@ -540,6 +541,16 @@ void makeSession()
             kh2pgs::toast(who + " asks to skip the cutscene (hold B to skip)");
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiSortie) && !g_session->isHost())
+        {
+            kh2gummi::onHostSortie(data);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny) && g_session->isHost())
+        {
+            kh2gummi::onPlayerTeeny(origin, data);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::SpellsKnown) && data.size() == 6)
         {
             g_spellsKnown[origin] = data;
@@ -928,6 +939,31 @@ void stepRefresh(uint8_t *ram)
     r.jumping = false;
 }
 
+// Gummi missions (gummi.h): the host's launch, with its ships, for everyone;
+// the clients' Teeny Ship blueprints for the host.
+void tickGummi(const uint8_t *ram, uint64_t guestFrame)
+{
+    if (!g_session || !g_session->active())
+    {
+        kh2gummi::setSession(false, false, 0, {});
+        return;
+    }
+    std::vector<uint8_t> others;
+    for (const auto &[id, r] : g_remotes)
+        others.push_back(id);
+    kh2gummi::setSession(true, g_session->isHost(), g_session->localId(), others);
+    std::vector<uint8_t> blob;
+    std::vector<std::vector<uint8_t>> pieces;
+    if (g_session->isHost())
+    {
+        if (kh2gummi::takeSortie(pieces))
+            for (const auto &p : pieces)
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiSortie), p);
+    }
+    else if ((guestFrame % 300 == 150 || g_resendLoadout) && kh2gummi::ourTeeny(ram, blob))
+        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny), blob);
+}
+
 void tick(const uint8_t *rdram, uint64_t guestFrame)
 {
     // --join-at: join now (as a player would once their game is running).
@@ -962,6 +998,20 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     std::lock_guard<std::mutex> lock(g_mutex);
     uint8_t *ram = const_cast<uint8_t *>(rdram);
+    // In a Gummi mode (the menu or a mission) the field's co-op stands down:
+    // nobody walks, there is no party or room, and a room jump (a follow, a
+    // party refresh) in the middle of one breaks it. Only the session and the
+    // Gummi missions' own sharing run.
+    if (kh2gummi::inGummi(ram))
+    {
+        if (!g_session)
+            return;
+        g_rdram = rdram;
+        g_session->update(now());
+        g_rdram = nullptr;
+        tickGummi(ram, guestFrame);
+        return;
+    }
     kh2enemies::thawAfterSession(ram);
     if (g_partnersReset)
     {
@@ -976,6 +1026,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     stepRefresh(ram);
     if (!g_session)
     {
+        kh2gummi::setSession(false, false, 0, {});
         kh2downed::reset(ram);
         endStory(ram);
         kh2puppets::update(rdram, {});
@@ -1007,6 +1058,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     }
     if (!g_session->active())
     {
+        kh2gummi::setSession(false, false, 0, {});
         kh2downed::reset(ram);
         endStory(ram);
         kh2hits::setCapture(false);
@@ -1023,6 +1075,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         kh2scale::tick(ram, false, false, 1);
         return;
     }
+    tickGummi(ram, guestFrame);
     // Enemy HP and damage scaling (scaling.h): the host's settings, sent
     // every two seconds (also to whoever just joined).
     kh2scale::tick(ram, true, g_session->isHost(), int(g_remotes.size()) + 1);

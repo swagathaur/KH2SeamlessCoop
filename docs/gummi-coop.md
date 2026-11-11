@@ -152,6 +152,17 @@ and the mission state follow (mission.h).
   (`kh2ovl::kOverlays[..].region()`), patched once at start-up; the main
   ship's update (FUN_01F219A8) is also the frame hook that runs guest jobs
   during a mission. Piloted Teenies have no lock-on missiles yet.
+- **Phase 4 works (tested, two games):** when the host's Gummi battle mode
+  starts (D_00103F68), the host gives its Teeny Ships to the others (the
+  first client Teeny 0, the second Teeny 1; their own blueprint from
+  GummiTeeny, else a preset) and sends the mission and the three blueprints
+  (GummiSortie, in pieces of 900 bytes). A client starts it itself from
+  whatever mode it is in (the job runs from every task's yield, 0x00102448).
+  Both games then fly the same main ship and Teeny.
+- In a Gummi mode (the menu's or the battle's GAME_MODE state +0x1C is 1)
+  the field's co-op stands down. Guest jobs now wait in two queues
+  (`kh2guest::kField`, `kGummi`): an avatar queued in the field and run inside
+  a mission called the field's allocator (AREA::Alloc) with the field gone.
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

@@ -44,12 +44,17 @@ struct Call
 // returns the next call, or nothing when finished.
 using Step = std::function<std::optional<Call>(const Env &env, uint32_t lastResult, bool first)>;
 
+// Jobs wait in one of two queues, run by different hooks: the field's (the
+// player's matrix, puppets.cpp) and the Gummi modes' (gummi.cpp), so that a
+// field job queued before a Gummi mission (an avatar to make, say) does not
+// run in it with the field gone, and the other way round.
+constexpr int kField = 0, kGummi = 1, kChannels = 2;
 // Queue a job (any thread).
-void post(Step job);
+void post(Step job, int channel = kField);
 // A job that makes one call and hands its result to `done` (may be empty).
-void postCall(Call call, std::function<void(const Env &, uint32_t)> done = {});
+void postCall(Call call, std::function<void(const Env &, uint32_t)> done = {}, int channel = kField);
 
 // Called from the frame hook on the EE thread, with the hook's own address:
 // if a call is due it does not return (the hook runs again afterwards).
-void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t hookAddress);
+void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t hookAddress, int channel = kField);
 } // namespace kh2guest

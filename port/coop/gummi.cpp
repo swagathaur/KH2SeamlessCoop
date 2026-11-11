@@ -1,6 +1,8 @@
 #include "gummi.h"
 
+#include <algorithm>
 #include <atomic>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -230,7 +232,7 @@ void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (ctx->pc == kShipUpdate)
     {
-        kh2guest::runPending(rdram, ctx, runtime, kShipUpdate); // may not return
+        kh2guest::runPending(rdram, ctx, runtime, kShipUpdate, kh2guest::kGummi); // may not return
         const uint32_t ship = getRegU32(ctx, 4);
         static uint64_t frame = 0;
         ++frame;
@@ -250,7 +252,7 @@ void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             if (teeny && (press || (p.in.fire && p.cooldown == 0)))
             {
                 p.cooldown = 8;
-                kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}});
+                kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}}, {}, kh2guest::kGummi);
             }
         }
     }
@@ -333,10 +335,253 @@ void teenyMissileHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     kh2::callOriginal(g_teenyMissile, rdram, ctx, runtime);
 }
+// --- Co-op launch -------------------------------------------------------------
+constexpr uint32_t kBattleInit = 0x00103F68; // the Gummi battle mode's start (loads the overlay)
+constexpr uint32_t kTaskYield = 0x00102448;  // every task's yield: a frame hook in any mode
+constexpr size_t kSortieHeader = 10, kSortieSize = kSortieHeader + 0x800 + 2 * kTeenyBufSize;
+PS2Runtime::RecompiledFunction g_battleInit = nullptr, g_taskYield = nullptr;
+
+std::mutex g_netMutex;
+bool g_inSession = false, g_isHost = false;
+uint8_t g_localId = 0;
+std::vector<uint8_t> g_others;                  // the other players' ids, in order
+std::map<uint8_t, std::vector<uint8_t>> g_teenies; // host: each player's Teeny blueprint
+std::vector<uint8_t> g_outSortie;               // host: to send
+std::vector<uint8_t> g_inSortie;                // client: to start
+std::atomic<bool> g_starting{false};            // client: our own start of the host's mission
+std::vector<uint8_t> g_sentTeeny;
+bool g_sentTeenyOnce = false;
+
+// A preset's Teeny blueprint for players who brought none (the first preset
+// with two Teeny Ships).
+std::vector<uint8_t> presetTeeny(int k)
+{
+    if (!planInfo())
+        return {};
+    const uint8_t *list = g_plans.data(1);
+    const uint32_t n = get<uint32_t>(list);
+    for (uint32_t p = 0; p < n; ++p)
+        if (presetPlan(int(p), 1) >= 0 && presetPlan(int(p), 2) >= 0)
+            return planById(presetPlan(int(p), 1 + k));
+    return {};
+}
+
+// Host, at its launch: the Teeny Ships to the other players, and the mission
+// for them.
+void hostLaunch(uint8_t *ram)
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    uint8_t pilots[2] = {0xFF, 0xFF};
+    for (int k = 0; k < 2 && k < int(g_others.size()); ++k)
+    {
+        pilots[k] = g_others[size_t(k)];
+        std::vector<uint8_t> plan;
+        const auto it = g_teenies.find(pilots[k]);
+        if (it != g_teenies.end() && !it->second.empty())
+            plan = it->second;
+        else if (!ram[kFlags + 1 + k])
+            plan = presetTeeny(k);
+        if (!plan.empty() && plan.size() <= kTeenyBufSize)
+        {
+            std::memset(ram + kTeenyBuf + k * kTeenyBufSize, 0, kTeenyBufSize);
+            std::memcpy(ram + kTeenyBuf + k * kTeenyBufSize, plan.data(), plan.size());
+            ram[kFlags + 1 + k] = usable(ram, kTeenyBuf + k * kTeenyBufSize) ? 1 : 0;
+        }
+        std::printf("[gummi] Teeny %d: player %u (%s)\n", k, pilots[k],
+                    it != g_teenies.end() && !it->second.empty() ? "their blueprint"
+                    : plan.empty()                                ? "the host's"
+                                                                  : "a preset");
+    }
+    std::vector<uint8_t> b(kSortieSize, 0);
+    b[0] = 1;
+    b[1] = uint8_t(rd<uint32_t>(ram, kRoute));
+    b[2] = uint8_t(rd<uint32_t>(ram, kLevel));
+    b[3] = uint8_t(rd<uint32_t>(ram, kVariant));
+    b[4] = ram[kEx];
+    for (int k = 0; k < 3; ++k)
+        b[5 + k] = ram[kFlags + k];
+    b[8] = pilots[0];
+    b[9] = pilots[1];
+    std::memcpy(b.data() + kSortieHeader, ram + kMainBuf, 0x800);
+    std::memcpy(b.data() + kSortieHeader + 0x800, ram + kTeenyBuf, 2 * kTeenyBufSize);
+    g_outSortie = std::move(b);
+    std::printf("[gummi] launch: route %u level %u%s, ships %u %u %u, to %zu player(s)\n", unsigned(g_outSortie[1]),
+                unsigned(g_outSortie[2]), g_outSortie[4] ? " EX" : "", g_outSortie[5], g_outSortie[6], g_outSortie[7],
+                g_others.size());
+    std::fflush(stdout);
+}
+
+void battleInitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kBattleInit)
+    {
+        bool host = false;
+        {
+            std::lock_guard<std::mutex> lock(g_netMutex);
+            host = g_inSession && g_isHost;
+        }
+        if (host)
+            hostLaunch(rdram);
+        else if (g_starting.exchange(false))
+            std::printf("[gummi] starting the host's mission\n");
+    }
+    kh2::callOriginal(g_battleInit, rdram, ctx, runtime);
+}
+
+// Client: the host's mission, started here from any mode (the hook of every
+// task's yield runs the job while one is waiting).
+std::atomic<bool> g_startWaiting{false};
+void taskYieldHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kTaskYield && g_startWaiting.load(std::memory_order_relaxed))
+        kh2guest::runPending(rdram, ctx, runtime, kTaskYield, kh2guest::kGummi); // may not return
+    kh2::callOriginal(g_taskYield, rdram, ctx, runtime);
+}
+
+void startHostMission()
+{
+    g_startWaiting = true;
+    kh2guest::post([](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+        {
+            g_startWaiting = false;
+            return std::nullopt;
+        }
+        std::vector<uint8_t> b;
+        {
+            std::lock_guard<std::mutex> lock(g_netMutex);
+            b.swap(g_inSortie);
+        }
+        uint8_t *ram = env.rdram;
+        if (b.size() != kSortieSize || std::strcmp(kh2ovl::activeName(), "gumibattle") == 0)
+        {
+            g_startWaiting = false;
+            return std::nullopt;
+        }
+        std::memcpy(ram + kMainBuf, b.data() + kSortieHeader, 0x800);
+        std::memcpy(ram + kTeenyBuf, b.data() + kSortieHeader + 0x800, 2 * kTeenyBufSize);
+        for (int k = 0; k < 3; ++k)
+            ram[kFlags + k] = b[5 + k];
+        const uint32_t level = b[2], variant = b[3];
+        g_starting = true;
+        auto call = launch(ram, b[1], int(level), b[4] != 0);
+        std::memcpy(ram + kVariant, &variant, 4); // (the host's, after launch's own)
+        if (!call)
+        {
+            g_starting = false;
+            g_startWaiting = false;
+        }
+        return call;
+    }, kh2guest::kGummi);
+}
 } // namespace
 
-bool install(PS2Runtime &)
+bool inGummi(const uint8_t *ram)
 {
+    constexpr uint32_t kMenuMode = 0x0032BA90, kModeState = 0x1C;
+    return rd<uint32_t>(ram, kBattleMode + kModeState) == 1 || rd<uint32_t>(ram, kMenuMode + kModeState) == 1;
+}
+
+void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8_t> &others)
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    g_inSession = active;
+    g_isHost = host;
+    g_localId = localId;
+    g_others = others;
+    std::sort(g_others.begin(), g_others.end());
+    if (!active)
+    {
+        g_teenies.clear();
+        g_sentTeenyOnce = false;
+    }
+}
+
+constexpr size_t kPiece = 900;
+bool takeSortie(std::vector<std::vector<uint8_t>> &out)
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    if (g_outSortie.empty())
+        return false;
+    static uint8_t launches = 0;
+    ++launches;
+    const size_t pieces = (g_outSortie.size() + kPiece - 1) / kPiece;
+    out.clear();
+    for (size_t i = 0; i < pieces; ++i)
+    {
+        std::vector<uint8_t> p = {launches, uint8_t(i), uint8_t(pieces)};
+        const size_t from = i * kPiece, n = std::min(kPiece, g_outSortie.size() - from);
+        p.insert(p.end(), g_outSortie.begin() + long(from), g_outSortie.begin() + long(from + n));
+        out.push_back(std::move(p));
+    }
+    g_outSortie.clear();
+    return true;
+}
+
+void onPlayerTeeny(uint8_t player, const std::vector<uint8_t> &plan)
+{
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    g_teenies[player] = plan.size() <= kTeenyBufSize ? plan : std::vector<uint8_t>{};
+}
+
+bool ourTeeny(const uint8_t *ram, std::vector<uint8_t> &out)
+{
+    out.clear();
+    for (int i = 0; i < kSlots; ++i)
+    {
+        const uint32_t p = kTeenyPlans + uint32_t(i) * kTeenyPlanSize;
+        if (usable(ram, p))
+        {
+            out.assign(ram + p, ram + p + kTeenyPlanSize);
+            break;
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_netMutex);
+    if (g_sentTeenyOnce && out == g_sentTeeny)
+        return false;
+    g_sentTeeny = out;
+    g_sentTeenyOnce = true;
+    return true;
+}
+
+void onHostSortie(const std::vector<uint8_t> &piece)
+{
+    static uint8_t launch = 0, got = 0;
+    static std::vector<uint8_t> data;
+    if (piece.size() < 4 || piece[2] == 0 || piece[1] >= piece[2])
+        return;
+    if (piece[0] != launch || piece[1] == 0)
+    {
+        launch = piece[0];
+        got = 0;
+        data.assign(size_t(piece[2]) * kPiece, 0);
+    }
+    if (piece[1] != got)
+        return; // (in order: the channel is reliable and ordered)
+    std::memcpy(data.data() + size_t(piece[1]) * kPiece, piece.data() + 3, std::min(piece.size() - 3, kPiece));
+    if (++got < piece[2])
+        return;
+    data.resize(kSortieSize);
+    if (data[0] != 1)
+        return;
+    {
+        std::lock_guard<std::mutex> lock(g_netMutex);
+        g_inSortie = data;
+        std::printf("[gummi] the host launched route %u level %u; Teeny pilots %d %d (we are %u)\n", data[1], data[2],
+                    data[8] == 0xFF ? -1 : data[8], data[9] == 0xFF ? -1 : data[9], g_localId);
+    }
+    std::fflush(stdout);
+    startHostMission();
+}
+
+bool install(PS2Runtime &runtime)
+{
+    g_battleInit = runtime.lookupFunction(kBattleInit);
+    if (!g_battleInit || !runtime.replaceFunction(kBattleInit, &battleInitHook))
+        std::fprintf(stderr, "[gummi] could not hook the Gummi battle mode's start\n");
+    g_taskYield = runtime.lookupFunction(kTaskYield);
+    if (!g_taskYield || !runtime.replaceFunction(kTaskYield, &taskYieldHook))
+        std::fprintf(stderr, "[gummi] could not hook the task yield\n");
     g_shipUpdate = hookOverlay("gumibattle", kShipUpdate, &shipUpdateHook);
     g_apply[0] = hookOverlay("gumibattle", kApplyTeeny0, &applyHook<0>);
     g_apply[1] = hookOverlay("gumibattle", kApplyTeeny1, &applyHook<1>);

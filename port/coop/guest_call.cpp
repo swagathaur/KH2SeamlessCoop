@@ -17,12 +17,13 @@ namespace
 struct Active
 {
     Step step;
+    int channel = 0;
     uint32_t lastResult = 0;
     bool first = true;
 };
 
 std::mutex g_mutex;
-std::deque<Step> g_queue;
+std::deque<Step> g_queue[kChannels];
 std::unique_ptr<Active> g_active; // EE thread only
 // A call is running: the hook can be reached again from inside it (the object
 // factory builds the new object's matrix, and that object briefly is the
@@ -37,26 +38,31 @@ Env envFor(uint8_t *rdram, R5900Context *ctx)
 }
 } // namespace
 
-void post(Step job)
+void post(Step job, int channel)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_queue.push_back(std::move(job));
+    g_queue[channel == kGummi ? kGummi : kField].push_back(std::move(job));
 }
 
-void postCall(Call call, std::function<void(const Env &, uint32_t)> done)
+void postCall(Call call, std::function<void(const Env &, uint32_t)> done, int channel)
 {
     auto pending = std::make_shared<Call>(std::move(call));
-    post([pending, done](const Env &env, uint32_t result, bool first) -> std::optional<Call> {
-        if (first)
-            return *pending;
-        if (done)
-            done(env, result);
-        return std::nullopt;
-    });
+    post(
+        [pending, done](const Env &env, uint32_t result, bool first) -> std::optional<Call> {
+            if (first)
+                return *pending;
+            if (done)
+                done(env, result);
+            return std::nullopt;
+        },
+        channel);
 }
 
-void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t hookAddress)
+void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t hookAddress, int channel)
 {
+    channel = channel == kGummi ? kGummi : kField;
+    if (g_active && g_active->channel != channel)
+        return; // (another channel's job is part way)
     if (g_inFlight)
     {
         // A call that never finished (its thread was torn down with a room,
@@ -72,11 +78,12 @@ void runPending(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t
         if (!g_active)
         {
             std::lock_guard<std::mutex> lock(g_mutex);
-            if (g_queue.empty())
+            if (g_queue[channel].empty())
                 return;
             g_active = std::make_unique<Active>();
-            g_active->step = std::move(g_queue.front());
-            g_queue.pop_front();
+            g_active->step = std::move(g_queue[channel].front());
+            g_active->channel = channel;
+            g_queue[channel].pop_front();
         }
         const Env env = envFor(rdram, ctx);
         std::optional<Call> call = g_active->step(env, g_active->lastResult, g_active->first);

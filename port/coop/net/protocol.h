@@ -72,6 +72,8 @@ enum class GameEventType : uint16_t
     SpellCast = 12,
     SpawnSeed = 14,     // host -> clients: world u8, room u8, seed u32: this room's random spawn picks (enemies.h)
     SpellsKnown = 13,   // to everyone: the sender's spell levels, 6 x u8 (spells.h)     // to everyone: world u8, room u8, command u16, combo u8 (the sender's player cast it)
+    GummiSortie = 15,   // host -> clients: the Gummi mission it launched and its three ships (gummi.h)
+    GummiTeeny = 16,    // client -> host: the sender's Teeny Ship blueprint (gummi.h; empty: none)
     EnemyKill = 9,    // host -> clients: as EnemyHit (the blow that killed one), then the attacker's player id u8 (0xFF: none)
 };
 

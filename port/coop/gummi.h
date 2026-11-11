@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class PS2Runtime;
 
@@ -37,6 +38,30 @@ void setPilot(int k, bool on);
 void setPilotInput(int k, const PilotInput &in);
 // Test: Teeny `k` flown by a script (circles, firing now and then).
 void testPilot(int k, bool on);
+
+// A Gummi mode is on (the menu or a mission: its GAME_MODE's state, +0x1C, is
+// 1): the field's co-op stands down (no party, room jumps or stand-ins).
+bool inGummi(const uint8_t *rdram);
+
+// --- Co-op: the same mission and ships on every machine ---------------------
+// The host's launch (the Gummi battle mode starting, D_00103F68) gives the
+// other players its Teeny Ships: the first client (lowest id) Teeny 0, the
+// second Teeny 1, each with the Teeny blueprint they sent (GummiTeeny; none:
+// the host's own, or a preset). Then the mission and all three blueprints go
+// to the clients (GummiSortie), which start the same mission themselves.
+//
+// Each host-loop iteration (coop.cpp): who is in the session.
+void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8_t> &others);
+// Host: a launch to send, once, as GummiSortie events (pieces that fit a
+// packet: launch number, piece, pieces, then up to 900 bytes).
+bool takeSortie(std::vector<std::vector<uint8_t>> &out);
+// Host: a player's Teeny blueprint (GummiTeeny).
+void onPlayerTeeny(uint8_t player, const std::vector<uint8_t> &plan);
+// Client: our Teeny blueprint to send (the garage's first), and whether it
+// changed since the last call.
+bool ourTeeny(const uint8_t *rdram, std::vector<uint8_t> &out);
+// Client: a piece of the host's launch.
+void onHostSortie(const std::vector<uint8_t> &piece);
 // Test: start mission `route` at `level` (1-3), EX or not, with the save's
 // main ship blueprint `mainSlot` and Teeny blueprints `teeny0` / `teeny1`
 // (-1: none), as the menu would.

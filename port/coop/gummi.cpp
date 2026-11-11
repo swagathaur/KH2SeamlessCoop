@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -199,6 +201,8 @@ struct Pilot
     bool heard = false;       // Remote: offset heard from its pilot
 };
 std::mutex g_pilotMutex;
+void enemiesStep(uint8_t *rdram);
+std::atomic<uint32_t> g_dbgHitCalls{0}, g_dbgShots{0}; // (for the log)
 Pilot g_pilots[2];
 // Client: the main ship is the host's (its place from the host; our pad does
 // not move it). The host's main ship, as last heard: its object's +0x10..+0x5F
@@ -244,6 +248,7 @@ void testScript(Pilot &p, uint64_t frame, int k)
 
 void fire(uint32_t teeny)
 {
+    ++g_dbgShots;
     kh2guest::postCall(kh2guest::Call{kBodyFire, {teeny + kTeenyBody}, {}}, {}, kh2guest::kGummi);
 }
 
@@ -255,6 +260,7 @@ void shipUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     kh2guest::runPending(rdram, ctx, runtime, kShipUpdate, kh2guest::kGummi); // may not return
+    enemiesStep(rdram);
     const uint32_t ship = getRegU32(ctx, 4);
     static uint64_t frame = 0;
     ++frame;
@@ -410,6 +416,10 @@ void teenyMissileHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     kh2::callOriginal(g_teenyMissile, rdram, ctx, runtime);
 }
+bool g_clientMission = false; // this machine follows the host's mission (a client in one)
+bool g_hostMission = false;   // this machine leads one with others in it (the host)
+void clearEnemies();
+
 // --- Co-op launch -------------------------------------------------------------
 constexpr uint32_t kBattleInit = 0x00103F68; // the Gummi battle mode's start (loads the overlay)
 constexpr uint32_t kTaskYield = 0x00102448;  // every task's yield: a frame hook in any mode
@@ -480,6 +490,9 @@ void hostLaunch(uint8_t *ram)
     }
     g_pilotIds[0] = pilots[0];
     g_pilotIds[1] = pilots[1];
+    clearEnemies();
+    g_hostMission = !g_others.empty();
+    g_clientMission = false;
     std::vector<uint8_t> b(kSortieSize, 0);
     b[0] = 1;
     b[1] = uint8_t(rd<uint32_t>(ram, kRoute));
@@ -665,6 +678,9 @@ void onHostSortie(const std::vector<uint8_t> &piece)
         }
         g_followShip = true;
         g_heardShip = false;
+        clearEnemies();
+        g_clientMission = true;
+        g_hostMission = false;
         std::printf("[gummi] the host launched route %u level %u; Teeny pilots %d %d (we are %u)\n", data[1], data[2],
                     data[8] == 0xFF ? -1 : data[8], data[9] == 0xFF ? -1 : data[9], g_localId);
     }
@@ -694,6 +710,302 @@ uint32_t missionShip(const uint8_t *ram)
         return 0;
     return ship;
 }
+
+// --- Enemies in step (phase 6) ----------------------------------------------
+//
+// Every object of a mission is made by FUN_01F1E0C8(id, pos, rot); enemies
+// (vtables 0x01F810B8 and 0x01F816C0) keep their HP at +0x3A4 (0: cannot be
+// hurt; below 1 it is set to -1, and the enemy's own update then has it die,
+// FUN_01F26590(enemy, credited): score, kill count, drop). Enemies are known
+// the same way on every machine by where they come from: a wave spawner
+// (FUN_01F42378(spawner): its record +4, among the spawn manager's at
+// *0x01F91E50, 0xB8 each; wave +0x10; unit +0x12; the new object at +0x24
+// after), a part of another (FUN_01F1B640(child, parent, part, index)), or
+// else the order they appear in.
+//
+// The host's game decides. Every machine fires each pilot's Teeny (phase 5),
+// so the host's own copy of a client's shots does the host's damage; nothing
+// more is sent for hits. The host sends its enemies' deaths (an enemy known
+// with HP below 0, or marked by FUN_01F26590, +0x3BC bit 0, as it goes); on
+// a client an enemy dies only then (its HP set to -1, so it dies the game's
+// own way in its update), and one hit to death there before keeps HP 1
+// (FUN_01F26EE0 / 0x01F5F5D0, its update, hooked: FUN_01F26590 itself is
+// reached by a tail jump, a direct call the hooks never see). The course's
+// time (0x01F8F8E0 +0xC; its step, FUN_01F3C7A8, works out the rest from it),
+// the main ship's HP (the player's +0x4A8 stats, +4 f32; damage FUN_01F203A8
+// does nothing on a client) and the score (0x01F80398 +4) are the host's.
+constexpr uint32_t kMakeObject = 0x01F1E0C8, kSpawnUnit = 0x01F42378, kAttachPart = 0x01F1B640;
+constexpr uint32_t kEnemyHit = 0x01F26998, kEnemyDamage = 0x01F26B20;
+constexpr uint32_t kCourseStep = 0x01F3C7A8, kCourse = 0x01F8F8E0, kCourseTime = 0xC;
+constexpr uint32_t kShipDamage = 0x01F203A8, kShipStats = 0x4A8, kScore = 0x01F80398 + 4;
+constexpr uint32_t kEnemyHp = 0x3A4, kEnemyFlags = 0x3BC, kEnemyVtable1 = 0x01F810B8, kEnemyVtable2 = 0x01F816C0;
+constexpr uint32_t kSpawnRecords = 0x01F91E50, kSpawnRecordSize = 0xB8;
+
+PS2Runtime::RecompiledFunction g_spawnUnit = nullptr, g_attachPart = nullptr,
+                               g_enemyHit = nullptr, g_enemyDamage = nullptr,
+                               g_courseStep = nullptr, g_shipDamage = nullptr;
+
+std::mutex g_enemyMutex;
+std::unordered_map<uint32_t, uint32_t> g_idOf;   // object -> id
+std::unordered_map<uint32_t, uint32_t> g_objOf;  // id -> object
+uint32_t g_madeCount = 0;                        // objects made in this mission (not by a spawner or as a part)
+std::vector<uint32_t> g_killsOut;                // host: deaths to send
+std::unordered_set<uint32_t> g_killsIn;          // client: the host's deaths not yet here
+std::vector<std::pair<uint32_t, int32_t>> g_hitsOut; // client: hits to send
+std::vector<std::pair<uint32_t, int32_t>> g_hitsIn;  // host: the clients' hits, to take off
+uint32_t g_statHits = 0, g_statKills = 0;            // (for the log)
+std::unordered_map<uint32_t, int32_t> g_hitBefore;   // client: enemies hit this frame, HP before
+std::unordered_set<uint32_t> g_mayDie;               // client: enemies the host killed
+std::unordered_set<uint32_t> g_reported;             // host: deaths sent
+bool g_haveHostTime = false;
+float g_hostTime = 0, g_hostHp = 0;
+uint32_t g_hostScore = 0;
+bool g_haveHostHp = false;
+
+bool isEnemy(const uint8_t *ram, uint32_t o)
+{
+    if (o < 0x00100000u || o >= 0x02000000u)
+        return false;
+    const uint32_t v = rd<uint32_t>(ram, o);
+    return v == kEnemyVtable1 || v == kEnemyVtable2;
+}
+
+void name(uint8_t *ram, uint32_t obj, uint32_t id)
+{
+    if (!obj)
+        return;
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    const auto old = g_idOf.find(obj);
+    if (old != g_idOf.end())
+        g_objOf.erase(old->second);
+    g_idOf[obj] = id;
+    g_objOf[id] = obj;
+    g_mayDie.erase(obj); // (a new object where an old one was)
+}
+
+uint32_t idOf(uint32_t obj)
+{
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    const auto it = g_idOf.find(obj);
+    return it == g_idOf.end() ? 0 : it->second;
+}
+
+// Each enemy, as it is made: both constructors (FUN_01F243A8, FUN_01F242A0)
+// count it in the results with FUN_01F646A0(results, enemy). Named by the
+// wave spawner that is making it (FUN_01F42378, at its entry), else by order.
+// (A hook cannot run code after an overlay function's original returns: the
+// original hands back to the dispatcher at its first call out, and the rest
+// of it runs without the hook.)
+constexpr uint32_t kCountSpawned = 0x01F646A0;
+PS2Runtime::RecompiledFunction g_countSpawned = nullptr;
+uint32_t g_pendingKey = 0; // a spawner's unit, being made
+void countSpawnedHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kCountSpawned)
+    {
+        const uint32_t obj = getRegU32(ctx, 5);
+        uint32_t id = g_pendingKey;
+        g_pendingKey = 0;
+        if (!id)
+            id = 0x40000000u | (++g_madeCount & 0x3FFFFFFFu);
+        name(rdram, obj, id);
+    }
+    kh2::callOriginal(g_countSpawned, rdram, ctx, runtime);
+}
+
+void spawnUnitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kSpawnUnit)
+    {
+        const uint32_t spawner = getRegU32(ctx, 4);
+        const uint32_t rec = rd<uint32_t>(rdram, spawner + 4), base = rd<uint32_t>(rdram, kSpawnRecords);
+        const uint32_t index = rec >= base ? (rec - base) / kSpawnRecordSize : 0xFFF;
+        g_pendingKey = 0x10000000u | (index & 0xFFF) << 16 | (rd<uint16_t>(rdram, spawner + 0x10) & 0xFF) << 8 |
+                       (rd<uint16_t>(rdram, spawner + 0x12) & 0xFF);
+    }
+    kh2::callOriginal(g_spawnUnit, rdram, ctx, runtime);
+}
+
+void attachPartHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kAttachPart)
+    {
+        const uint32_t child = getRegU32(ctx, 4), parent = getRegU32(ctx, 5), index = getRegU32(ctx, 7);
+        const uint32_t p = idOf(parent);
+        if (p)
+            name(rdram, child, 0x80000000u | ((p * 31u + index + 1u) & 0x7FFFFFFFu));
+    }
+    kh2::callOriginal(g_attachPart, rdram, ctx, runtime);
+}
+
+// A client's hits: noted as they come (the HP before); each frame the HP lost
+// goes to the host. An enemy dies on a client only when the host's dies
+// (FUN_01F26590 is passed by otherwise, its HP kept at 1).
+template <uint32_t Entry, PS2Runtime::RecompiledFunction *Original>
+void enemyHitHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == Entry)
+        ++g_dbgHitCalls;
+    if (ctx->pc == Entry && g_clientMission)
+    {
+        const uint32_t enemy = getRegU32(ctx, 4);
+        if (isEnemy(rdram, enemy))
+        {
+            std::lock_guard<std::mutex> lock(g_enemyMutex);
+            g_hitBefore.emplace(enemy, rd<int32_t>(rdram, enemy + kEnemyHp));
+        }
+    }
+    kh2::callOriginal(*Original, rdram, ctx, runtime);
+}
+
+// On a client an enemy dies only when the host's has: before its update
+// (FUN_01F26EE0, where HP below 0 has it die, FUN_01F26590 by a tail jump the
+// hooks never see; the second class's update 0x01F5F5D0 runs it too), one
+// the host has not killed keeps HP 1.
+constexpr uint32_t kEnemyUpdate = 0x01F26EE0, kEnemyUpdate2 = 0x01F5F5D0;
+PS2Runtime::RecompiledFunction g_enemyUpdate = nullptr, g_enemyUpdate2 = nullptr;
+template <uint32_t Entry, PS2Runtime::RecompiledFunction *Original>
+void enemyUpdateHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == Entry && g_clientMission)
+    {
+        const uint32_t enemy = getRegU32(ctx, 4);
+        if (isEnemy(rdram, enemy) && rd<int32_t>(rdram, enemy + kEnemyHp) < 0)
+        {
+            bool may;
+            {
+                std::lock_guard<std::mutex> lock(g_enemyMutex);
+                may = g_mayDie.count(enemy) != 0;
+            }
+            if (!may)
+            {
+                const int32_t one = 1;
+                std::memcpy(rdram + enemy + kEnemyHp, &one, 4);
+            }
+        }
+    }
+    kh2::callOriginal(*Original, rdram, ctx, runtime);
+}
+
+// Once a frame, from the main ship's update (FUN_01F3C7A8, the course's step,
+// is a task's loop: entered once, it yields each frame inside).
+void enemiesStep(uint8_t *rdram)
+{
+    if (g_clientMission || g_hostMission)
+    {
+        std::lock_guard<std::mutex> lock(g_enemyMutex);
+        if (g_hostMission)
+        {
+            // Our deaths (and escapes): HP below 0, or FUN_01F26590's mark
+            // (+0x3BC bit 0) as it goes.
+            for (const auto &[obj, id] : g_idOf)
+                if (!g_reported.count(id) && isEnemy(rdram, obj) &&
+                    ((rd<uint32_t>(rdram, obj + kEnemyFlags) & 1) || rd<int32_t>(rdram, obj + kEnemyHp) < 0))
+                {
+                    g_reported.insert(id);
+                    g_killsOut.push_back(id);
+                    ++g_statKills;
+                }
+            // The clients' hits.
+            for (const auto &[id, dmg] : g_hitsIn)
+            {
+                const auto it = g_objOf.find(id);
+                if (it == g_objOf.end() || !isEnemy(rdram, it->second))
+                    continue;
+                int32_t hp = rd<int32_t>(rdram, it->second + kEnemyHp);
+                if (hp <= 0)
+                    continue; // (dead already, or cannot be hurt)
+                hp -= dmg;
+                ++g_statHits;
+                if (hp < 1)
+                    hp = -1;
+                std::memcpy(rdram + it->second + kEnemyHp, &hp, 4);
+            }
+            g_hitsIn.clear();
+        }
+        else
+        {
+            // The host's deaths.
+            for (auto it = g_killsIn.begin(); it != g_killsIn.end();)
+            {
+                const auto o = g_objOf.find(*it);
+                if (o == g_objOf.end())
+                {
+                    ++it; // (not here yet)
+                    continue;
+                }
+                ++g_statKills;
+                if (isEnemy(rdram, o->second))
+                {
+                    g_mayDie.insert(o->second);
+                    if (rd<int32_t>(rdram, o->second + kEnemyHp) != 0)
+                    {
+                        const int32_t dead = -1;
+                        std::memcpy(rdram + o->second + kEnemyHp, &dead, 4);
+                    }
+                }
+                it = g_killsIn.erase(it);
+            }
+            // Our hits this frame, for the host.
+            for (const auto &[enemy, before] : g_hitBefore)
+            {
+                if (!isEnemy(rdram, enemy) || before <= 0)
+                    continue;
+                const int32_t now = rd<int32_t>(rdram, enemy + kEnemyHp);
+                const int32_t dmg = before - (now < 0 ? 0 : now);
+                // (Not sent: every machine fires each pilot's Teeny, so the
+                // host's own copy of our shots does the host's damage.)
+                (void)dmg;
+                if (now < 1 && !g_mayDie.count(enemy))
+                {
+                    const int32_t one = 1; // (alive until the host's dies)
+                    std::memcpy(rdram + enemy + kEnemyHp, &one, 4);
+                }
+            }
+            g_hitBefore.clear();
+            const uint32_t course = kCourse;
+            if (g_haveHostTime)
+            {
+                const float t = rdf(rdram, course + kCourseTime);
+                const float d = g_hostTime - t;
+                wrf(rdram, course + kCourseTime, std::fabs(d) > 30.f ? g_hostTime : t + d * 0.1f);
+            }
+            const uint32_t ship = rd<uint32_t>(rdram, 0x01F7DE44);
+            if (g_haveHostHp && ship >= 0x00100000u && ship < 0x02000000u)
+                wrf(rdram, ship + kShipStats + 4, g_hostHp);
+            std::memcpy(rdram + kScore, &g_hostScore, 4);
+        }
+    }
+}
+
+// A client's main ship takes no damage of its own (its HP is the host's).
+void shipDamageHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kShipDamage && g_clientMission)
+    {
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    kh2::callOriginal(g_shipDamage, rdram, ctx, runtime);
+}
+
+void clearEnemies()
+{
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    g_idOf.clear();
+    g_objOf.clear();
+    g_madeCount = 0;
+    g_killsOut.clear();
+    g_killsIn.clear();
+    g_hitsOut.clear();
+    g_haveHostTime = g_haveHostHp = false;
+    g_hostScore = 0;
+    g_statHits = g_statKills = 0;
+    g_hitBefore.clear();
+    g_mayDie.clear();
+    g_reported.clear();
+    g_pendingKey = 0;
+}
 } // namespace
 
 bool hostShips(const uint8_t *ram, std::vector<uint8_t> &out)
@@ -703,85 +1015,153 @@ bool hostShips(const uint8_t *ram, std::vector<uint8_t> &out)
         return false;
     static uint32_t seq = 0;
     out.clear();
-    out.push_back(1);
+    out.push_back(2);
     ++seq;
     out.insert(out.end(), reinterpret_cast<const uint8_t *>(&seq), reinterpret_cast<const uint8_t *>(&seq) + 4);
     out.insert(out.end(), ram + ship + kShipPlace, ram + ship + kShipPlace + kShipPlaceSize);
-    std::lock_guard<std::mutex> lock(g_pilotMutex);
-    for (int k = 0; k < 2; ++k)
     {
-        const Pilot &p = g_pilots[k];
-        out.push_back(p.mode == Mode::Remote && p.heard ? 1 : 0);
-        for (int i = 0; i < 3; ++i)
-            putF(out, p.offset[i]);
-        putU16(out, p.remoteShots);
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        for (int k = 0; k < 2; ++k)
+        {
+            const Pilot &p = g_pilots[k];
+            out.push_back(p.mode == Mode::Remote && p.heard ? 1 : 0);
+            for (int i = 0; i < 3; ++i)
+                putF(out, p.offset[i]);
+            putU16(out, p.remoteShots);
+        }
     }
+    putF(out, rdf(ram, kCourse + kCourseTime));
+    putF(out, rdf(ram, ship + kShipStats + 4));
+    const uint32_t score = rd<uint32_t>(ram, kScore);
+    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&score), reinterpret_cast<const uint8_t *>(&score) + 4);
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    if (seq % 300 == 0)
+        std::printf("[gummi] host: %zu objects known, %u hits from clients taken, %u deaths sent, time %.1f (hits on enemies %u)\n",
+                    g_idOf.size(), g_statHits, g_statKills, rdf(ram, kCourse + kCourseTime), g_dbgHitCalls.load());
+    const size_t n = std::min<size_t>(g_killsOut.size(), 100);
+    out.push_back(uint8_t(n));
+    for (size_t i = 0; i < n; ++i)
+        out.insert(out.end(), reinterpret_cast<const uint8_t *>(&g_killsOut[i]),
+                   reinterpret_cast<const uint8_t *>(&g_killsOut[i]) + 4);
+    g_killsOut.erase(g_killsOut.begin(), g_killsOut.begin() + long(n));
     return true;
 }
 
 void onHostShips(const std::vector<uint8_t> &d)
 {
-    constexpr size_t kSize = 1 + 4 + kShipPlaceSize + 2 * 15;
-    if (d.size() != kSize || d[0] != 1)
+    constexpr size_t kFixed = 1 + 4 + kShipPlaceSize + 2 * 15 + 12 + 1;
+    if (d.size() < kFixed || d[0] != 2 || d.size() != kFixed + size_t(d[kFixed - 1]) * 4)
         return;
-    static uint32_t lastSeq = 0;
     uint32_t seq;
     std::memcpy(&seq, d.data() + 1, 4);
-    if (seq < lastSeq && lastSeq - seq < 1000)
-        return; // (older)
-    lastSeq = seq;
-    std::lock_guard<std::mutex> lock(g_pilotMutex);
-    std::memcpy(g_hostShip, d.data() + 5, kShipPlaceSize);
-    g_heardShip = true;
-    const uint8_t *t = d.data() + 5 + kShipPlaceSize;
-    for (int k = 0; k < 2; ++k, t += 15)
+    if (seq % 300 == 0)
     {
-        Pilot &p = g_pilots[k];
-        if (p.mode != Mode::Remote || !t[0])
-            continue;
-        std::memcpy(p.offset, t + 1, 12);
-        p.remoteShots = uint16_t(t[13] | t[14] << 8);
-        if (!p.heard)
-            p.shotsSeen = p.remoteShots;
-        p.heard = true;
+        std::lock_guard<std::mutex> lock(g_enemyMutex);
+        std::printf("[gummi] client: %zu objects known, %u host deaths applied, %zu waiting, host time %.1f (hits on enemies %u, Teeny shots %u)\n",
+                    g_idOf.size(), g_statKills, g_killsIn.size(), g_hostTime, g_dbgHitCalls.load(), g_dbgShots.load());
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        std::memcpy(g_hostShip, d.data() + 5, kShipPlaceSize);
+        g_heardShip = true;
+        const uint8_t *t = d.data() + 5 + kShipPlaceSize;
+        for (int k = 0; k < 2; ++k, t += 15)
+        {
+            Pilot &p = g_pilots[k];
+            if (p.mode != Mode::Remote || !t[0])
+                continue;
+            std::memcpy(p.offset, t + 1, 12);
+            p.remoteShots = uint16_t(t[13] | t[14] << 8);
+            if (!p.heard)
+                p.shotsSeen = p.remoteShots;
+            p.heard = true;
+        }
+    }
+    const uint8_t *q = d.data() + 5 + kShipPlaceSize + 30;
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    std::memcpy(&g_hostTime, q, 4);
+    std::memcpy(&g_hostHp, q + 4, 4);
+    std::memcpy(&g_hostScore, q + 8, 4);
+    g_haveHostTime = g_haveHostHp = true;
+    for (size_t i = 0; i < d[kFixed - 1]; ++i)
+    {
+        uint32_t id;
+        std::memcpy(&id, d.data() + kFixed + i * 4, 4);
+        g_killsIn.insert(id); // (applied in the next frame's hook, where the game's memory is ours)
     }
 }
 
 bool pilotState(std::vector<uint8_t> &out)
 {
-    std::lock_guard<std::mutex> lock(g_pilotMutex);
-    for (int k = 0; k < 2; ++k)
+    out.clear();
     {
-        const Pilot &p = g_pilots[k];
-        if (p.mode != Mode::Local || !p.placed)
-            continue;
-        out.clear();
-        out.push_back(uint8_t(k));
-        for (int i = 0; i < 3; ++i)
-            putF(out, p.offset[i]);
-        putU16(out, p.shots);
-        return true;
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        int k = 0;
+        for (; k < 2; ++k)
+            if (g_pilots[k].mode == Mode::Local && g_pilots[k].placed)
+                break;
+        if (k < 2)
+        {
+            const Pilot &p = g_pilots[k];
+            out.push_back(uint8_t(k));
+            for (int i = 0; i < 3; ++i)
+                putF(out, p.offset[i]);
+            putU16(out, p.shots);
+        }
+        else
+        {
+            out.push_back(0xFF);
+            out.insert(out.end(), 14, 0);
+        }
     }
-    return false;
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    const size_t n = std::min<size_t>(g_hitsOut.size(), 100);
+    if (out[0] == 0xFF && n == 0)
+        return false;
+    out.push_back(uint8_t(n));
+    for (size_t i = 0; i < n; ++i)
+    {
+        out.insert(out.end(), reinterpret_cast<const uint8_t *>(&g_hitsOut[i].first),
+                   reinterpret_cast<const uint8_t *>(&g_hitsOut[i].first) + 4);
+        out.insert(out.end(), reinterpret_cast<const uint8_t *>(&g_hitsOut[i].second),
+                   reinterpret_cast<const uint8_t *>(&g_hitsOut[i].second) + 4);
+    }
+    g_hitsOut.erase(g_hitsOut.begin(), g_hitsOut.begin() + long(n));
+    return true;
 }
 
 void onPilotState(uint8_t player, const std::vector<uint8_t> &d)
 {
-    if (d.size() != 15 || d[0] > 1 || g_pilotIds[d[0]] != player)
+    if (d.size() < 16 || d.size() != 16 + size_t(d[15]) * 8)
         return;
-    std::lock_guard<std::mutex> lock(g_pilotMutex);
-    Pilot &p = g_pilots[d[0]];
-    if (p.mode != Mode::Remote)
-        return;
-    std::memcpy(p.offset, d.data() + 1, 12);
-    p.remoteShots = uint16_t(d[13] | d[14] << 8);
-    if (!p.heard)
-        p.shotsSeen = p.remoteShots;
-    p.heard = true;
+    if (d[0] <= 1 && g_pilotIds[d[0]] == player)
+    {
+        std::lock_guard<std::mutex> lock(g_pilotMutex);
+        Pilot &p = g_pilots[d[0]];
+        if (p.mode == Mode::Remote)
+        {
+            std::memcpy(p.offset, d.data() + 1, 12);
+            p.remoteShots = uint16_t(d[13] | d[14] << 8);
+            if (!p.heard)
+                p.shotsSeen = p.remoteShots;
+            p.heard = true;
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_enemyMutex);
+    for (size_t i = 0; i < d[15]; ++i)
+    {
+        uint32_t id;
+        int32_t dmg;
+        std::memcpy(&id, d.data() + 16 + i * 8, 4);
+        std::memcpy(&dmg, d.data() + 20 + i * 8, 4);
+        g_hitsIn.emplace_back(id, dmg); // (applied in the next frame's hook)
+    }
 }
 
 void endMission()
 {
+    g_clientMission = g_hostMission = false;
+    clearEnemies();
     std::lock_guard<std::mutex> lock(g_pilotMutex);
     for (Pilot &p : g_pilots)
         if (p.mode != Mode::Test)
@@ -804,6 +1184,17 @@ bool install(PS2Runtime &runtime)
     g_teenyFire = hookOverlay("gumibattle", kTeenyFire, &teenyFireHook);
     g_teenyLockOn = hookOverlay("gumibattle", kTeenyLockOn, &teenyLockOnHook);
     g_teenyMissile = hookOverlay("gumibattle", kTeenyMissile, &teenyMissileHook);
+    g_countSpawned = hookOverlay("gumibattle", kCountSpawned, &countSpawnedHook);
+    g_spawnUnit = hookOverlay("gumibattle", kSpawnUnit, &spawnUnitHook);
+    g_attachPart = hookOverlay("gumibattle", kAttachPart, &attachPartHook);
+    g_enemyHit = hookOverlay("gumibattle", kEnemyHit, &enemyHitHook<kEnemyHit, &g_enemyHit>);
+    g_enemyDamage = hookOverlay("gumibattle", kEnemyDamage, &enemyHitHook<kEnemyDamage, &g_enemyDamage>);
+    g_enemyUpdate = hookOverlay("gumibattle", kEnemyUpdate, &enemyUpdateHook<kEnemyUpdate, &g_enemyUpdate>);
+    g_enemyUpdate2 = hookOverlay("gumibattle", kEnemyUpdate2, &enemyUpdateHook<kEnemyUpdate2, &g_enemyUpdate2>);
+    g_shipDamage = hookOverlay("gumibattle", kShipDamage, &shipDamageHook);
+    if (!g_countSpawned || !g_spawnUnit || !g_attachPart || !g_enemyHit || !g_enemyDamage || !g_enemyUpdate || !g_enemyUpdate2 ||
+        !g_shipDamage)
+        std::fprintf(stderr, "[gummi] could not hook the mission's enemies\n");
     const bool ok = g_shipUpdate && g_apply[0] && g_apply[1] && g_teenyFire && g_teenyLockOn && g_teenyMissile;
     if (!ok)
         std::fprintf(stderr, "[gummi] could not hook the Gummi battle overlay\n");

@@ -171,6 +171,20 @@ and the mission state follow (mission.h).
   pilot its Teeny's offset and shot count (GummiPilot); the other machines
   fire it as the count goes up. The Teeny steered up and right on the client
   showed in the same place on the host.
+- **Phase 6 works (tested, two games, 50 s of route 0):** enemies are known
+  the same way on both machines (by the wave spawner making them, FUN_01F42378
+  at its entry, else by order; counted as made with FUN_01F646A0). The host
+  sends its enemies' deaths and its course time, main ship HP and score with
+  GummiShips; a client's enemies die only when the host's do, its course runs
+  on the host's time and its main ship takes no damage of its own. Hits need
+  no sending: every machine fires each pilot's Teeny, so the host's own copy
+  of a client's shots does the damage. After 50 s both showed the same score
+  (22874), kills (82), enemies and places.
+- Hooks in the overlays: a `jal` goes through the function table (hookable),
+  but a tail `j` to another function is a direct call (FUN_01F26EE0 -> FUN_01F26590):
+  hook the caller. And a hook cannot run code after an overlay function's
+  original returns (the original hands back to the dispatcher at its first
+  call out).
 - The presets are `gumimenu/fm/planinfo.bar`, in the Gummi files' own index
   `000gumi.idx` (KH2.IMG). The game only has that index loaded in the Gummi
   modes (it takes the slot the field keeps its world's index in), so the port

@@ -46,20 +46,17 @@ bool inGummi(const uint8_t *rdram);
 // --- Co-op: the same mission and ships on every machine ---------------------
 // The host's launch (the Gummi battle mode starting, D_00103F68) gives the
 // other players its Teeny Ships: the first client (lowest id) Teeny 0, the
-// second Teeny 1, each with the Teeny blueprint they sent (GummiTeeny; none:
-// the host's own, or a preset). Then the mission and all three blueprints go
-// to the clients (GummiSortie), which start the same mission themselves.
+// second Teeny 1. Which Teenies is the host's to say (it has the parts): the
+// ones it chose in the menu, else its garage's, else presets. Then the
+// mission and all three blueprints go to the clients (GummiSortie), which
+// start the same mission themselves. The mission's rewards are the host's
+// alone: a client's Gummi save data comes back as it was when it ends.
 //
 // Each host-loop iteration (coop.cpp): who is in the session.
 void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8_t> &others);
 // Host: a launch to send, once, as GummiSortie events (pieces that fit a
 // packet: launch number, piece, pieces, then up to 900 bytes).
 bool takeSortie(std::vector<std::vector<uint8_t>> &out);
-// Host: a player's Teeny blueprint (GummiTeeny).
-void onPlayerTeeny(uint8_t player, const std::vector<uint8_t> &plan);
-// Client: our Teeny blueprint to send (the garage's first), and whether it
-// changed since the last call.
-bool ourTeeny(const uint8_t *rdram, std::vector<uint8_t> &out);
 // Client: a piece of the host's launch.
 void onHostSortie(const std::vector<uint8_t> &piece);
 
@@ -73,7 +70,7 @@ void onHostShips(const std::vector<uint8_t> &data);
 bool pilotState(std::vector<uint8_t> &out);
 void onPilotState(uint8_t player, const std::vector<uint8_t> &data);
 // No mission any more (back to the field, or the session ended).
-void endMission();
+void endMission(uint8_t *rdram);
 // Test: start mission `route` at `level` (1-3), EX or not, with the save's
 // main ship blueprint `mainSlot` and Teeny blueprints `teeny0` / `teeny1`
 // (-1: none), as the menu would.

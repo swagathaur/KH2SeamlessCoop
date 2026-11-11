@@ -108,12 +108,12 @@ and the mission state follow (mission.h).
 - **Everyone runs the mission.** Each machine enters the same mission with
   the same three ships. The host's game decides the course time, enemy HP,
   deaths, which event comes next, the results and the end.
-- **Ships:** the main ship is the host's (P1). Teeny 0 is P2's, Teeny 1
-  P3's. Each player brings **their own Teeny blueprint** (from their garage,
-  or a preset if they have none), so every Teeny looks like its pilot's.
-  The host gathers the three blueprints and sends them, with the mission
-  choice, to everyone before the mission loads. Co-op gives the Teeny
-  slots regardless of the Teeny System item.
+- **Ships:** the main ship is the host's (P1). Teeny 0 is flown by P2,
+  Teeny 1 by P3. **The host chooses every Teeny** (it has the parts from its
+  own missions): the ones it picked in the menu, else its garage's, else
+  presets. It sends the three blueprints, with the mission choice, to
+  everyone before the mission loads. Co-op gives the Teeny slots regardless
+  of the Teeny System item.
 - **Each machine's pad drives its own ship.** On the host, PAD(0) drives
   the main ship as now. On a client, the main ship becomes a follower of the
   host's (its pad is cut off, its transform comes from the host) and the
@@ -132,9 +132,10 @@ and the mission state follow (mission.h).
 - **Flow:** the host's menu choices and pause choices (retry, quit) are
   followed by everyone; clients cannot pause the mission themselves. Clear,
   game over and continue follow the host's.
-- **Rewards:** each player gets the host's results into their own save on a
-  clear (items, treasures, record), or only the host does. *Decision
-  needed.*
+- **Rewards are the host's alone.** A client's Gummi save data (mission
+  records, gummi items, treasures: save +0x100E0..+0x10FC0) is put back as it
+  was when the mission ends (tested: a cleared route 0 wrote the host's
+  record; the client's stayed empty, and both went back to the World Map).
 
 ## Progress
 

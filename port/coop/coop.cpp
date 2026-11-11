@@ -556,11 +556,6 @@ void makeSession()
             kh2gummi::onPilotState(origin, data);
             return;
         }
-        if (type == static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny) && g_session->isHost())
-        {
-            kh2gummi::onPlayerTeeny(origin, data);
-            return;
-        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::SpellsKnown) && data.size() == 6)
         {
             g_spellsKnown[origin] = data;
@@ -949,8 +944,7 @@ void stepRefresh(uint8_t *ram)
     r.jumping = false;
 }
 
-// Gummi missions (gummi.h): the host's launch, with its ships, for everyone;
-// the clients' Teeny Ship blueprints for the host.
+// Gummi missions (gummi.h): the host's launch, with its ships, for everyone.
 void tickGummi(const uint8_t *ram, uint64_t guestFrame)
 {
     if (!g_session || !g_session->active())
@@ -970,8 +964,6 @@ void tickGummi(const uint8_t *ram, uint64_t guestFrame)
             for (const auto &p : pieces)
                 g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiSortie), p);
     }
-    else if ((guestFrame % 300 == 150 || g_resendLoadout) && kh2gummi::ourTeeny(ram, blob))
-        g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::GummiTeeny), blob);
     // In a mission, every other frame: the host's main ship and the piloted
     // Teenies; a client's own Teeny.
     if (guestFrame % 2 == 0)
@@ -1024,7 +1016,7 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     static bool wasGummi = false;
     const bool gummi = kh2gummi::inGummi(ram);
     if (wasGummi && !gummi)
-        kh2gummi::endMission();
+        kh2gummi::endMission(ram);
     wasGummi = gummi;
     if (gummi)
     {

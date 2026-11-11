@@ -417,6 +417,8 @@ void teenyMissileHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     kh2::callOriginal(g_teenyMissile, rdram, ctx, runtime);
 }
 bool g_clientMission = false; // this machine follows the host's mission (a client in one)
+constexpr uint32_t kGummiSave = kh2state::addr::Save + 0x100E0, kGummiSaveSize = 0x10FC0 - 0x100E0;
+std::vector<uint8_t> g_savedGummi; // client: our Gummi save data as the mission began
 bool g_hostMission = false;   // this machine leads one with others in it (the host)
 void clearEnemies();
 
@@ -430,15 +432,25 @@ std::mutex g_netMutex;
 bool g_inSession = false, g_isHost = false;
 uint8_t g_localId = 0;
 std::vector<uint8_t> g_others;                  // the other players' ids, in order
-std::map<uint8_t, std::vector<uint8_t>> g_teenies; // host: each player's Teeny blueprint
 std::vector<uint8_t> g_outSortie;               // host: to send
 std::vector<uint8_t> g_inSortie;                // client: to start
 std::atomic<bool> g_starting{false};            // client: our own start of the host's mission
-std::vector<uint8_t> g_sentTeeny;
 uint8_t g_pilotIds[2] = {0xFF, 0xFF}; // who flies each Teeny in this mission
-bool g_sentTeenyOnce = false;
 
-// A preset's Teeny blueprint for players who brought none (the first preset
+// The host's garage's k-th Teeny blueprint (empty: none).
+std::vector<uint8_t> garageTeeny(const uint8_t *ram, int k)
+{
+    int found = 0;
+    for (int i = 0; i < kSlots; ++i)
+    {
+        const uint32_t p = kTeenyPlans + uint32_t(i) * kTeenyPlanSize;
+        if (usable(ram, p) && found++ == k)
+            return std::vector<uint8_t>(ram + p, ram + p + kTeenyPlanSize);
+    }
+    return {};
+}
+
+// A preset's Teeny blueprint, when the host has none (the first preset
 // with two Teeny Ships).
 std::vector<uint8_t> presetTeeny(int k)
 {
@@ -461,22 +473,27 @@ void hostLaunch(uint8_t *ram)
     for (int k = 0; k < 2 && k < int(g_others.size()); ++k)
     {
         pilots[k] = g_others[size_t(k)];
+        // The host's Teeny Ships (it has the parts): the one it chose in the
+        // menu, else one of its garage's, else a preset.
+        const char *from = "the host's choice";
         std::vector<uint8_t> plan;
-        const auto it = g_teenies.find(pilots[k]);
-        if (it != g_teenies.end() && !it->second.empty())
-            plan = it->second;
-        else if (!ram[kFlags + 1 + k])
-            plan = presetTeeny(k);
+        if (!ram[kFlags + 1 + k])
+        {
+            plan = garageTeeny(ram, k);
+            from = "the host's garage";
+            if (plan.empty())
+            {
+                plan = presetTeeny(k);
+                from = "a preset";
+            }
+        }
         if (!plan.empty() && plan.size() <= kTeenyBufSize)
         {
             std::memset(ram + kTeenyBuf + k * kTeenyBufSize, 0, kTeenyBufSize);
             std::memcpy(ram + kTeenyBuf + k * kTeenyBufSize, plan.data(), plan.size());
             ram[kFlags + 1 + k] = usable(ram, kTeenyBuf + k * kTeenyBufSize) ? 1 : 0;
         }
-        std::printf("[gummi] Teeny %d: player %u (%s)\n", k, pilots[k],
-                    it != g_teenies.end() && !it->second.empty() ? "their blueprint"
-                    : plan.empty()                                ? "the host's"
-                                                                  : "a preset");
+        std::printf("[gummi] Teeny %d: player %u flies %s\n", k, pilots[k], from);
     }
     {
         std::lock_guard<std::mutex> pl(g_pilotMutex);
@@ -564,6 +581,10 @@ void startHostMission()
         for (int k = 0; k < 3; ++k)
             ram[kFlags + k] = b[5 + k];
         const uint32_t level = b[2], variant = b[3];
+        // Rewards are the host's alone: our Gummi save data (mission records,
+        // gummi items, treasures: save +0x100E0..+0x10FC0) comes back as it
+        // was when the mission ends.
+        g_savedGummi.assign(ram + kGummiSave, ram + kGummiSave + kGummiSaveSize);
         g_starting = true;
         auto call = launch(ram, b[1], int(level), b[4] != 0);
         std::memcpy(ram + kVariant, &variant, 4); // (the host's, after launch's own)
@@ -593,8 +614,6 @@ void setSession(bool active, bool host, uint8_t localId, const std::vector<uint8
     std::sort(g_others.begin(), g_others.end());
     if (!active)
     {
-        g_teenies.clear();
-        g_sentTeenyOnce = false;
     }
 }
 
@@ -616,32 +635,6 @@ bool takeSortie(std::vector<std::vector<uint8_t>> &out)
         out.push_back(std::move(p));
     }
     g_outSortie.clear();
-    return true;
-}
-
-void onPlayerTeeny(uint8_t player, const std::vector<uint8_t> &plan)
-{
-    std::lock_guard<std::mutex> lock(g_netMutex);
-    g_teenies[player] = plan.size() <= kTeenyBufSize ? plan : std::vector<uint8_t>{};
-}
-
-bool ourTeeny(const uint8_t *ram, std::vector<uint8_t> &out)
-{
-    out.clear();
-    for (int i = 0; i < kSlots; ++i)
-    {
-        const uint32_t p = kTeenyPlans + uint32_t(i) * kTeenyPlanSize;
-        if (usable(ram, p))
-        {
-            out.assign(ram + p, ram + p + kTeenyPlanSize);
-            break;
-        }
-    }
-    std::lock_guard<std::mutex> lock(g_netMutex);
-    if (g_sentTeenyOnce && out == g_sentTeeny)
-        return false;
-    g_sentTeeny = out;
-    g_sentTeenyOnce = true;
     return true;
 }
 
@@ -1158,8 +1151,14 @@ void onPilotState(uint8_t player, const std::vector<uint8_t> &d)
     }
 }
 
-void endMission()
+void endMission(uint8_t *ram)
 {
+    if (!g_savedGummi.empty() && ram)
+    {
+        std::memcpy(ram + kGummiSave, g_savedGummi.data(), g_savedGummi.size());
+        std::printf("[gummi] the mission's rewards are the host's: our Gummi save data is as it was\n");
+        g_savedGummi.clear();
+    }
     g_clientMission = g_hostMission = false;
     clearEnemies();
     std::lock_guard<std::mutex> lock(g_pilotMutex);

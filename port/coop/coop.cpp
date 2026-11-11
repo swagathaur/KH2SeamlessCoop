@@ -31,6 +31,7 @@
 #include "host_input.h"
 #include "pgs_renderer.h"
 #include "guest_call.h"
+#include "Stubs/MemoryCard.h"
 #include "net/interpolation.h"
 #include "net/session.h"
 
@@ -1335,8 +1336,18 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
         else if (rd32(rdram, kMenuRunning) != 0 && !kh2gummi::inGummi(rdram))
         {
             // Under the pause menu (MENU::isRunning, 0x0032BA28): it is closed
-            // the menu's own way (Tz::MenuBase::SetExit), then we go.
-            if (now() - g_menuClosedAt > 1.0)
+            // the menu's own way (Tz::MenuBase::SetExit), then we go. Not
+            // while a memory card file is open (a save being written): that
+            // waits until it is done.
+            if (!ps2_stubs::getMemoryCardDebugSnapshot().openFiles.empty())
+            {
+                if (now() - g_menuClosedAt > 5.0)
+                {
+                    g_menuClosedAt = now();
+                    addLog("the host is moving on: after our save");
+                }
+            }
+            else if (now() - g_menuClosedAt > 1.0)
             {
                 g_menuClosedAt = now();
                 addLog("closing the menu: the host is moving on");

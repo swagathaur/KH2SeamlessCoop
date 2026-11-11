@@ -424,12 +424,22 @@ Look want(uint8_t *rdram, uint16_t entry)
         });
         if (b.ready || (files && in == files && now - b.askedMs > 300))
         {
+            if (!b.ready)
+            {
+                std::printf("[formcache] look %04X ready, %lld ms after it was asked\n", entry,
+                            static_cast<long long>(now - b.askedMs));
+                std::fflush(stdout);
+            }
             b.ready = true;
             return Look::Ready;
         }
         // (The reads go on with each CACHE_BUFF::Flush: the game's own come
         // with its room loads, so ours are pushed on while we wait.)
-        if (now - b.flushedMs > 400)
+        static const int64_t flushEvery = [] { // (KH2_FORMCACHE_FLUSH_MS: tests)
+            const char *e = std::getenv("KH2_FORMCACHE_FLUSH_MS");
+            return e ? int64_t(std::atoi(e)) : int64_t(400);
+        }();
+        if (now - b.flushedMs > flushEvery)
         {
             b.flushedMs = now;
             kh2guest::postCall(kh2guest::Call{kCacheFlush, {0u}, {}});

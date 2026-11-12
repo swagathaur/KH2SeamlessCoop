@@ -33,6 +33,9 @@ namespace kh2avatars
 {
 bool install(PS2Runtime &runtime);
 bool enabled();
+// No avatar is begun while held (the room is about to be reloaded, as the
+// party refresh at a session's start does).
+void setHold(bool hold);
 // Host loop, every iteration (the same list partners get).
 // Returns heals this game gave them (items, Cure on their party place).
 std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partner::Remote> &remotes);

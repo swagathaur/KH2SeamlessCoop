@@ -49,6 +49,38 @@ avatar (ALL_VISIBLE), 5 rounds each:
 - With three players the second avatar comes about 0.1 s after the first:
   each is made by a guest job of a few calls, one after the other.
 
+## Where a load's time went (and the native decompressor)
+
+The disc reads take under 2 ms each (`KH2_CD_LOG=1`; the ISO is in the OS
+cache). A profile of eight room changes (`--profile`, ctl `profile on/off`)
+showed the host nearly idle, and the EE threads (ctl `threads`) showed the
+loader's thread inside FUN_002EFCC0 through the long pauses: KH2's
+decompressor, a byte at a time, backwards over the file. The runtime paces
+the guest to a PS2's EE, so that loop ran at PS2 speed (480 ms for a Land
+of Dragons room's 2 MB file, about 300 ms for a drive form's motion set)
+while the host waited for each frame's time.
+
+`port/runtime/fast_decompress.cpp` does it natively (about a millisecond).
+`KH2_FAST_DECOMPRESS=0`: the game's own; `=check`: both on each file and
+compared (all the files that finish in one go: the same bytes).
+
+| | before | native |
+|---|---|---|
+| Land of Dragons room, control | 1.1-1.2 s | 0.66-0.81 s |
+| Land of Dragons, all avatars seen | 1.24 s | about 1.0 s |
+| a drive form look read | 0.65-0.75 s | 0.3 s (formcache's floor) |
+| Halloween Town, 3 players, 2 in forms, all seen | 3.6 s | 1.9 s |
+
+It made two races show:
+- The English files are put into the game's file indexes by a pass each
+  host frame. A world's index read and unpacked at once was looked up before
+  the next pass: the Japanese menu file went through the English font
+  (garbled commands). There is a pass before each of the game's name
+  lookups now (FUN_001AE460, `kh2files::installLookupHook`).
+- A third player's game made an avatar as the party refresh reloaded the
+  room at its start, and crashed. Avatars wait while that reload is due or
+  under way (`kh2avatars::setHold`).
+
 ## Fixed along the way
 
 - **Room changes slowed by a log.** A diagnostic printed every file freed for

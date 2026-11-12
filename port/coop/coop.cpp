@@ -918,6 +918,9 @@ void updatePartners(uint8_t *ram, uint64_t guestFrame)
                 }
             }
         }
+        // (Not while the room is about to be reloaded for the party, or is
+        // being: an avatar begun then was finished across the reload.)
+        kh2avatars::setHold(g_refresh.wanted || g_refresh.jumping);
         heals = kh2avatars::update(ram, list);
         list.clear();
     }

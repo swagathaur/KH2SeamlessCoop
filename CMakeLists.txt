@@ -280,6 +280,7 @@ target_sources(kh2recomp PRIVATE
     port/runtime/pad2_hle.cpp
     port/runtime/cd_iso.cpp
     port/runtime/cd_callback.cpp
+    port/runtime/fast_decompress.cpp
     port/runtime/movie_eof.cpp
     port/runtime/cutscene_skip.cpp
     port/runtime/local_players.cpp

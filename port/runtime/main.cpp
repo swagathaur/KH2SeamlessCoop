@@ -45,6 +45,7 @@
 #include "cd_callback.h"
 #include "movie_eof.h"
 #include "profiler.h"
+#include "fast_decompress.h"
 #include "pgs_renderer.h"
 #include "host_input.h"
 #include "game_patches.h"
@@ -1187,6 +1188,14 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "profile")
+        {
+            // profile on|off: the sampling profiler (--profile) records or not
+            std::string v;
+            ls >> v;
+            kh2prof::setRecording(v == "on");
+            say(line);
+        }
         else if (cmd == "drive")
         {
             // drive FORM: our player drives into a form as the Drive command
@@ -2296,6 +2305,7 @@ int main(int argc, char **argv)
     if (opt.english)
         kh2english::install(runtime);
     kh2databuff::install(runtime);
+    kh2decomp::install(runtime);
     kh2imageslots::install(runtime);
     // ovl_movie's libmpeg is bound to the runtime's (ffmpeg) libmpeg, which by
     // default also pokes Dragon Quest VIII's libmpeg globals (patch 0004).
@@ -2399,8 +2409,8 @@ int main(int argc, char **argv)
         }
         for (const std::string &d : opt.overrideDirs)
             dirs.push_back(d);
-        if (!dirs.empty())
-            kh2files::install(dirs);
+        if (!dirs.empty() && kh2files::install(dirs))
+            kh2files::installLookupHook(runtime);
     }
     runtime.run();
     // A shutdown that hangs leaves every thread's stack (the host-loop

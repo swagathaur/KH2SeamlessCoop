@@ -25,6 +25,8 @@ namespace kh2files
 size_t install(const std::vector<std::filesystem::path> &folders);
 // Once per host loop iteration.
 void tick(uint8_t *rdram);
+// A pass before each of the game's name lookups too (after install).
+bool installLookupHook(PS2Runtime &runtime);
 size_t count();
 
 // The game's name hashes (exposed for tests).

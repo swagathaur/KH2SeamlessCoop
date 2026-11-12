@@ -6,6 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
+
+#include "hle_call.h"
+#include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 
 namespace ps2_stubs
 {
@@ -204,10 +209,16 @@ bool passStillValid(const uint8_t *rdram, TablePass &p, uint32_t table, uint32_t
 }
 } // namespace
 
+namespace
+{
+std::mutex g_tickMutex; // (the host loop's passes and the lookup hook's)
+}
+
 void tick(uint8_t *rdram)
 {
     if (g_files.empty())
         return;
+    std::lock_guard<std::mutex> lock(g_tickMutex);
     static const bool stats = std::getenv("KH2_FILES_STATS") != nullptr;
     struct Timed
     {
@@ -301,5 +312,36 @@ void tick(uint8_t *rdram)
             }
         }
     }
+}
+
+namespace
+{
+// The game's name lookup (FUN_001AE460): a pass first, so a lookup never sees
+// an index without its overrides. The passes each frame alone were a race:
+// a world's index, read and unpacked, could be looked up before the next
+// pass (with the native decompressor it was: the English menu text came out
+// as the Japanese file read through the English font).
+constexpr uint32_t kLookup = 0x001AE460;
+PS2Runtime::RecompiledFunction g_lookup = nullptr;
+void lookupHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx->pc == kLookup)
+        tick(rdram);
+    kh2::callOriginal(g_lookup, rdram, ctx, runtime);
+}
+} // namespace
+
+bool installLookupHook(PS2Runtime &runtime)
+{
+    if (g_files.empty())
+        return false;
+    g_lookup = runtime.lookupFunction(kLookup);
+    if (!g_lookup || !runtime.replaceFunction(kLookup, &lookupHook))
+    {
+        g_lookup = nullptr;
+        std::fprintf(stderr, "[files] could not hook the name lookup: overrides by the frame only\n");
+        return false;
+    }
+    return true;
 }
 } // namespace kh2files

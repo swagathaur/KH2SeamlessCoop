@@ -926,6 +926,9 @@ bool install(PS2Runtime &runtime)
     return true;
 }
 
+std::atomic<bool> g_hold{false};
+void setHold(bool hold) { g_hold.store(hold); }
+
 bool enabled()
 {
     static const bool on = [] {
@@ -1095,7 +1098,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     // left came out in the next one, taken there for our own player; its
     // removal cleared the game's player pointer, and we followed no more.)
     const bool jumpAsked = kh2roomsync::wallMs() - kh2roomsync::lastJumpMs() < 300;
-    const bool settled = st.player.valid && st.control == 0 && !jumping && !jumpAsked && g_ourPlayer == player &&
+    const bool settled = st.player.valid && st.control == 0 && !jumping && !jumpAsked && !g_hold.load() && g_ourPlayer == player &&
                          player && t - g_roomSince >= settleWait;
     {
         // (timings: in the room with control, and settled)

@@ -184,9 +184,11 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 // The card gets this player's own story, and their own place.
                 writeBlock(at(rdram, dst), g_own);
                 std::memcpy(at(rdram, dst + kSaveLocation), g_ownLocation, sizeof(g_ownLocation));
-                for (const auto &[off, v] : g_saveOverrides)
-                    if (off < kSaveSize)
-                        *at(rdram, dst + off) = v;
+                // (Not the session-only party overrides: they are what the
+                // running story (the host's) had in those places, and our
+                // own story was put aside with its own party (coop.cpp puts
+                // the places back before the swap). Written over it, the
+                // host's party went into our save: Sora as a companion.)
                 std::printf("[story] saving: your own story and place go in the save\n");
             }
             else

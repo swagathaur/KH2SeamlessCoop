@@ -117,9 +117,17 @@ void finish(uint8_t *rdram)
             return std::nullopt;
         const uint32_t vt = rd<uint32_t>(env.rdram, player);
         const uint32_t fn = vt && vt < 0x02000000u ? rd<uint32_t>(env.rdram, vt + kVtableAddHp) : 0;
-        const int32_t hp = rd<int32_t>(env.rdram, kh2state::addr::Slot1);
-        if (!fn || hp <= 0)
+        int32_t hp = rd<int32_t>(env.rdram, kh2state::addr::Slot1);
+        if (!fn)
             return std::nullopt;
+        // (At 0 already, set by something other than a hit: the game never
+        // saw the blow, and nothing followed (both players stood at 0 HP
+        // for good). Back to 1, and the last point taken the game's way.)
+        if (hp <= 0)
+        {
+            hp = 1;
+            wr<int32_t>(env.rdram, kh2state::addr::Slot1, hp);
+        }
         return kh2guest::Call{fn, {player, static_cast<uint32_t>(-hp), 0u, 0u}, {}};
     });
     (void)rdram;

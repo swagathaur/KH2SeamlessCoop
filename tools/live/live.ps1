@@ -1,5 +1,6 @@
 # Live headless sessions driven by control files (main.cpp --control).
 #   live.ps1 solo            one game:  scratch\ctl-solo.txt,  logs\live-solo.log,  shots\live-solo
+#   live.ps1 client|p3|host   one of them again (rejoining a running session)
 #   live.ps1 duo             a host and a client joined to it (ctl-host / ctl-client, live-host / live-client)
 # Env LIVE_EXTRA: more arguments for every game (space-separated).
 # Started without waiting: the job runner stays free. Saves: copies of game\mc0 (env LIVE_CLIENT_SAVE for the client's).
@@ -22,6 +23,9 @@ function Start-Live([string]$name, [string]$save, [string[]]$extra) {
 }
 $clientSave = if ($env:LIVE_CLIENT_SAVE) { $env:LIVE_CLIENT_SAVE } else { 'game\mc0' }
 if ($mode -eq 'solo') { Start-Live 'solo' 'game\mc0' @('--name=Solo') }
+elseif ($mode -eq 'client') { Start-Live 'client' $clientSave @("--join=127.0.0.1:$port", '--join-at=2700', '--name=Client') }
+elseif ($mode -eq 'p3') { Start-Live 'p3' $clientSave @("--join=127.0.0.1:$port", '--join-at=2800', '--name=Third') }
+elseif ($mode -eq 'host') { Start-Live 'host' 'game\mc0' @("--host=$port", '--name=Host') }
 else {
   Start-Live 'host' 'game\mc0' @("--host=$port", '--name=Host')
   Start-Sleep 3

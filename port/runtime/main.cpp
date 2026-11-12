@@ -1188,6 +1188,15 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "hurt")
+        {
+            // hurt N: our player takes N damage the game's way (its add_hp,
+            // as an enemy's hit from another player's game is taken)
+            int n = 0;
+            ls >> n;
+            kh2partner::applyHeal(const_cast<uint8_t *>(ram), -n, 0);
+            say(line);
+        }
         else if (cmd == "profile")
         {
             // profile on|off: the sampling profiler (--profile) records or not

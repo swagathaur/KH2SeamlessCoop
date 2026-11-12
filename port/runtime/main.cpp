@@ -1213,9 +1213,15 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             ls >> form;
             uint32_t player = 0;
             std::memcpy(&player, ram + 0x0034E948u, 4);
-            if (player)
+            // (As the game's Drive command: no drive from a form, nor while a
+            // drive or revert is under way; only Revert then.)
+            const bool inForm = ram[0x0032F054u] != 0; // (the form we are in: 0 none)
+            uint32_t task = 0;
+            std::memcpy(&task, ram + 0x00351184u, 4);
+            const bool refused = task != 0 || (form != 0 && inForm);
+            if (player && !refused)
                 kh2guest::postCall(kh2guest::Call{0x001B6B10u, {player, form}, {}});
-            say(line + (player ? "" : " (no player)"));
+            say(line + (!player ? " (no player)" : refused ? " (refused: a form is on or changing)" : ""));
         }
         else if (cmd == "avatarcast")
         {

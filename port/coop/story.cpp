@@ -419,6 +419,12 @@ void setReturnPlace(const Place &p)
     g_return = p;
 }
 
+bool hostReady()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_hostFull;
+}
+
 bool end(uint8_t *rdram, Place &back)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

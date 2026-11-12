@@ -42,6 +42,8 @@ void onChunk(const std::vector<uint8_t> &data);
 bool clientTick(uint8_t *rdram, bool settle, bool mayStart);
 // The host's story is in use.
 bool active();
+// Client: the host's story is all here, so clientTick would start it now.
+bool hostReady();
 
 struct Place
 {

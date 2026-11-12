@@ -250,6 +250,11 @@ void encodeScene(const kh2state::State &st, uint8_t (&out)[kSceneSize])
 void endStory(uint8_t *ram)
 {
     kh2story::Place back;
+    // (The party places left out for the avatars are put back in the save
+    // they came from, before it is swapped: kept over the swap, the host's
+    // story's party bytes went into our own save when the session ended.)
+    if (kh2story::active())
+        kh2partner::keepParty(ram, 0, -1);
     if (kh2story::end(ram, back))
     {
         addLog("back in your own story");
@@ -312,6 +317,9 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     const bool inGame = me.player.valid && me.now.world != 0 && me.now.world != 0xFF;
     // (Not while we fight: a fight this game started on its own runs on its
     // own story flags until it is over.)
+    // (As at the end: our own save's party back before it is put aside.)
+    if (!kh2story::active() && inGame && me.control == 0 && !jumping && kh2story::hostReady())
+        kh2partner::keepParty(ram, 0, -1);
     if (kh2story::clientTick(ram, inGame && me.control == 0 && !jumping && me.battle == 0,
                              inGame && me.control == 0 && !jumping))
     {

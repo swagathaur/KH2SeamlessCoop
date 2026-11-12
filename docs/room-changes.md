@@ -113,6 +113,25 @@ It made two races show:
   we were in a form: the room's way was used, and with both players in
   Valor the client crashed again. Enemy reads now wait for our player.
 
+## Waits taken out (crash guards that a fix made unneeded)
+
+Each was put in against a crash; each crash had since been fixed at its
+cause, and each was tested without the wait before it went.
+
+- **The 1.5 s settle before avatars** (in from the first avatar commit,
+  with no reason given): 0 since the room-change work; avatars come at
+  control. The races it hid are guarded by what causes them: no avatar
+  begun while a map jump is asked for or starting (`lastJumpMs`) or while
+  the party refresh's reload is due (`setHold`).
+- **Our Drive greyed 2.5 s after each avatar's making**: a drive then took
+  the new player object's leftovers; the making now puts back the player's
+  own block (puppets.cpp). Tested with `KH2_TEST_DRIVE_AFTER_MS=0`: each
+  player drives the frame after (or while) an avatar is made, about 40
+  times, both at once: clean. (`KH2_DRIVE_HOLD_MS=n` puts it back.)
+- **Avatars waiting 1.5 s after our drive (3 s after its clear)**: only the
+  drive task itself is waited for now (`KH2_DRIVE_AFTER_MS=n` for the old).
+- **kh2formcache's 300 ms before a look is ready** (see above).
+
 ## Tried and left off
 
 - **Keeping a worn form look through the room change**

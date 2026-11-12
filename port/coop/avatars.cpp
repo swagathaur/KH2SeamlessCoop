@@ -1048,16 +1048,23 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
         if (inRam(rec))
             entry = rd<uint32_t>(rdram, rec) & 0xFFFF;
         const bool ourForm = entry && kh2partner::formBaseLook(rdram, uint16_t(entry)) != 0;
-        // While an avatar is being made, and for 2.5 s after, our Drive
-        // waits (greyed, as the game greys it while a form is on): a drive
-        // started then took the new player-class object's leftovers for our
-        // own (our form player's motion called through nothing).
+        // (Our Drive was greyed while an avatar was being made and for 2.5 s
+        // after: a drive started then took the new player-class object's
+        // leftovers for our own. The making now puts back the player's own
+        // block (0x01C5FFE0-0x01C60040, puppets.cpp), and drives started the
+        // frame after each making, or while it was under way, ran clean in
+        // about 40 tries, both sides at once. KH2_DRIVE_HOLD_MS=n: the wait
+        // back, for tests.)
         bool pendingNow = false;
         for (auto &[id, s2] : g_states)
             pendingNow = pendingNow || s2.pending;
         if (pendingNow)
             g_avatarMadeAt = nowMs();
-        const bool hold = !ourForm && !task && nowMs() - g_avatarMadeAt.load() < 2500;
+        static const int64_t holdMs = [] { // (KH2_DRIVE_HOLD_MS: tests)
+            const char *e = std::getenv("KH2_DRIVE_HOLD_MS");
+            return e ? int64_t(std::atoi(e)) : int64_t(0);
+        }();
+        const bool hold = !ourForm && !task && nowMs() - g_avatarMadeAt.load() < holdMs;
         if (hold && !(flag & 1))
         {
             flag |= 1u;
@@ -1125,13 +1132,49 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
     static int64_t lastTaskMs = -100000; // (and a moment after: the new player's first frames)
     if (driveTask)
         lastTaskMs = nowMs();
-    const bool ourDriveBusy = driveTask || nowMs() - lastTaskMs < 1500 || nowMs() - driveClearAt < 3000;
+    // (It also held for 1.5 s after the task and 3 s after its clear; the
+    // task itself is what matters: avatars made the frame it ended, both
+    // players driving at once, ran clean. KH2_DRIVE_AFTER_MS=n puts the
+    // windows back, for tests.)
+    static const int64_t afterTaskMs = [] {
+        const char *e = std::getenv("KH2_DRIVE_AFTER_MS");
+        return e ? int64_t(std::atoi(e)) : int64_t(0);
+    }();
+    static const int64_t afterClearMs = afterTaskMs * 2;
+    const bool ourDriveBusy = driveTask || nowMs() - lastTaskMs < afterTaskMs || nowMs() - driveClearAt < afterClearMs;
     const bool cutscene = st.control == 3;
     bool ourInForm = false;
     if (g_ourPlayer && live(rdram, g_ourPlayer))
     {
         const uint32_t rec = rd<uint32_t>(rdram, g_ourPlayer + kh2state::addr::ObjEntry);
         ourInForm = inRam(rec) && kh2partner::formBaseLook(rdram, uint16_t(rd<uint32_t>(rdram, rec) & 0xFFFF)) != 0;
+    }
+    // (Tests, KH2_TEST_DRIVE_AFTER_MS=n: n ms after each avatar is made, our
+    // player drives into Valor, and reverts 3 s later: is a drive right after
+    // an avatar's making safe?)
+    {
+        static const int64_t testAfter = [] {
+            const char *e = std::getenv("KH2_TEST_DRIVE_AFTER_MS");
+            return e ? int64_t(std::atoi(e)) : int64_t(-1);
+        }();
+        static int64_t lastMade = 0, droveAt = 0;
+        const int64_t made = g_avatarMadeAt.load(), nowT = nowMs();
+        if (testAfter >= 0 && g_ourPlayer && made != lastMade && nowT - made >= testAfter && !droveAt)
+        {
+            lastMade = made;
+            droveAt = nowT;
+            std::printf("[avatars] test: our drive %lld ms after an avatar was made\n", static_cast<long long>(nowT - made));
+            std::fflush(stdout);
+            kh2guest::postCall(kh2guest::Call{0x001B6B10u, {g_ourPlayer, 1u}, {}});
+        }
+        else if (droveAt && nowT - droveAt > 3000)
+        {
+            droveAt = 0;
+            const uint32_t pp = rd<uint32_t>(rdram, kh2state::addr::PlayerPtr);
+            if (pp)
+                kh2guest::postCall(kh2guest::Call{0x001B6B10u, {pp, 0u}, {}});
+            lastMade = g_avatarMadeAt.load();
+        }
     }
     // (Diagnostics, KH2_FORM_DIAG=1: our player's motion helper (motion
     // +0xC: the object whose vtable +0x18 FUN_0017FE10 calls) and its

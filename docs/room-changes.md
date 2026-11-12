@@ -68,8 +68,8 @@ compared (all the files that finish in one go: the same bytes).
 |---|---|---|
 | Land of Dragons room, control | 1.1-1.2 s | 0.66-0.81 s |
 | Land of Dragons, all avatars seen | 1.24 s | about 1.0 s |
-| a drive form look read | 0.65-0.75 s | 0.3 s (formcache's floor) |
-| Halloween Town, 3 players, 2 in forms, all seen | 3.6 s | 1.9 s |
+| a drive form look read | 0.65-0.75 s | 0.07-0.13 s (no 300 ms floor) |
+| Halloween Town, 3 players, 2 in forms, all seen | 3.6 s | 1.6-1.75 s |
 
 It made two races show:
 - The English files are put into the game's file indexes by a pass each

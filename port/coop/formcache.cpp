@@ -92,6 +92,7 @@ struct Batch
     int64_t askedMs = 0, wantedMs = 0, usedMs = 0, flushedMs = 0;
     bool failed = false; // never came in: the base look instead
     bool ready = false;  // all its files were in once
+    int readyFiles = 0;  // how many it had then
 };
 struct Block
 {
@@ -479,15 +480,31 @@ Look want(uint8_t *rdram, uint16_t entry)
             g_batches.erase(it);
             break;
         }
+        if (b.ready && files > b.readyFiles)
+        {
+            std::printf("[formcache] look %04X had %d file(s) when ready, %d now\n", entry, b.readyFiles, files);
+            std::fflush(stdout);
+            b.readyFiles = files;
+        }
         if (b.ready && in != files)
             b.ready = false;
-        if ((b.ready && files) || (files && in == files && now - b.askedMs > 300))
+        // Ready as soon as all its files are in and placed. (It waited 300 ms
+        // at least, for no reason found: the look's one read request makes
+        // all its file headers at once, and in tests every look had all its
+        // files when first ready; "had N file(s) when ready" would say
+        // otherwise. KH2_FORMCACHE_READY_MS=n puts a floor back, for tests.)
+        static const int64_t readyFloor = [] {
+            const char *e = std::getenv("KH2_FORMCACHE_READY_MS");
+            return e ? int64_t(std::atoi(e)) : int64_t(0);
+        }();
+        if ((b.ready && files) || (files && in == files && now - b.askedMs >= readyFloor))
         {
             if (!b.ready)
             {
-                std::printf("[formcache] look %04X ready, %lld ms after it was asked\n", entry,
-                            static_cast<long long>(now - b.askedMs));
+                std::printf("[formcache] look %04X ready, %lld ms after it was asked (%d file(s))\n", entry,
+                            static_cast<long long>(now - b.askedMs), files);
                 std::fflush(stdout);
+                b.readyFiles = files;
             }
             b.ready = true;
             return Look::Ready;

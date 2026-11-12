@@ -1249,9 +1249,14 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             kh2net::PlayerState ps;
             kh2downed::Other o;
             o.name = r.name.empty() ? "Player " + std::to_string(id + 1) : r.name;
+            // (In the session: their game is sending. Not only while in the
+            // world: one loading a room for a moment counted as gone, and two
+            // players down while the third changed rooms got a Game Over
+            // with the third standing; one hit hard while the others loaded
+            // was not protected at all.)
             if (r.interp.sample(t, ps) && t - r.interp.lastArrival() < 5.0)
             {
-                o.present = (ps.flags & 1) != 0;
+                o.present = true;
                 o.downed = (ps.flags & 2) != 0;
             }
             others.push_back(o);

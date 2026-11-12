@@ -10,7 +10,7 @@ while [ $SECONDS -lt $end ]; do
   step=$((step+1)); echo $step > scratch/soak.step
   case $((RANDOM % ${SOAK_KINDS:-8})) in
     0|1) r=${rooms[$((RANDOM % ${#rooms[@]}))]}; act="host to $r"
-         tools/live/ctl.sh host --timeout 40 "warp $r" "wait $((200 + RANDOM % 500))" >/dev/null;;
+         tools/live/ctl.sh host --timeout 40 "warp $r" "wait $((${SOAK_MINWAIT:-200} + RANDOM % 500))" >/dev/null;;
     2) g=${games[$((RANDOM % ${#games[@]}))]}; f=$((RANDOM % 7)); act="$g drive $f"
        tools/live/ctl.sh $g --timeout 20 "drive $f" "wait $((60 + RANDOM % 200))" >/dev/null;;
     3) g=${games[$((RANDOM % ${#games[@]}))]}; act="$g attacks"

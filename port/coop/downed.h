@@ -27,7 +27,7 @@ constexpr double kGetUpSeconds = 30.0;
 struct Other
 {
     std::string name;
-    bool present = false; // in the world (not loading, not in a menu screen)
+    bool present = false; // in the session (their game is sending; also while it loads a room)
     bool downed = false;
 };
 

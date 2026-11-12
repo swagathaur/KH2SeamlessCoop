@@ -1281,7 +1281,12 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.object = 0;
             s.prepared = false;
         }
-        uint16_t want = r.model ? r.model : 0x0054;
+        // (Their look not known (a state sent while their room loads has no
+        // player): the one they have here stays, and none is made yet. With
+        // Sora's own look in its place, a Halloween Town avatar was torn
+        // down and made again, and 0054's files, which that world has not,
+        // were read: 3.9 MB, ahead of the drive forms' looks wanted then.)
+        uint16_t want = r.model ? r.model : s.object ? s.entry : 0x0054;
         static const uint16_t testEntry = [] { // testing: KH2_TEST_AVATAR_ENTRY=0054 (hex)
             const char *e = std::getenv("KH2_TEST_AVATAR_ENTRY");
             return e ? uint16_t(std::strtoul(e, nullptr, 16)) : uint16_t(0);
@@ -1490,6 +1495,11 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             if (s.pending || !settled)
             {
                 waits(s.pending ? "its making is under way" : "not settled");
+                continue;
+            }
+            if (!r.model)
+            {
+                waits("their look is not known yet");
                 continue;
             }
             if (ourDriveBusy)

@@ -15,7 +15,9 @@
 
 #include "cd_callback.h"
 
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -51,8 +53,25 @@ void cdCallback(uint8_t *, R5900Context *ctx, PS2Runtime *)
 void cdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t lsn = getRegU32(ctx, 4), sectors = getRegU32(ctx, 5), buf = getRegU32(ctx, 6);
+    const auto t0 = std::chrono::steady_clock::now();
     kh2::callOriginal(g_read, rdram, ctx, runtime); // reads synchronously, sets v0 and pc = ra
     ++g_reads;
+    {
+        // (KH2_CD_LOG=1: each read, when and how long it took on our side)
+        static const bool log = [] {
+            const char *e = std::getenv("KH2_CD_LOG");
+            return e && *e == '1';
+        }();
+        if (log)
+        {
+            using namespace std::chrono;
+            const auto t1 = steady_clock::now();
+            std::printf("[kh2-cd] read lsn %u, %u sectors at %lld ms, took %lld us\n", lsn, sectors,
+                        static_cast<long long>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count()),
+                        static_cast<long long>(duration_cast<microseconds>(t1 - t0).count()));
+            std::fflush(stdout);
+        }
+    }
     if (getRegU32(ctx, 2) == 0 && g_failed++ < 16)
         std::printf("[kh2-cd] sceCdRead(lsn %u, %u sectors, buf 0x%08X) failed\n", lsn, sectors, buf);
     const uint32_t callback = g_callback;

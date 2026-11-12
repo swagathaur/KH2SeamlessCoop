@@ -104,6 +104,10 @@ void setReduceParty(bool on, int players);
 // A world's party places past `keep` are emptied (avatars; keep < 0: all
 // given back).
 void keepParty(uint8_t *rdram, uint8_t world, int keep);
+// A save is being loaded over the running one (a Game Over's Load Game, the
+// title): the places left out of the old one are forgotten, not put back
+// into the new one (whose party is its own). Taken again from it next frame.
+void forgetTrims();
 // A drive form's look -> the character's own (0: not a form's).
 uint16_t formBaseLook(const uint8_t *rdram, uint16_t model);
 void applyHeal(uint8_t *rdram, int32_t hp, int32_t mp);

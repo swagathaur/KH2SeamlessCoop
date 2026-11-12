@@ -1604,6 +1604,17 @@ void keepParty(uint8_t *rdram, uint8_t world, int keep)
     if (changed || g_trimmed.size() != before)
         publishFill();
 }
+void forgetTrims()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_trimmed.empty())
+        return;
+    std::printf("[partner] a save is loaded: the %zu party place(s) left out of the old one are forgotten\n",
+                g_trimmed.size());
+    std::fflush(stdout);
+    g_trimmed.clear();
+    publishFill();
+}
 void setReduceParty(bool on, int players)
 {
     g_reduceTo = std::min(players, 2);

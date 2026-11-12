@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "guest_call.h"
+#include "partners.h"
 #include "hle_call.h"
 #include "ps2_runtime.h"
 
@@ -159,6 +160,15 @@ void memcpyHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t dst = getRegU32(ctx, 4), src = getRegU32(ctx, 5);
         const bool saving = (src & 0x1FFFFFFFu) == kSave, loading = (dst & 0x1FFFFFFFu) == kSave;
         std::unique_lock<std::mutex> lock(g_mutex);
+        if (loading && !g_active)
+        {
+            // (A save loaded over ours: the party places left out of ours
+            // are not to be put back into it. Outside our lock: the partners
+            // call setSaveOverrides.)
+            lock.unlock();
+            kh2partner::forgetTrims();
+            lock.lock();
+        }
         if (saving && !g_active && !g_saveOverrides.empty())
         {
             const auto overrides = g_saveOverrides;

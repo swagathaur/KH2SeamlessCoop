@@ -24,6 +24,7 @@ constexpr uint32_t kFailed = 0x001BB768;     // YS::MISSION::Failed()
 // YS::MISSION::Complete(int) (trap_mission_complete's: the slow-motion finish,
 // the results, the reward).
 constexpr uint32_t kComplete = 0x001BB6D0;
+constexpr uint32_t kTrapComplete = 0x0019FFE8; // YS::trap_mission_complete(BD_VALUE*): MISSION::Complete(v[0])
 std::atomic<uint32_t> g_currentId{0xFFFFFFFFu}; // the mission started last (none: ~0)
 std::atomic<bool> g_currentDone{false};          // ... and it was completed here
 std::atomic<bool> g_completedOut{false};          // host: to send
@@ -251,7 +252,6 @@ void onHostFailed(uint8_t *rdram)
 
 bool onComplete(uint32_t arg, bool viaTrap)
 {
-    (void)viaTrap;
     // (Tests, KH2_TEST_NO_OWN_COMPLETE=1: a client's own completion does not
     // happen, as when its copies of the enemies were not its mission's: only
     // the host's completes it.)
@@ -266,7 +266,15 @@ bool onComplete(uint32_t arg, bool viaTrap)
         return false;
     }
     const bool again = g_currentDone.exchange(true);
-    std::printf("[mission] mission %u completed (%u)%s\n", g_currentId.load(), arg, again ? " again" : "");
+    if (again && viaTrap)
+    {
+        // (Completed already: by the host's, a moment before our own came.
+        // Not twice: the finish and the reward once.)
+        std::printf("[mission] mission %u completed already: our own completion left out\n", g_currentId.load());
+        std::fflush(stdout);
+        return false;
+    }
+    std::printf("[mission] mission %u completed (%u)\n", g_currentId.load(), arg);
     std::fflush(stdout);
     if (!g_following.load() && !again)
     {
@@ -313,9 +321,11 @@ void onHostCompleted(uint8_t *rdram, uint32_t id, uint32_t arg)
         }
         if (g_currentId.load() != id || g_currentDone.load() || !inRam(rd<uint32_t>(env.rdram, kMissionPtr)))
             return std::nullopt;
+        // (Through trap_mission_complete, as the room's program does: the
+        // avatars go for the mission's ending there, avatars.cpp.)
         g_applyingHost = true;
-        onComplete(arg, false);
-        return kh2guest::Call{kComplete, {arg}, {}};
+        std::memcpy(env.host(env.scratch), &arg, 4);
+        return kh2guest::Call{kTrapComplete, {env.scratch}, {}};
     });
 }
 } // namespace kh2mission

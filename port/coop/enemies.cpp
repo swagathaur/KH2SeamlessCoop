@@ -710,7 +710,18 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
     std::vector<kh2puppets::Override> overrides;
     std::lock_guard<std::mutex> lock(g_mutex);
     const uint16_t key = uint16_t(world << 8 | room);
-    if (key != g_followRoom)
+    // (A map jump into the same room (a mission's start, a battle joined) is
+    // a new room too: its objects are made anew, our spawn list runs again.
+    // Taken for the same room, the mission's group was left to the host to
+    // make and made here as copies, which our mission did not count: it
+    // never ended.)
+    // (Taken when the jump's load is over, at control: the old room's
+    // objects are gone then and the new ones made.)
+    static bool wasJumping = false;
+    const bool jumping = rd<uint32_t>(rdram, kh2state::addr::MapJumpTask) != 0;
+    const bool reloaded = wasJumping && !jumping;
+    wasJumping = jumping;
+    if (key != g_followRoom || reloaded)
     {
         g_follow.clear();
         g_killed.clear();

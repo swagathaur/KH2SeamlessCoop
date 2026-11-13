@@ -32,4 +32,10 @@ bool takeFailed();
 // Client.
 void onHostState(uint8_t *rdram, const std::vector<uint8_t> &data, uint8_t world, uint8_t room, uint16_t battle);
 void onHostFailed(uint8_t *rdram);
+// trap_mission_complete (avatars.cpp hooks it): false = leave it out.
+bool onComplete(uint32_t arg, bool viaTrap);
+// Host: its mission was completed since the last call (its id, the argument).
+bool takeCompleted(uint32_t &id, uint32_t &arg);
+// Client: the host's was; ours (the same mission) completes with it.
+void onHostCompleted(uint8_t *rdram, uint32_t id, uint32_t arg);
 } // namespace kh2mission

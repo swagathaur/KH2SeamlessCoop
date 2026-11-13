@@ -1011,6 +1011,14 @@ void onOwnKill(uint32_t object)
             f.ownKill = true;
 }
 
+void testKill(const uint8_t *rdram, int count)
+{
+    int n = 0;
+    for (const Local &e : scan(rdram))
+        if (count <= 0 || n++ < count)
+            postAddHp(e.object, -0x7FFFFFF, 2);
+}
+
 bool followed(uint32_t object, int16_t &serial, uint16_t &entry)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

@@ -656,6 +656,15 @@ void makeSession()
             kh2mission::onHostState(const_cast<uint8_t *>(g_rdram), data, st.now.world, st.now.room, st.now.battle);
             return;
         }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::MissionComplete) && !g_session->isHost() && g_rdram &&
+            kh2story::active() && data.size() == 8)
+        {
+            uint32_t mid = 0, marg = 0;
+            std::memcpy(&mid, data.data(), 4);
+            std::memcpy(&marg, data.data() + 4, 4);
+            kh2mission::onHostCompleted(const_cast<uint8_t *>(g_rdram), mid, marg);
+            return;
+        }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::MissionFailed) && !g_session->isHost() && g_rdram &&
             kh2story::active())
         {
@@ -1240,6 +1249,14 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
     {
         if (kh2mission::takeFailed())
             g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::MissionFailed), {});
+        uint32_t mid = 0, marg = 0;
+        if (kh2mission::takeCompleted(mid, marg))
+        {
+            std::vector<uint8_t> d(8);
+            std::memcpy(d.data(), &mid, 4);
+            std::memcpy(d.data() + 4, &marg, 4);
+            g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::MissionComplete), d);
+        }
         if (guestFrame % 10 == 0)
         {
             const kh2state::State st = kh2state::read(ram);

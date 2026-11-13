@@ -60,7 +60,15 @@ void install(PS2Runtime &runtime)
 
 const char *activeName()
 {
-    const OverlayInfo *info = g_active.load(std::memory_order_acquire);
+    // (The one whose signature is in the arena now. The last one called into
+    // stays "active" after the arena has been given over to other data (the
+    // movie overlay, gone after its movie, while a menu's work used the
+    // arena: the movie code polled its stream count there, read the menu's
+    // 1.0f as a stream starting, and the game was taken for playing a movie:
+    // no HUD, no input, START the movie menu).)
+    if (!g_rdram)
+        return "none";
+    const OverlayInfo *info = identify();
     return info ? info->name : "none";
 }
 

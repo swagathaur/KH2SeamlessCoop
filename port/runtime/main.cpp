@@ -1188,6 +1188,14 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
             kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
             say(line);
         }
+        else if (cmd == "kill")
+        {
+            // kill [N]: N of the enemies here (all) killed the game's way
+            int n = 0;
+            ls >> n;
+            kh2enemies::testKill(ram, n);
+            say(line);
+        }
         else if (cmd == "hurt")
         {
             // hurt N: our player takes N damage the game's way (its add_hp,

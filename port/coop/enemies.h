@@ -49,6 +49,8 @@ bool install(PS2Runtime &runtime);
 
 // Enemies and bosses in the object list that came from a spawn entry.
 std::vector<Local> scan(const uint8_t *rdram);
+// Tests: the first `count` enemies here (all: 0) killed the game's way (add_hp).
+void testKill(const uint8_t *rdram, int count);
 
 // Host: what to send this frame.
 kh2net::EnemyStates snapshot(const uint8_t *rdram, uint8_t world, uint8_t room, uint32_t tick);

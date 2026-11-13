@@ -16,7 +16,9 @@ up)
   extra=""; for kv in $LIVE_ENV; do extra+="\$env:${kv%%=*} = \"${kv#*=}\"\n"; done # (LIVE_ENV="NAME=VALUE ...")
   printf 'Set-Location "$PSScriptRoot\\..\\.."\n$env:KH2_AVATARS = "1"\n$env:KH2_FAST_ROOMS = "%s"\n$env:KH2_AVATAR_BASE_IN_FORM = "%s"\n%bpowershell -NoProfile -ExecutionPolicy Bypass -File tools\\live\\live.ps1 duo\n' "${2:-1}" "${3:-1}" "$extra" > .agent/jobs/$n-live.ps1
   for i in $(seq 90); do [ -f .agent/jobs/$n-live.exit ] && break; sleep 1; done
-  load=("wait 1700" "press DOWN" "wait 40" "press CIRCLE" "wait 160" "press CIRCLE" "wait 150" "press UP" "wait 30" "press CIRCLE" "wait 150" "press CIRCLE" "wait 400")
+  # (LIVE_SLOT=0: the save in slot 00, the Twilight Town (Roxas) one; default the Land of Dragons one)
+  if [ "${LIVE_SLOT:-1}" = 0 ]; then slot=("wait 30"); else slot=("press UP" "wait 30"); fi
+  load=("wait 1700" "press DOWN" "wait 40" "press CIRCLE" "wait 160" "press CIRCLE" "wait 150" "${slot[@]}" "press CIRCLE" "wait 150" "press CIRCLE" "wait 400")
   (tools/live/ctl.sh host --timeout 150 "${load[@]}" >/dev/null) & (tools/live/ctl.sh client --timeout 150 "${load[@]}" >/dev/null); wait
   tools/live/ctl.sh client --timeout 20 "wait 300" "state" | tail -1 | cut -c1-140
   ;;

@@ -21,6 +21,14 @@ constexpr uint32_t kGauges = 4, kGaugeOn = 0x19C, kGaugeMax = 0x1A8, kGaugeNow =
 constexpr uint32_t kCombos = 2, kComboOn = 0x26C, kComboValue = 0x298, kComboStride = 0x40;
 constexpr uint32_t kTrapFailed = 0x001A0018; // YS::trap_mission_failed(BD_VALUE*) -> MISSION::Failed()
 constexpr uint32_t kFailed = 0x001BB768;     // YS::MISSION::Failed()
+// YS::MISSION::Complete(int) (trap_mission_complete's: the slow-motion finish,
+// the results, the reward).
+constexpr uint32_t kComplete = 0x001BB6D0;
+std::atomic<uint32_t> g_currentId{0xFFFFFFFFu}; // the mission started last (none: ~0)
+std::atomic<bool> g_currentDone{false};          // ... and it was completed here
+std::atomic<bool> g_completedOut{false};          // host: to send
+std::atomic<uint32_t> g_completedId{0}, g_completedArg{0};
+std::atomic<bool> g_applyingHost{false}; // (the host's completion being applied here)
 constexpr uint8_t kVersion = 1;
 
 PS2Runtime::RecompiledFunction g_trapFailed = nullptr;
@@ -70,6 +78,8 @@ void startHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (inRam(name))
         std::memcpy(text, rdram + name, 32);
     kh2::callOriginal(g_start, rdram, ctx, runtime);
+    g_currentId = id;
+    g_currentDone = false;
     std::printf("[mission] started: %u \"%s\"\n", id, text);
     std::fflush(stdout);
 }
@@ -235,6 +245,77 @@ void onHostFailed(uint8_t *rdram)
             return std::nullopt;
         }
         return kh2guest::Call{kFailed, {}, {}};
+    });
+}
+
+
+bool onComplete(uint32_t arg, bool viaTrap)
+{
+    (void)viaTrap;
+    // (Tests, KH2_TEST_NO_OWN_COMPLETE=1: a client's own completion does not
+    // happen, as when its copies of the enemies were not its mission's: only
+    // the host's completes it.)
+    static const bool noOwn = [] {
+        const char *e = std::getenv("KH2_TEST_NO_OWN_COMPLETE");
+        return e && *e == '1';
+    }();
+    if (noOwn && g_following.load() && !g_applyingHost.load())
+    {
+        std::printf("[mission] test: our own completion of mission %u left out\n", g_currentId.load());
+        std::fflush(stdout);
+        return false;
+    }
+    const bool again = g_currentDone.exchange(true);
+    std::printf("[mission] mission %u completed (%u)%s\n", g_currentId.load(), arg, again ? " again" : "");
+    std::fflush(stdout);
+    if (!g_following.load() && !again)
+    {
+        g_completedId = g_currentId.load();
+        g_completedArg = arg;
+        g_completedOut = true;
+    }
+    return true;
+}
+
+bool takeCompleted(uint32_t &id, uint32_t &arg)
+{
+    if (!g_completedOut.exchange(false))
+        return false;
+    id = g_completedId.load();
+    arg = g_completedArg.load();
+    return true;
+}
+
+void onHostCompleted(uint8_t *rdram, uint32_t id, uint32_t arg)
+{
+    // Ours completes with the host's: our copies of its enemies are not always
+    // the ones our mission counts (a group the host's game made, copied here),
+    // and then ours never ended (no finish, no reward). Not twice, nor
+    // another mission than the host's.
+    const uint32_t ours = g_currentId.load();
+    if (ours != id)
+    {
+        std::printf("[mission] the host completed mission %u; ours is %d: nothing to complete\n", id, int(ours));
+        std::fflush(stdout);
+        return;
+    }
+    if (g_currentDone.load())
+        return; // (ours completed on its own)
+    if (!inRam(rd<uint32_t>(rdram, kMissionPtr)))
+        return;
+    std::printf("[mission] the host completed mission %u: ours completes with it\n", id);
+    std::fflush(stdout);
+    kh2guest::post([id, arg](const kh2guest::Env &env, uint32_t, bool first) -> std::optional<kh2guest::Call> {
+        if (!first)
+        {
+            g_applyingHost = false;
+            return std::nullopt;
+        }
+        if (g_currentId.load() != id || g_currentDone.load() || !inRam(rd<uint32_t>(env.rdram, kMissionPtr)))
+            return std::nullopt;
+        g_applyingHost = true;
+        onComplete(arg, false);
+        return kh2guest::Call{kComplete, {arg}, {}};
     });
 }
 } // namespace kh2mission

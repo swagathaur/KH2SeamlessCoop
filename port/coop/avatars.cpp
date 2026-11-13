@@ -1,5 +1,6 @@
 #include "avatars.h"
 #include "roomsync.h"
+#include "mission.h"
 
 #include <algorithm>
 #include <cmath>
@@ -465,6 +466,16 @@ void missionCompleteHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (ctx->pc == kMissionComplete)
     {
+        // (Shared missions, mission.h: noted, and left out in tests.)
+        const uint32_t v = getRegU32(ctx, 4);
+        uint32_t arg = 0;
+        if (v >= 0x00100000u && v < 0x02000000u)
+            std::memcpy(&arg, rdram + v, 4);
+        if (!kh2mission::onComplete(arg, true))
+        {
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
         g_missionEndAt = nowMs();
         std::printf("[avatars] the mission is complete: avatars away until its ending is over\n");
         std::fflush(stdout);

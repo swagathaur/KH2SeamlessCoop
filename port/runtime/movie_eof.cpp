@@ -92,6 +92,19 @@ void poll(PS2Runtime &runtime)
             std::printf("[kh2-movie] stream %u: stop requested (%s)\n", g_streams, g_skip ? "--skip-movies" : "skipped");
         }
     }
+    // (Not a count a movie can have: the arena holds something else now, with
+    // the overlay's signature word left as it was. A movie's PSS is well under
+    // 2 GB; a menu's 1.0f there read as 0x3F80000000000000 bytes "started" a
+    // stream, and the game was taken for playing one: no HUD, no input.)
+    if (!g_streaming && remaining > 0x7FFFFFFFull)
+    {
+        static unsigned told = 0;
+        if (told++ < 5)
+            std::printf("[kh2-movie] the movie's stream count reads %llu: not a movie's (the arena holds other data); "
+                        "ignored\n",
+                        (unsigned long long)remaining);
+        return;
+    }
     if (!g_streaming && remaining != 0)
     {
         g_streaming = true;

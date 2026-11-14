@@ -37,6 +37,17 @@ client playing in the host's story. Memory stayed flat (about 2.9 GB each).
   (the shared story, a loaded save): the wrong party went into a save.
 - A client saving in the host's story wrote the host's party places into
   its own save.
+- A menu a scene puts up on a client ("Party Members have been switched"
+  after Roxas becomes Sora) was closed by the client following the host's
+  next room (the host's game queues that jump under its own menu): the
+  menu lost its cursor and took no buttons. A scene's menu is now the
+  player's to close; only the pause menu is closed for them.
+- A client's copies of the host's enemies were made from a blank spawn
+  record: enemies whose arguments choose what they are (TT36_WORK_FIGURE's
+  N_EX610_BTL2) came without a battle sheet, never followed or killed (the
+  host's later waves missing on the client). Copies are made from the
+  room's own record of that serial now; a serial that leaves the host's
+  list and comes back is taken as a new enemy.
 
 ## Not covered
 

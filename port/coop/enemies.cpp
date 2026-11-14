@@ -83,6 +83,13 @@ std::map<uint32_t, double> g_killed;  // objects we finished off this room (when
 // host died there, and our game's own of that serial (made when we walked
 // into the same trigger later) dies too, rather than being fought alone.
 std::map<int16_t, uint16_t> g_hostSeen;
+// A wave fight's next group can take the serials of the last one's (its
+// spawn list numbers each group's enemies alike): a serial gone from the
+// host's list and back is a new enemy. Ours of the old one (its dying body,
+// the copy we made) are of the past then: g_absent holds serials gone on
+// the host, g_old the objects of an earlier enemy of a serial.
+std::set<int16_t> g_absent;
+std::set<uint32_t> g_old;
 // Copies we make of host enemies our game has not made (a wave the host set
 // off): by serial.
 struct Made
@@ -635,7 +642,7 @@ static void makeMissing(uint8_t *rdram, const std::vector<Local> &locals, double
             continue;
         bool have = false;
         for (const Local &e : locals)
-            have = have || (e.serial == h.serial && e.entry == h.entry);
+            have = have || (e.serial == h.serial && e.entry == h.entry && !g_old.count(e.object));
         if (have)
             continue;
         Made &m = g_made[h.serial];
@@ -726,6 +733,8 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         g_follow.clear();
         g_killed.clear();
         g_hostSeen.clear();
+        g_absent.clear();
+        g_old.clear();
         g_made.clear();
         g_preloaded.clear();
         g_cached.clear();
@@ -749,12 +758,52 @@ std::vector<Damage> clientTick(uint8_t *rdram, uint8_t world, uint8_t room, doub
         kh2puppets::setOverrides({});
         return damage;
     }
-    for (const kh2net::EnemyState &x : g_host.enemies)
-        g_hostSeen[x.serial] = x.entry;
     const std::vector<Local> locals = scan(rdram);
+    for (auto it = g_old.begin(); it != g_old.end();)
+    {
+        bool here = false;
+        for (const Local &e : locals)
+            here = here || e.object == *it;
+        it = here ? std::next(it) : g_old.erase(it); // (gone: its place can be a new object's)
+    }
+    for (const auto &[serial, entry] : g_hostSeen)
+    {
+        bool there = false;
+        for (const kh2net::EnemyState &x : g_host.enemies)
+            there = there || x.serial == serial;
+        if (!there)
+            g_absent.insert(serial);
+    }
+    for (const kh2net::EnemyState &x : g_host.enemies)
+    {
+        if (x.hp > 0 && g_absent.erase(x.serial))
+        {
+            // Back on the host after it had gone: the next wave's. What we
+            // have of that serial is the last one's; its body goes now and
+            // the new one is made (makeMissing) or followed anew.
+            std::printf("[enemies] the host's %04X #%d is a new one (the serial came back)\n", x.entry, x.serial);
+            std::fflush(stdout);
+            g_made.erase(x.serial);
+            for (const Local &e : locals)
+                if (e.serial == x.serial && !g_old.count(e.object))
+                {
+                    auto f = g_follow.find(e.serial);
+                    if (f != g_follow.end() && f->second.object == e.object && !f->second.killed)
+                        continue; // (alive here: ours is the new one, as the game made it again)
+                    g_old.insert(e.object);
+                    removeBody(e.object);
+                }
+            if (auto f = g_follow.find(x.serial); f != g_follow.end() && g_old.count(f->second.object))
+                g_follow.erase(f);
+        }
+        g_hostSeen[x.serial] = x.entry;
+    }
+    makeMissing(rdram, locals, now);
     makeMissing(rdram, locals, now);
     for (const Local &e : locals)
     {
+        if (g_old.count(e.object))
+            continue; // (an earlier enemy of its serial: gone already)
         const kh2net::EnemyState *h = nullptr;
         for (const kh2net::EnemyState &x : g_host.enemies)
             if (x.serial == e.serial && x.entry == e.entry)
@@ -1055,6 +1104,8 @@ void reset()
     g_follow.clear();
     g_killed.clear();
     g_hostSeen.clear();
+    g_absent.clear();
+    g_old.clear();
     g_made.clear();
     g_preloaded.clear();
     g_cached.clear();

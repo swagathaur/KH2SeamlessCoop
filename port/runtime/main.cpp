@@ -1183,9 +1183,13 @@ void controlTick(Harness &h, uint64_t frame, uint64_t scriptFrame)
         }
         else if (cmd == "warp")
         {
-            unsigned w = 0, r = 0, b = 0xFFFF, e = 0xFFFF;
-            ls >> w >> r >> b >> e;
-            kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e));
+            // warp W R [BATTLE [EVENT [MAP]]] (programs; left out: the save's)
+            unsigned w = 0, r = 0, b = 0xFFFF, e = 0xFFFF, m = 0xFFFF;
+            ls >> w >> r;
+            for (unsigned *v : {&b, &e, &m}) // (a failed read would make one 0)
+                if (unsigned x; ls >> x)
+                    *v = x;
+            kh2coop::requestWarp(uint8_t(w), uint8_t(r), 0, uint16_t(b), uint16_t(e), uint16_t(m));
             say(line);
         }
         else if (cmd == "kill")

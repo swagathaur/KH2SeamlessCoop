@@ -8,8 +8,10 @@
 #include <cstring>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 
 #include "game_state.h"
 #include "guest_call.h"
@@ -106,6 +108,43 @@ uint32_t freeSpawnSlot(const uint8_t *rdram)
     return 0;
 }
 
+// The room's own spawn record of an entry and serial (its spawn list, as the
+// area read it in), or 0. A copy is made from it, as the game makes the
+// enemy: its arguments (UNIT_DATA_OBJ +0x1C on) choose what it is. Made
+// from a blank record, an enemy that needs them (N_EX610_BTL2 of
+// TT36_WORK_FIGURE, argument 1 = 2) was made without a battle sheet: never
+// followed, never killed, the host's wave missing here.
+uint32_t roomSpawnRecord(const uint8_t *rdram, uint32_t entry, int16_t serial)
+{
+    static std::map<uint32_t, uint32_t> found; // (entry << 16 | serial) -> record
+    const uint32_t key = entry << 16 | uint16_t(serial);
+    const auto matches = [&](uint32_t a) {
+        uint32_t v;
+        int16_t s;
+        std::memcpy(&v, rdram + a, 4);
+        std::memcpy(&s, rdram + a + 0x1E, 2);
+        if (v != entry || s != serial)
+            return false;
+        if (a >= kSpawnPool && a < kSpawnPool + kSpawnPoolSlots * kSpawnSlotSize)
+            return false; // (ours: a copy's)
+        float f[6];
+        std::memcpy(f, rdram + a + 4, sizeof(f));
+        for (float x : f)
+            if (!std::isfinite(x) || std::fabs(x) > 1e6f)
+                return false;
+        return true;
+    };
+    if (auto it = found.find(key); it != found.end() && matches(it->second))
+        return it->second;
+    for (uint32_t a = 0x00100000u; a + 0x40 <= 0x01E00000u; a += 4)
+        if (rdram[a] == (entry & 0xFF) && matches(a))
+        {
+            found[key] = a;
+            return a;
+        }
+    return 0;
+}
+
 // Our own player's data a spawned object can write (kept and put back): the
 // party slot's form part (Slot1 +0x188-0x268: form, its level, abilities;
 // not HP or MP) and the player's motion set names (0x01C60880-0x01C608C0).
@@ -180,6 +219,20 @@ void postSpawn(uint32_t entry, const float pos[3], float yaw, std::function<void
             std::memcpy(env.host(st->unit + 0x14), &st->yaw, 4);
             if (serial >= 0)
             {
+                // The room's own record of it, when there is one: what it is
+                // made of besides its place (roomSpawnRecord).
+                if (const uint32_t rec = roomSpawnRecord(env.rdram, entry, int16_t(serial)))
+                {
+                    std::memcpy(env.host(st->unit), env.host(rec), 0x40);
+                    std::memcpy(env.host(st->unit + 4), st->pos, 12);
+                    std::memcpy(env.host(st->unit + 0x14), &st->yaw, 4);
+                    static std::set<uint32_t> told;
+                    if (told.insert(entry).second)
+                    {
+                        std::printf("[puppets] %04X is made from the room's spawn record (%08X)\n", entry, rec);
+                        std::fflush(stdout);
+                    }
+                }
                 // The spawn entry's serial (UNIT_DATA_OBJ +0x1E), by which
                 // the room's objects are told apart (enemies.cpp).
                 const int16_t ser = int16_t(serial);

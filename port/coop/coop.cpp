@@ -451,6 +451,12 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
             g_strayCutSince = now();
         if (formTask || infos || now() - formSeen < 6.0)
             g_strayCutSince = now();
+        // Nor a menu the scene put up ("Party Members have been switched"):
+        // it is the player's to close; skipped under it, it took no buttons.
+        uint32_t menu = 0;
+        std::memcpy(&menu, ram + kMenuRunning, 4);
+        if (menu)
+            g_strayCutSince = now();
         // The host's own scene (same room and event), just behind them: it
         // plays on (a mission's opening starts the mission at its end; a
         // skip left the client without one). Only when it runs on long
@@ -1422,6 +1428,18 @@ void tick(const uint8_t *rdram, uint64_t guestFrame)
             g_haveIntent = false; // (stale: the fallback below follows where the host is)
         else if (me.now.world == g_intent.world && me.now.room == g_intent.room && !jumping)
             g_haveIntent = false;
+        else if (rd32(rdram, kMenuRunning) != 0 && !kh2gummi::inGummi(rdram) && me.control == 3)
+        {
+            // A menu a scene put up (the story's "Party Members have been
+            // switched", a forced one): not ours to close (closed under the
+            // scene it lost its cursor and took no buttons). The player
+            // closes it, as the host did, and then we go.
+            if (now() - g_menuClosedAt > 5.0)
+            {
+                g_menuClosedAt = now();
+                addLog("the host is moving on: after the scene's menu");
+            }
+        }
         else if (rd32(rdram, kMenuRunning) != 0 && !kh2gummi::inGummi(rdram))
         {
             // Under the pause menu (MENU::isRunning, 0x0032BA28): it is closed
@@ -1742,10 +1760,10 @@ void warpToHost()
     warpLocked(host.world, host.room, host.door);
 }
 
-void requestWarp(uint8_t world, uint8_t room, uint16_t door, uint16_t battle, uint16_t event)
+void requestWarp(uint8_t world, uint8_t room, uint16_t door, uint16_t battle, uint16_t event, uint16_t map)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    warpLocked(world, room, door, battle, event);
+    warpLocked(world, room, door, battle, event, map);
 }
 
 void setFollowHost(bool on) { g_opt.followHost = on; }

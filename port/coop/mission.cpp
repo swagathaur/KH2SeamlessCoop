@@ -285,6 +285,8 @@ bool onComplete(uint32_t arg, bool viaTrap)
     return true;
 }
 
+uint32_t currentId() { return g_currentId.load(); }
+
 bool takeCompleted(uint32_t &id, uint32_t &arg)
 {
     if (!g_completedOut.exchange(false))

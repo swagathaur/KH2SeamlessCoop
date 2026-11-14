@@ -462,6 +462,7 @@ void cacheFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 constexpr uint32_t kMissionComplete = 0x0019FFE8;
 PS2Runtime::RecompiledFunction g_missionComplete = nullptr;
 std::atomic<int64_t> g_missionEndAt{-100000};
+bool g_missionEnding = false; // (update(): from a completion until its ending is over)
 void missionCompleteHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (ctx->pc == kMissionComplete)
@@ -1319,6 +1320,49 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             std::fflush(stdout);
         }
     }
+    // A mission's ending (from its completion, missionCompleteHook): avatars
+    // stay away until it is over: once our player has its control back after
+    // the ending's own scene (for a moment, as the ending can run straight
+    // into the next scene), or the room is left, or another mission starts.
+    // (It was a fixed 30 s: a mission that followed soon after, a wave fight
+    // or a boss after its intro, had no avatars for the rest of that time.)
+    {
+        static int64_t endAt = -100000;
+        static bool sawScene = false;
+        static double controlSince = -1;
+        static uint32_t missionAtEnd = 0;
+        const int64_t e = g_missionEndAt.load();
+        if (e != endAt)
+        {
+            endAt = e;
+            g_missionEnding = true;
+            sawScene = false;
+            controlSince = -1;
+            missionAtEnd = kh2mission::currentId();
+        }
+        if (g_missionEnding)
+        {
+            if (st.control == 3)
+                sawScene = true;
+            const bool control = st.player.valid && st.control == 0 && !jumping;
+            controlSince = control ? (controlSince < 0 ? t : controlSince) : -1.0;
+            const char *why = nullptr;
+            if (jumping)
+                why = "the room is left";
+            else if (kh2mission::currentId() != missionAtEnd)
+                why = "another mission started";
+            else if (sawScene && controlSince >= 0 && t - controlSince > 1.0)
+                why = "control is back";
+            else if (nowMs() - endAt > 60000)
+                why = "a minute passed";
+            if (why)
+            {
+                g_missionEnding = false;
+                std::printf("[avatars] the mission's ending is over (%s): avatars back\n", why);
+                std::fflush(stdout);
+            }
+        }
+    }
     uint32_t sheetIndex = 0;
     for (const kh2partner::Remote &r : remotes)
     {
@@ -1331,7 +1375,7 @@ std::vector<kh2partner::Heal> update(uint8_t *rdram, const std::vector<kh2partne
             s.sheet = k < 2 ? kh2state::addr::Slot1 - (k + 1) * kh2state::addr::SlotStride
                             : kSheetBase + (k % kMaxAvatars) * kSheetSize;
         }
-        const bool missionEnding = nowMs() - g_missionEndAt.load() < 30000;
+        const bool missionEnding = g_missionEnding;
         const bool here = r.present && r.world == st.now.world && r.room == st.now.room && !missionEnding;
         if (s.object && !live(rdram, s.object))
         {

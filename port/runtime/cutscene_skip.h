@@ -26,6 +26,9 @@ bool localSkip();
 bool takeSkipVote();
 // Skip the in-engine cutscene now (no-op outside one).
 bool skipCutscene(uint8_t *rdram);
+// The playing cutscene is being skipped (sa::EVENT::isSkipping): by our skip
+// or the game's own pause menu.
+bool skipping(const uint8_t *rdram);
 // Once per host loop iteration. skipHeld: how long the skip button has been
 // held (seconds; 0 if not).
 void tick(uint8_t *rdram, double skipHeld);

@@ -103,6 +103,8 @@ bool skipCutscene(uint8_t *rdram)
     return true;
 }
 
+bool skipping(const uint8_t *rdram) { return rdram[kEventSkipping] != 0; }
+
 void tick(uint8_t *rdram, double skipHeld)
 {
     const double t = now();

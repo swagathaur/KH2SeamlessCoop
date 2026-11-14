@@ -34,6 +34,8 @@ void onHostState(uint8_t *rdram, const std::vector<uint8_t> &data, uint8_t world
 void onHostFailed(uint8_t *rdram);
 // trap_mission_complete (avatars.cpp hooks it): false = leave it out.
 bool onComplete(uint32_t arg, bool viaTrap);
+// The mission started last (~0: none yet).
+uint32_t currentId();
 // Host: its mission was completed since the last call (its id, the argument).
 bool takeCompleted(uint32_t &id, uint32_t &arg);
 // Client: the host's was; ours (the same mission) completes with it.

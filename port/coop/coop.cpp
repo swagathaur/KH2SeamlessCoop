@@ -109,6 +109,14 @@ uint32_t g_sceneStarted = 0xFFFFFFFFu; // client: the host's cutscene we started
 double g_lastSceneWarp = -100.0;
 double g_strayCutSince = -1.0;         // client: in a cutscene the host is not in, since
 double g_lastClientSkip = -100.0;
+struct SkipIntent // client: the host skipped this scene
+{
+    bool valid = false;
+    uint8_t world = 0, room = 0;
+    uint16_t event = 0;
+    double at = 0;
+};
+SkipIntent g_skipIntent;
 bool g_backToHost = false;              // client: ran into a story scene of its own elsewhere; go back
 double g_battleDiffSince = -1.0;      // client: the host's battle differs from ours, since
 // Reloading the room so partners show their own look (partners.h): wanted,
@@ -291,6 +299,25 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
                 g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::StoryChunk), p);
             g_storyFull = false;
         }
+        // Our skip of a cutscene (ours or the game's pause menu Skip Scene):
+        // its intent goes out at once, and every game skips the same scene,
+        // as doors are followed (not only once our skip has played out).
+        {
+            static bool wasSkipping = false;
+            const bool skipping = kh2skip::inCutscene(ram) && kh2skip::skipping(ram);
+            if (skipping && !wasSkipping)
+            {
+                std::vector<uint8_t> d(4);
+                d[0] = me.now.world;
+                d[1] = me.now.room;
+                std::memcpy(d.data() + 2, &me.now.event, 2);
+                g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SkipIntent), d);
+                std::printf("[coop] we skip the cutscene (%02X-%02X event %u): everyone does\n", me.now.world,
+                            me.now.room, me.now.event);
+                std::fflush(stdout);
+            }
+            wasSkipping = skipping;
+        }
         // Where we are and whether a cutscene is playing, when it changes.
         uint8_t sc[kSceneSize];
         encodeScene(me, sc);
@@ -333,6 +360,25 @@ void storyTick(uint8_t *ram, uint64_t guestFrame)
     kh2input::setBlockedButtons(cut ? 0x0008u : 0u);
     if (kh2skip::takeSkipVote())
         g_session->sendEvent(static_cast<uint16_t>(kh2net::GameEventType::SkipVote), {});
+    // The host's skip: the same scene skipped here as soon as it plays (now,
+    // or when we get to it: we may be a moment behind).
+    if (g_skipIntent.valid)
+    {
+        if (now() - g_skipIntent.at > 20.0)
+            g_skipIntent.valid = false;
+        else if (cut && me.now.world == g_skipIntent.world && me.now.room == g_skipIntent.room &&
+                 me.now.event == g_skipIntent.event)
+        {
+            if (kh2skip::skipping(ram))
+                g_skipIntent.valid = false; // (being skipped already)
+            else if (kh2skip::skipCutscene(ram))
+            {
+                g_skipIntent.valid = false;
+                g_lastClientSkip = now();
+                addLog("skipped with the host");
+            }
+        }
+    }
     if (!g_haveHostScene)
         return;
     const uint8_t hw = g_hostScene[0], hr = g_hostScene[1];
@@ -561,6 +607,15 @@ void makeSession()
         if (type == static_cast<uint16_t>(kh2net::GameEventType::EnemyScaling) && !g_session->isHost())
         {
             kh2scale::onHostSettings(data);
+            return;
+        }
+        if (type == static_cast<uint16_t>(kh2net::GameEventType::SkipIntent) && !g_session->isHost() && data.size() == 4)
+        {
+            g_skipIntent.world = data[0];
+            g_skipIntent.room = data[1];
+            std::memcpy(&g_skipIntent.event, data.data() + 2, 2);
+            g_skipIntent.at = now();
+            g_skipIntent.valid = true;
             return;
         }
         if (type == static_cast<uint16_t>(kh2net::GameEventType::SkipVote) && g_session->isHost())

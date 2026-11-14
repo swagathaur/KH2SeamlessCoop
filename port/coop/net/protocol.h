@@ -69,6 +69,7 @@ enum class GameEventType : uint16_t
     EnemyScaling = 8, // host -> clients: enemy HP and damage per extra player (f32, f32), players (i32)
     MissionState = 10,  // host -> clients: its mission's timer, counts, gauges (mission.h)
     MissionFailed = 11, // host -> clients: its mission failed (ours fails with it)
+    SkipIntent = 22,    // host -> clients: the host skips the cutscene playing: world u8, room u8, event u16 (all skip it)
     MissionComplete = 21, // host -> clients: its mission was completed: mission id u32, the complete's argument u32 (mission.h)
     SpellCast = 12,
     SpawnSeed = 14,     // host -> clients: world u8, room u8, seed u32: this room's random spawn picks (enemies.h)
